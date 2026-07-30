@@ -1,0 +1,5 @@
+id: lesson-critique
+version: 1.1.0
+description: 检查教案完整性、引用与可评价性
+requiredTools: [read_document_outline, read_document]
+requiredMcp: []

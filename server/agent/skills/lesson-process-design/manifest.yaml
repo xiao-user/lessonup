@@ -1,0 +1,5 @@
+id: lesson-process-design
+version: 1.1.0
+description: 设计课堂活动、问题链、板书与作业
+requiredTools: [read_document, propose_document_patch]
+requiredMcp: []

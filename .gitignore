@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.npm-cache/
+.playwright-cli/
+output/
+supabase/.branches/
+supabase/.temp/
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example

@@ -1,0 +1,2 @@
+-- Intentionally empty. Local users and lesson data are created through the same Auth and API
+-- flows used by the application so local verification exercises the real isolation boundaries.
