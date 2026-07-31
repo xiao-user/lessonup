@@ -2,6 +2,7 @@ import { tool } from "@openai/agents";
 import { z } from "zod";
 import { documentPatchSchema, documentPatchToolSchema, lessonFieldSchema, type LessonAgentContext } from "../domain.js";
 import type { LessonRepository } from "../repository.js";
+import { lessonFieldLabels } from "./tool-presentation.js";
 
 const requireContext = (context?: { context: unknown }) => {
   if (!context?.context) throw new Error("agent_context_missing");
@@ -36,7 +37,11 @@ export function createDocumentTools(repository: LessonRepository, allowWrite: bo
       const context = requireContext(runContext);
       const file = await repository.getLessonFile(context.userId, context.lessonFileId);
       if (!file) throw new Error("lesson_file_not_found");
-      return JSON.stringify({ field, value: file.document[field], documentVersion: file.documentVersion });
+      return JSON.stringify({
+        section: lessonFieldLabels[field],
+        content: file.document[field],
+        documentVersion: file.documentVersion,
+      });
     },
   });
 
@@ -52,7 +57,10 @@ export function createDocumentTools(repository: LessonRepository, allowWrite: bo
       if (!file) throw new Error("lesson_file_not_found");
       const requestedFields = fields ? [...new Set(fields)] : Object.keys(file.document) as Array<keyof typeof file.document>;
       return JSON.stringify({
-        sections: Object.fromEntries(requestedFields.map((field) => [field, file.document[field]])),
+        sections: Object.fromEntries(requestedFields.map((field) => [
+          lessonFieldLabels[field],
+          file.document[field],
+        ])),
         documentVersion: file.documentVersion,
       });
     },
@@ -67,7 +75,9 @@ export function createDocumentTools(repository: LessonRepository, allowWrite: bo
       const file = await repository.getLessonFile(context.userId, context.lessonFileId);
       if (!file) throw new Error("lesson_file_not_found");
       return JSON.stringify(Object.entries(file.document).map(([field, value]) => ({
-        field, hasContent: Boolean(value), characters: value.length,
+        section: lessonFieldLabels[field as keyof typeof lessonFieldLabels],
+        hasContent: Boolean(value),
+        characters: value.length,
       })));
     },
   });

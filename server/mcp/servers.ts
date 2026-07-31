@@ -28,6 +28,16 @@ function createKnowledgeServer(repository: LessonRepository, scope: McpScope) {
   }, async ({ chunkId }) => text(await repository.getKnowledgePassage(
     scope.userId, scope.allowedKnowledgeScopes, chunkId,
   )));
+  server.registerTool("read_attached_source", {
+    title: "读取本轮附带资料",
+    description: "按本轮消息提供的来源 ID 直接读取该资料的正文片段；用于优先处理教师刚刚附带的文件",
+    inputSchema: {
+      sourceId: z.string().uuid(),
+      limit: z.number().int().min(1).max(12).default(8),
+    },
+  }, async ({ sourceId, limit }) => text(await repository.getKnowledgeSourcePassages(
+    scope.userId, scope.allowedKnowledgeScopes, sourceId, limit,
+  )));
   server.registerTool("get_source", {
     title: "读取来源信息",
     description: "读取当前项目中某个来源的元数据与引用信息",

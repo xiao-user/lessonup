@@ -42,6 +42,14 @@ export class SkillRegistry {
     });
   }
 
+  resolveVersions(versions: Record<string, string>) {
+    return Object.entries(versions).map(([id, version]) => {
+      const skill = this.skills.get(`${id}@${version}`);
+      if (!skill) throw new Error(`skill_version_unavailable:${id}@${version}`);
+      return skill;
+    });
+  }
+
   get versionMap() {
     return Object.fromEntries([...this.skills.values()].map((skill) => [skill.id, skill.version]));
   }

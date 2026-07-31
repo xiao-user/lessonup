@@ -13,6 +13,7 @@ type StartInput = {
   branchId: string;
   message: string;
   activeSectionId: string;
+  attachmentIds: string[];
 };
 
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -65,10 +66,19 @@ export class DeterministicAgentHarness {
       status: "running",
       title: thread.title === "新会话" ? input.message.slice(0, 14) : undefined,
     });
-    await this.repository.appendMessage({
+    const userMessage = await this.repository.appendMessage({
       ownerId: input.userId, threadId: thread.id, branchId: branch.id,
       role: "user", content: input.message, status: "completed",
     });
+    const attachments = await this.repository.attachKnowledgeSources(
+      input.userId,
+      thread.lessonFileId,
+      userMessage.id,
+      input.attachmentIds,
+    );
+    if (attachments.length) {
+      await this.repository.updateMessage(input.userId, userMessage.id, { sources: attachments });
+    }
     const assistant = await this.repository.appendMessage({
       ownerId: input.userId, threadId: thread.id, branchId: branch.id,
       role: "assistant", content: "", status: "streaming",
@@ -78,7 +88,7 @@ export class DeterministicAgentHarness {
     try {
       if (input.message.includes("制造失败") && !this.failedMessages.has(`${thread.id}:${input.message}`)) {
         this.failedMessages.add(`${thread.id}:${input.message}`);
-        await this.fail(input.userId, runId, thread.id, assistant.id, emit, "deterministic_agent_failure");
+        await this.fail(input.userId, runId, thread.id, assistant.id, emit, "agent_run_failed");
         return;
       }
 
@@ -143,45 +153,117 @@ export class DeterministicAgentHarness {
 
   async resumeApproval(args: {
     userId: string;
+    runId: string;
     approvalId: string;
     approved: boolean;
     idempotencyKey: string;
     emit: Emit;
   }) {
-    const approval = await this.repository.getApproval(args.userId, args.approvalId);
+    let approval = await this.repository.getApproval(args.userId, args.approvalId);
     if (!approval) throw new Error("approval_not_found");
-    if (args.approved) {
-      await this.repository.applyApprovedPatch({
+    if (approval.runId !== args.runId) throw new Error("run_scope_invalid");
+    const desiredState = args.approved ? "approved" : "rejected";
+    if (approval.state !== "pending" && approval.state !== desiredState) {
+      throw new Error("approval_already_resolved");
+    }
+    const wasPending = approval.state === "pending";
+    const leaseToken = `e2e:${args.approvalId}:${args.idempotencyKey}`;
+    let continuationClaimed = false;
+    try {
+      if (approval.state === "pending") {
+        const decision = await this.repository.decideApproval({
+          ownerId: args.userId,
+          approvalId: approval.id,
+          approved: args.approved,
+          encryptedRunState: "deterministic-e2e-after-decision",
+        });
+        approval = decision.approval;
+      }
+      approval = await this.repository.claimApprovalContinuation({
         ownerId: args.userId,
         approvalId: approval.id,
-        idempotencyKey: `approval:${approval.id}`,
+        leaseToken,
+        leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
       });
-    } else {
-      await this.repository.resolveApproval(args.userId, approval.id, "rejected");
+      if (approval.continuationStatus === "completed") {
+        await args.emit({
+          type: "run.started", runId: approval.runId,
+          threadId: approval.threadId, branchId: approval.branchId,
+        });
+        await args.emit({ type: "run.completed", runId: approval.runId });
+        return args.approved
+          ? this.repository.getLessonFile(args.userId, approval.patch.fileId)
+          : null;
+      }
+      continuationClaimed = true;
+      await this.repository.updateRun(args.userId, approval.runId, { status: "running" });
+      await this.repository.updateThread(args.userId, approval.threadId, { status: "running" });
+      const assistant = await this.repository.getMessage(
+        args.userId,
+        approval.continuationMessageId!,
+      ) ?? await this.repository.appendMessage({
+        id: approval.continuationMessageId,
+        ownerId: args.userId,
+        threadId: approval.threadId,
+        branchId: approval.branchId,
+        role: "assistant",
+        content: "",
+        status: "streaming",
+      });
+      await this.repository.updateMessage(args.userId, assistant.id, {
+        content: "",
+        status: "streaming",
+        sources: [],
+      });
+      await args.emit({
+        type: "run.started", runId: approval.runId,
+        threadId: approval.threadId, branchId: approval.branchId,
+      });
+      if (
+        approval.patch.summary.includes("续跑恢复")
+        && approval.continuationAttemptCount === 1
+      ) {
+        throw new Error("agent_run_failed");
+      }
+      const content = args.approved ? "修改已按确认写入教案。" : "已保留教案原文。";
+      const message = await this.repository.updateMessage(args.userId, assistant.id, {
+        content, status: "completed",
+      });
+      await this.repository.updateRun(args.userId, approval.runId, {
+        status: "completed", completedAt: new Date().toISOString(),
+      });
+      await this.repository.updateThread(args.userId, approval.threadId, { status: "idle" });
+      await this.repository.finishApprovalContinuation({
+        ownerId: args.userId,
+        approvalId: approval.id,
+        leaseToken,
+        status: "completed",
+      });
+      await args.emit({ type: "message.completed", runId: approval.runId, message });
+      await args.emit({ type: "run.completed", runId: approval.runId });
+      return args.approved
+        ? this.repository.getLessonFile(args.userId, approval.patch.fileId)
+        : null;
+    } catch (error) {
+      const current = await this.repository.getApproval(args.userId, approval.id);
+      if (wasPending && current?.state === "pending") {
+        await this.repository.resolveApproval(args.userId, approval.id, "expired");
+      }
+      if (continuationClaimed) {
+        await this.repository.finishApprovalContinuation({
+          ownerId: args.userId,
+          approvalId: approval.id,
+          leaseToken,
+          status: "ready",
+          error: "agent_run_failed",
+        }).catch(() => undefined);
+      }
+      await this.repository.updateRun(args.userId, approval.runId, {
+        status: "failed", completedAt: new Date().toISOString(),
+      });
+      await this.repository.updateThread(args.userId, approval.threadId, { status: "failed" });
+      throw error;
     }
-    await this.repository.updateRun(args.userId, approval.runId, { status: "running" });
-    await this.repository.updateThread(args.userId, approval.threadId, { status: "running" });
-    const assistant = await this.repository.appendMessage({
-      ownerId: args.userId, threadId: approval.threadId, branchId: approval.branchId,
-      role: "assistant", content: "", status: "streaming",
-    });
-    await args.emit({
-      type: "run.started", runId: approval.runId,
-      threadId: approval.threadId, branchId: approval.branchId,
-    });
-    const content = args.approved ? "修改已按确认写入教案。" : "已保留教案原文。";
-    const message = await this.repository.updateMessage(args.userId, assistant.id, {
-      content, status: "completed",
-    });
-    await this.repository.updateRun(args.userId, approval.runId, {
-      status: "completed", completedAt: new Date().toISOString(),
-    });
-    await this.repository.updateThread(args.userId, approval.threadId, { status: "idle" });
-    await args.emit({ type: "message.completed", runId: approval.runId, message });
-    await args.emit({ type: "run.completed", runId: approval.runId });
-    return args.approved
-      ? this.repository.getLessonFile(args.userId, approval.patch.fileId)
-      : null;
   }
 
   private async createApproval(args: {
@@ -196,7 +278,9 @@ export class DeterministicAgentHarness {
     const patch: DocumentPatch = {
       fileId: args.file.id,
       baseDocumentVersion: args.file.documentVersion,
-      summary: "替换教学目标第一条",
+      summary: args.input.message.includes("续跑恢复")
+        ? "替换教学目标第一条并验证续跑恢复"
+        : "替换教学目标第一条",
       operations: [{
         op: "replace_text",
         field: "objectives",
@@ -212,6 +296,7 @@ export class DeterministicAgentHarness {
       runId: args.runId,
       threadId: args.input.threadId,
       branchId: args.input.branchId,
+      assistantMessageId: args.assistantId,
       state: "pending",
       patch,
       encryptedRunState: "deterministic-e2e-state",
@@ -227,7 +312,13 @@ export class DeterministicAgentHarness {
     await this.repository.updateRun(args.input.userId, args.runId, { status: "awaiting_approval" });
     await this.repository.updateThread(args.input.userId, args.input.threadId, { status: "awaiting_approval" });
     await args.emit({ type: "message.completed", runId: args.runId, message });
-    await args.emit({ type: "approval.required", runId: args.runId, approvalId: approval.id, patch });
+    await args.emit({
+      type: "approval.required",
+      runId: args.runId,
+      approvalId: approval.id,
+      assistantMessageId: args.assistantId,
+      patch,
+    });
   }
 
   private async fail(

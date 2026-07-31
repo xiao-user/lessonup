@@ -23,9 +23,13 @@ const envSchema = z.object({
   BGE_M3_API_KEY: emptyAsUndefined(z.string().min(1)),
   BGE_M3_MODEL: z.string().default("BAAI/bge-m3"),
   KNOWLEDGE_WORKER_INTERVAL_MS: z.coerce.number().int().min(500).default(2_000),
+  MAINTENANCE_INTERVAL_MS: z.coerce.number().int().min(60_000).default(3_600_000),
   MCP_TOKEN_SECRET: emptyAsUndefined(z.string().min(32)),
-  LESSONUP_DEV_AUTH: z.enum(["0", "1"]).default("1"),
+  LESSONUP_DEV_AUTH: z.enum(["0", "1"]).default("0"),
 }).superRefine((env, context) => {
+  if (env.LESSONUP_DEV_AUTH === "1" && env.NODE_ENV !== "test") {
+    context.addIssue({ code: "custom", path: ["LESSONUP_DEV_AUTH"], message: "dev_auth_is_test_only" });
+  }
   if (env.NODE_ENV !== "production") return;
   if (env.LESSONUP_DEV_AUTH !== "0") {
     context.addIssue({ code: "custom", path: ["LESSONUP_DEV_AUTH"], message: "production_requires_dev_auth_disabled" });

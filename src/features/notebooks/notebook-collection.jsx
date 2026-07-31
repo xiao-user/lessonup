@@ -1,7 +1,7 @@
 import { useRef } from "react";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
-import { ArrowLeft, FilePlus2, Files, FolderPlus, Search } from "lucide-react";
+import { ArrowLeft, FilePlus2, Files, FolderPlus, LoaderCircle, LogOut, Search } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -21,12 +21,14 @@ const readDesignToken = (name) =>
 
 export function NotebookCollection({
   notebooks,
+  loading,
   selectedId,
   activeFileId,
   onSelect,
   onOpenFile,
   onCreateNotebook,
   onCreateFile,
+  onSignOut,
 }) {
   const collectionRef = useRef(null);
   const trackRef = useRef(null);
@@ -348,6 +350,9 @@ export function NotebookCollection({
           <Button type="button" onClick={onCreateFile}>
             <FilePlus2 data-icon="inline-start" /> 新增备课文件
           </Button>
+          <Button variant="ghost" size="icon" type="button" onClick={onSignOut} aria-label="退出登录">
+            <LogOut />
+          </Button>
         </div>
       </div>
 
@@ -384,15 +389,15 @@ export function NotebookCollection({
       ) : (
         <Empty className="collection-empty">
           <EmptyHeader>
-            <EmptyMedia variant="icon"><Search /></EmptyMedia>
-            <EmptyTitle>没有找到相关备课本</EmptyTitle>
-            <EmptyDescription>换一个班级、年度或科目试试。</EmptyDescription>
+            <EmptyMedia variant="icon">{loading ? <LoaderCircle className="animate-spin" /> : <Search />}</EmptyMedia>
+            <EmptyTitle>{loading ? "正在加载备课数据" : "还没有备课本"}</EmptyTitle>
+            <EmptyDescription>{loading ? "正在从服务器读取你的工作区。" : "创建第一个备课本开始准备课程。"}</EmptyDescription>
           </EmptyHeader>
-          <EmptyContent>
+          {!loading && <EmptyContent>
             <Button type="button" onClick={onCreateNotebook}>
               <FolderPlus data-icon="inline-start" /> 新增备课本
             </Button>
-          </EmptyContent>
+          </EmptyContent>}
         </Empty>
       )}
     </div>

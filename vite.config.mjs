@@ -5,7 +5,12 @@ import { fileURLToPath, URL } from "node:url";
 
 export default defineConfig({
   optimizeDeps: {
-    include: ["react", "react-dom/client"],
+    include: [
+      "react",
+      "react-dom/client",
+      "react-markdown",
+      "remark-gfm",
+    ],
   },
   server: {
     host: "0.0.0.0",

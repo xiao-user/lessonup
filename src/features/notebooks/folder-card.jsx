@@ -23,10 +23,13 @@ export function FolderCard({ notebook, isFocused, activeFileId, onOpen, onOpenFi
               onClick={(event) => {
                 event.stopPropagation();
                 if (!isFocused || !onOpenFile) return;
-                const rect = event.currentTarget.getBoundingClientRect();
+                const sourceElement = event.currentTarget;
+                const rect = sourceElement.getBoundingClientRect();
+                sourceElement.blur();
                 onOpenFile({
                   notebookId: notebook.id,
                   fileId: file.id,
+                  sourceElement,
                   originRect: {
                     top: rect.top,
                     left: rect.left,

@@ -28,6 +28,7 @@ const fallbackLabels: Record<string, string> = {
   get_document_version: "核对文档版本",
   propose_document_patch: "准备修改建议",
   search_knowledge: "检索备课资料",
+  read_attached_source: "读取附带资料",
   get_passage: "读取资料片段",
   get_source: "核对资料来源",
   list_project_sources: "读取项目资料",
@@ -85,6 +86,10 @@ export function safeToolPresentation(
       return { label: `读取 ${fields.length} 个教案栏目`, groupKey: "document-read" };
     }
     return { label: fallbackLabels.read_document, groupKey: "document-read" };
+  }
+
+  if (name === "read_attached_source") {
+    return { label: fallbackLabels.read_attached_source, groupKey: "knowledge-read" };
   }
 
   return { label: fallbackLabels[name] ?? "调用备课能力" };

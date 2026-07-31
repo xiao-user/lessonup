@@ -10,6 +10,7 @@ import type {
   LessonFileRecord,
   NotebookRecord,
   SourceRef,
+  NormalizedAgentEvent,
 } from "../domain.js";
 import { lessonPlanSchema } from "../domain.js";
 import type { CreateThreadInput, ImportedNotebook, LessonRepository } from "../repository.js";
@@ -27,6 +28,10 @@ const mapThread = (row: Record<string, any>): AgentThreadRecord => ({
   lessonFileId: row.lesson_file_id,
   title: row.title,
   status: row.status,
+  starterSuggestions: row.starter_suggestions ?? [],
+  starterSuggestionsDocumentVersion: row.starter_suggestions_document_version == null
+    ? undefined
+    : Number(row.starter_suggestions_document_version),
   archivedAt: row.archived_at ?? undefined,
   deletedAt: row.deleted_at ?? undefined,
   createdAt: row.created_at,
@@ -43,7 +48,9 @@ const mapBranch = (row: Record<string, any>): AgentBranchRecord => ({
 const mapMessage = (row: Record<string, any>): AgentMessageRecord => ({
   id: row.id, ownerId: row.owner_id, threadId: row.thread_id, branchId: row.branch_id,
   role: row.role, content: row.content, status: row.status,
-  sources: row.sources ?? undefined, createdAt: row.created_at,
+  sources: row.sources ?? undefined,
+  sessionCursor: row.session_cursor == null ? undefined : Number(row.session_cursor),
+  createdAt: row.created_at,
 });
 
 const mapRun = (row: Record<string, any>): AgentRunRecord => ({
@@ -56,11 +63,44 @@ const mapRun = (row: Record<string, any>): AgentRunRecord => ({
   error: row.error ?? undefined, startedAt: row.started_at, completedAt: row.completed_at ?? undefined,
 });
 
+const mapApproval = (row: Record<string, any>): AgentApprovalRecord => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  runId: row.run_id,
+  threadId: row.thread_id,
+  branchId: row.branch_id,
+  assistantMessageId: row.assistant_message_id ?? undefined,
+  state: row.state,
+  patch: row.patch,
+  encryptedRunState: row.encrypted_run_state,
+  agentDefinitionVersion: row.agent_definition_version,
+  documentVersion: row.document_version,
+  continuationStatus: row.continuation_status ?? undefined,
+  continuationLeaseToken: row.continuation_lease_token ?? undefined,
+  continuationLeaseExpiresAt: row.continuation_lease_expires_at ?? undefined,
+  continuationAttemptCount: row.continuation_attempt_count ?? undefined,
+  continuationError: row.continuation_error ?? undefined,
+  continuationMessageId: row.continuation_message_id ?? undefined,
+  expiresAt: row.expires_at,
+  createdAt: row.created_at,
+});
+
 const mapFile = (row: Record<string, any>): LessonFileRecord => ({
   id: row.id, ownerId: row.owner_id, notebookId: row.notebook_id,
   title: row.title, type: row.type, image: row.image ?? undefined,
   document: lessonPlanSchema.parse(row.document), documentVersion: row.document_version,
   pageCount: row.page_count, updatedAt: row.updated_at,
+});
+
+const mapNotebook = (row: Record<string, any>): NotebookRecord => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  title: row.title,
+  className: row.class_name,
+  year: row.year,
+  subject: row.subject,
+  tone: row.tone ?? "teal",
+  updatedAt: row.updated_at,
 });
 
 export class SupabaseLessonRepository implements LessonRepository {
@@ -80,15 +120,118 @@ export class SupabaseLessonRepository implements LessonRepository {
     return unwrap(result as any) as { imported: number };
   }
 
+  async listNotebooks(ownerId: string) {
+    const [notebooks, files] = await Promise.all([
+      this.client.from("notebooks").select("*")
+        .eq("owner_id", ownerId).order("updated_at", { ascending: false }),
+      this.client.from("lesson_files")
+        .select("id,owner_id,notebook_id,title,type,image,document_version,page_count,updated_at")
+        .eq("owner_id", ownerId).order("updated_at", { ascending: false }),
+    ]);
+    if (notebooks.error) throw new Error(notebooks.error.message);
+    if (files.error) throw new Error(files.error.message);
+    const mappedFiles = (files.data ?? []).map((row) => ({
+      id: row.id,
+      ownerId: row.owner_id,
+      notebookId: row.notebook_id,
+      title: row.title,
+      type: row.type,
+      image: row.image ?? undefined,
+      documentVersion: row.document_version,
+      pageCount: row.page_count,
+      updatedAt: row.updated_at,
+    }));
+    return (notebooks.data ?? []).map((row) => {
+      const notebook = mapNotebook(row);
+      return {
+        ...notebook,
+        files: mappedFiles.filter((file) => file.notebookId === notebook.id),
+      };
+    });
+  }
+
+  async createNotebook(ownerId: string, input: Parameters<LessonRepository["createNotebook"]>[1]) {
+    const result = await this.client.from("notebooks").insert({
+      owner_id: ownerId,
+      id: crypto.randomUUID(),
+      title: input.title,
+      class_name: input.className,
+      year: input.year,
+      subject: input.subject,
+      tone: input.tone,
+    }).select("*").single();
+    return mapNotebook(unwrap(result as any));
+  }
+
+  async updateNotebook(
+    ownerId: string,
+    notebookId: string,
+    patch: Parameters<LessonRepository["updateNotebook"]>[2],
+  ) {
+    const values: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (patch.title !== undefined) values.title = patch.title;
+    if (patch.className !== undefined) values.class_name = patch.className;
+    if (patch.year !== undefined) values.year = patch.year;
+    if (patch.subject !== undefined) values.subject = patch.subject;
+    if (patch.tone !== undefined) values.tone = patch.tone;
+    const result = await this.client.from("notebooks").update(values)
+      .eq("owner_id", ownerId).eq("id", notebookId).select("*").maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (!result.data) throw new Error("notebook_not_found");
+    return mapNotebook(result.data);
+  }
+
+  async deleteNotebook(ownerId: string, notebookId: string) {
+    const result = await this.client.from("notebooks").delete()
+      .eq("owner_id", ownerId).eq("id", notebookId).select("id").maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (!result.data) throw new Error("notebook_not_found");
+  }
+
   async getNotebook(ownerId: string, notebookId: string) {
     const result = await this.client.from("notebooks").select("*")
       .eq("owner_id", ownerId).eq("id", notebookId).maybeSingle();
     if (result.error) throw new Error(result.error.message);
     if (!result.data) return null;
-    return {
-      id: result.data.id, ownerId: result.data.owner_id, title: result.data.title,
-      className: result.data.class_name, year: result.data.year, subject: result.data.subject,
-    } as NotebookRecord;
+    return mapNotebook(result.data);
+  }
+
+  async createLessonFile(ownerId: string, input: Parameters<LessonRepository["createLessonFile"]>[1]) {
+    const result = await this.client.rpc("create_lesson_file", {
+      p_owner_id: ownerId,
+      p_file_id: crypto.randomUUID(),
+      p_notebook_id: input.notebookId,
+      p_title: input.title,
+      p_type: input.type,
+      p_image: input.image ?? null,
+      p_document: input.document,
+      p_page_count: input.pageCount,
+      p_idempotency_key: `create:${crypto.randomUUID()}`,
+    });
+    return mapFile(unwrap(result as any));
+  }
+
+  async updateLessonFile(
+    ownerId: string,
+    fileId: string,
+    patch: Parameters<LessonRepository["updateLessonFile"]>[2],
+  ) {
+    const values: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (patch.title !== undefined) values.title = patch.title;
+    if (patch.type !== undefined) values.type = patch.type;
+    if (patch.image !== undefined) values.image = patch.image;
+    const result = await this.client.from("lesson_files").update(values)
+      .eq("owner_id", ownerId).eq("id", fileId).select("*").maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (!result.data) throw new Error("lesson_file_not_found");
+    return mapFile(result.data);
+  }
+
+  async deleteLessonFile(ownerId: string, fileId: string) {
+    const result = await this.client.from("lesson_files").delete()
+      .eq("owner_id", ownerId).eq("id", fileId).select("id").maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (!result.data) throw new Error("lesson_file_not_found");
   }
 
   async getLessonFile(ownerId: string, fileId: string) {
@@ -151,6 +294,10 @@ export class SupabaseLessonRepository implements LessonRepository {
     if (patch.archivedAt !== undefined) payload.archived_at = patch.archivedAt;
     if (patch.deletedAt !== undefined) payload.deleted_at = patch.deletedAt;
     if (patch.status !== undefined) payload.status = patch.status;
+    if (patch.starterSuggestions !== undefined) payload.starter_suggestions = patch.starterSuggestions;
+    if (patch.starterSuggestionsDocumentVersion !== undefined) {
+      payload.starter_suggestions_document_version = patch.starterSuggestionsDocumentVersion;
+    }
     const result = await this.client.from("agent_threads").update(payload)
       .eq("owner_id", ownerId).eq("id", threadId).select("*").single();
     return mapThread(unwrap(result as any));
@@ -182,16 +329,48 @@ export class SupabaseLessonRepository implements LessonRepository {
   async listMessages(ownerId: string, threadId: string, branchId: string, cursor?: string, limit = 100) {
     let query = this.client.from("agent_messages").select("*")
       .eq("owner_id", ownerId).eq("thread_id", threadId).eq("branch_id", branchId);
-    if (cursor) query = query.lt("created_at", cursor);
-    const result = await query.order("created_at", { ascending: false }).limit(limit);
+    if (cursor) {
+      const separator = cursor.lastIndexOf("|");
+      if (separator > 0) {
+        const createdAt = cursor.slice(0, separator);
+        const id = cursor.slice(separator + 1);
+        query = query.or(`created_at.lt.${createdAt},and(created_at.eq.${createdAt},id.lt.${id})`);
+      } else {
+        query = query.lt("created_at", cursor);
+      }
+    }
+    const result = await query
+      .order("sequence", { ascending: false })
+      .limit(limit);
     if (result.error) throw new Error(result.error.message);
     return (result.data ?? []).reverse().map(mapMessage);
   }
 
+  async getMessage(ownerId: string, messageId: string) {
+    const result = await this.client.from("agent_messages").select("*")
+      .eq("owner_id", ownerId).eq("id", messageId).maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    return result.data ? mapMessage(result.data) : null;
+  }
+
   async appendMessage(input: Omit<AgentMessageRecord, "id" | "createdAt"> & { id?: string }) {
+    if (input.id) {
+      const existing = await this.getMessage(input.ownerId, input.id);
+      if (existing) {
+        if (
+          existing.threadId !== input.threadId
+          || existing.branchId !== input.branchId
+          || existing.role !== input.role
+        ) {
+          throw new Error("idempotency_conflict");
+        }
+        return existing;
+      }
+    }
     const result = await this.client.from("agent_messages").insert({
       id: input.id, owner_id: input.ownerId, thread_id: input.threadId, branch_id: input.branchId,
       role: input.role, content: input.content, status: input.status, sources: input.sources ?? [],
+      session_cursor: input.sessionCursor,
     }).select("*").single();
     return mapMessage(unwrap(result as any));
   }
@@ -199,6 +378,7 @@ export class SupabaseLessonRepository implements LessonRepository {
   async updateMessage(ownerId: string, messageId: string, patch: Partial<AgentMessageRecord>) {
     const result = await this.client.from("agent_messages").update({
       content: patch.content, status: patch.status, sources: patch.sources,
+      session_cursor: patch.sessionCursor,
     }).eq("owner_id", ownerId).eq("id", messageId).select("*").single();
     return mapMessage(unwrap(result as any));
   }
@@ -223,6 +403,14 @@ export class SupabaseLessonRepository implements LessonRepository {
     return result.data ? mapRun(result.data) : null;
   }
 
+  async getLatestRun(ownerId: string, threadId: string, branchId: string) {
+    const result = await this.client.from("agent_runs").select("*")
+      .eq("owner_id", ownerId).eq("thread_id", threadId).eq("branch_id", branchId)
+      .order("started_at", { ascending: false }).limit(1).maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    return result.data ? mapRun(result.data) : null;
+  }
+
   async updateRun(ownerId: string, runId: string, patch: Partial<AgentRunRecord>) {
     const result = await this.client.from("agent_runs").update({
       status: patch.status, capability_plan: patch.capabilityPlan,
@@ -242,10 +430,18 @@ export class SupabaseLessonRepository implements LessonRepository {
     if (result.error) throw new Error(result.error.message);
   }
 
+  async listRunEvents(ownerId: string, runId: string) {
+    const result = await this.client.from("agent_events").select("data")
+      .eq("owner_id", ownerId).eq("run_id", runId).order("id", { ascending: true });
+    if (result.error) throw new Error(result.error.message);
+    return (result.data ?? []).map((row) => row.data as NormalizedAgentEvent);
+  }
+
   async saveApproval(approval: AgentApprovalRecord) {
     const result = await this.client.from("agent_approvals").insert({
       id: approval.id, owner_id: approval.ownerId, run_id: approval.runId,
       thread_id: approval.threadId, branch_id: approval.branchId, state: approval.state,
+      assistant_message_id: approval.assistantMessageId,
       patch: approval.patch, encrypted_run_state: approval.encryptedRunState,
       agent_definition_version: approval.agentDefinitionVersion,
       document_version: approval.documentVersion, expires_at: approval.expiresAt,
@@ -259,28 +455,25 @@ export class SupabaseLessonRepository implements LessonRepository {
       .eq("owner_id", ownerId).eq("id", approvalId).maybeSingle();
     if (result.error) throw new Error(result.error.message);
     const row = result.data;
-    return row ? {
-      id: row.id, ownerId: row.owner_id, runId: row.run_id, threadId: row.thread_id,
-      branchId: row.branch_id, state: row.state, patch: row.patch,
-      encryptedRunState: row.encrypted_run_state,
-      agentDefinitionVersion: row.agent_definition_version,
-      documentVersion: row.document_version, expiresAt: row.expires_at, createdAt: row.created_at,
-    } as AgentApprovalRecord : null;
+    return row ? mapApproval(row) : null;
+  }
+
+  async listApprovals(ownerId: string, threadId: string, branchId: string) {
+    const result = await this.client.from("agent_approvals").select("*")
+      .eq("owner_id", ownerId).eq("thread_id", threadId).eq("branch_id", branchId)
+      .order("created_at", { ascending: true });
+    if (result.error) throw new Error(result.error.message);
+    return (result.data ?? []).map(mapApproval);
   }
 
   async listPendingApprovals(ownerId: string, threadId: string, branchId: string) {
     const result = await this.client.from("agent_approvals").select("*")
       .eq("owner_id", ownerId).eq("thread_id", threadId).eq("branch_id", branchId)
-      .eq("state", "pending").gt("expires_at", new Date().toISOString())
+      .or("state.eq.pending,continuation_status.in.(ready,running)")
+      .gt("expires_at", new Date().toISOString())
       .order("created_at", { ascending: false });
     if (result.error) throw new Error(result.error.message);
-    return (result.data ?? []).map((row) => ({
-      id: row.id, ownerId: row.owner_id, runId: row.run_id, threadId: row.thread_id,
-      branchId: row.branch_id, state: row.state, patch: row.patch,
-      encryptedRunState: row.encrypted_run_state,
-      agentDefinitionVersion: row.agent_definition_version,
-      documentVersion: row.document_version, expiresAt: row.expires_at, createdAt: row.created_at,
-    } as AgentApprovalRecord));
+    return (result.data ?? []).map(mapApproval);
   }
 
   async resolveApproval(ownerId: string, approvalId: string, state: "approved" | "rejected" | "expired") {
@@ -296,6 +489,57 @@ export class SupabaseLessonRepository implements LessonRepository {
     return approval;
   }
 
+  async decideApproval(args: {
+    ownerId: string;
+    approvalId: string;
+    approved: boolean;
+    encryptedRunState: string;
+  }) {
+    const result = await this.client.rpc("decide_agent_approval", {
+      p_owner_id: args.ownerId,
+      p_approval_id: args.approvalId,
+      p_approved: args.approved,
+      p_encrypted_run_state: args.encryptedRunState,
+    });
+    const payload = unwrap(result as any) as { approval: Record<string, any>; file: Record<string, any> | null };
+    return {
+      approval: mapApproval(payload.approval),
+      file: payload.file ? mapFile(payload.file) : null,
+    };
+  }
+
+  async claimApprovalContinuation(args: {
+    ownerId: string;
+    approvalId: string;
+    leaseToken: string;
+    leaseExpiresAt: string;
+  }) {
+    const result = await this.client.rpc("claim_agent_approval_continuation", {
+      p_owner_id: args.ownerId,
+      p_approval_id: args.approvalId,
+      p_lease_token: args.leaseToken,
+      p_lease_expires_at: args.leaseExpiresAt,
+    });
+    return mapApproval(unwrap(result as any));
+  }
+
+  async finishApprovalContinuation(args: {
+    ownerId: string;
+    approvalId: string;
+    leaseToken: string;
+    status: "ready" | "completed";
+    error?: string;
+  }) {
+    const result = await this.client.rpc("finish_agent_approval_continuation", {
+      p_owner_id: args.ownerId,
+      p_approval_id: args.approvalId,
+      p_lease_token: args.leaseToken,
+      p_status: args.status,
+      p_error: args.error ?? null,
+    });
+    return mapApproval(unwrap(result as any));
+  }
+
   async getSessionItems(ownerId: string, threadId: string, branchId: string, limit?: number) {
     let query = this.client.from("agent_session_items").select("item")
       .eq("owner_id", ownerId).eq("thread_id", threadId).eq("branch_id", branchId)
@@ -307,9 +551,34 @@ export class SupabaseLessonRepository implements LessonRepository {
     return rows.map((row) => row.item as AgentInputItem);
   }
 
-  async addSessionItems(ownerId: string, threadId: string, branchId: string, items: AgentInputItem[]) {
+  async addSessionItems(
+    ownerId: string,
+    threadId: string,
+    branchId: string,
+    items: AgentInputItem[],
+    idempotencyKey?: string,
+  ) {
     const result = await this.client.rpc("append_agent_session_items", {
-      p_owner_id: ownerId, p_thread_id: threadId, p_branch_id: branchId, p_items: items,
+      p_owner_id: ownerId,
+      p_thread_id: threadId,
+      p_branch_id: branchId,
+      p_items: items,
+      p_idempotency_key: idempotencyKey ?? null,
+    });
+    if (result.error) throw new Error(result.error.message);
+  }
+
+  async replaceSessionItems(
+    ownerId: string,
+    threadId: string,
+    branchId: string,
+    items: AgentInputItem[],
+  ) {
+    const result = await this.client.rpc("replace_agent_session_items", {
+      p_owner_id: ownerId,
+      p_thread_id: threadId,
+      p_branch_id: branchId,
+      p_items: items,
     });
     if (result.error) throw new Error(result.error.message);
   }
@@ -363,11 +632,43 @@ export class SupabaseLessonRepository implements LessonRepository {
     return (result.data?.[0] ?? null) as KnowledgeResult | null;
   }
 
+  async getKnowledgeSourcePassages(ownerId: string, scopes: string[], sourceId: string, limit: number) {
+    const result = await this.client.rpc("get_scoped_knowledge_source_passages", {
+      p_owner_id: ownerId,
+      p_scopes: scopes,
+      p_source_id: sourceId,
+      p_limit: limit,
+    });
+    if (result.error) throw new Error(result.error.message);
+    return (result.data ?? []) as KnowledgeResult[];
+  }
+
   async listProjectSources(ownerId: string, scopes: string[]) {
     const result = await this.client.rpc("list_scoped_knowledge_sources", {
       p_owner_id: ownerId, p_scopes: scopes,
     });
     if (result.error) throw new Error(result.error.message);
+    return (result.data ?? []) as SourceRef[];
+  }
+
+  async attachKnowledgeSources(
+    ownerId: string,
+    lessonFileId: string,
+    messageId: string,
+    sourceIds: string[],
+  ) {
+    if (!sourceIds.length) return [];
+    const result = await this.client.rpc("attach_knowledge_sources_to_message", {
+      p_owner_id: ownerId,
+      p_lesson_file_id: lessonFileId,
+      p_message_id: messageId,
+      p_source_ids: [...new Set(sourceIds)],
+    });
+    if (result.error) throw new Error(
+      result.error.message.includes("knowledge_attachment_unavailable")
+        ? "knowledge_attachment_unavailable"
+        : result.error.message,
+    );
     return (result.data ?? []) as SourceRef[];
   }
 }

@@ -528,6 +528,10 @@ export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgen
   planRef.current = plan;
   documentVersionRef.current = documentVersion;
 
+  useLayoutEffect(() => {
+    rootRef.current?.focus({ preventScroll: true });
+  }, []);
+
   const activeSectionData = lessonPlanSections.find((section) => section.id === activeSection)
     ?? lessonPlanSections[0];
 
@@ -1009,7 +1013,12 @@ export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgen
   });
 
   return (
-    <section className="lesson-file-workspace" ref={rootRef} aria-label={`${file.title}备课文件`}>
+    <section
+      className="lesson-file-workspace"
+      ref={rootRef}
+      aria-label={`${file.title}备课文件`}
+      tabIndex={-1}
+    >
       <PaginationMeasure plan={plan} measureRef={measureRef} />
       <div className="lesson-mobile-switcher" aria-label="详情页工具">
         <Button

@@ -24,7 +24,7 @@ export async function requireUser(c: Context<AppBindings>, next: Next) {
     }
   }
 
-  if (config.NODE_ENV !== "production" && config.LESSONUP_DEV_AUTH === "1") {
+  if (config.NODE_ENV === "test" && config.LESSONUP_DEV_AUTH === "1") {
     c.set("userId", c.req.header("x-lessonup-user") ?? devUserId);
     return next();
   }

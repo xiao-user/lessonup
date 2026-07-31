@@ -5,27 +5,55 @@ export async function stopAgentRun({ runId, cancelRun, controller, reloadMessage
 }
 
 export function presentAgentError(error) {
-  if (error === "stale_document") {
-    return {
+  const known = {
+    stale_document: {
       message: "教案内容已在其他会话或编辑器中更新，本次建议没有写入。",
       retryLabel: "基于最新内容重新生成",
-    };
-  }
-  if (error === "document_save_failed") {
-    return {
+    },
+    document_save_failed: {
       message: "当前教案尚未成功保存，请先确认保存状态后再让助手继续。",
       retryLabel: "重新尝试",
-    };
-  }
-  if (error === "run_interrupted") {
-    return {
-      message: "这次回复已中断，没有在后台自动继续。",
-      retryLabel: "重新生成",
-    };
-  }
-  return {
-    message: error,
-    retryLabel: "重试上一轮",
+    },
+    document_context_stale: {
+      message: "当前页面不是云端最新教案。为避免助手基于错误内容回答，请关闭并重新打开这份教案。",
+      retryLabel: "重新打开后再试",
+    },
+    run_interrupted: {
+      message: "正在重新连接这次回复，请稍候。",
+      retryLabel: "重新检查",
+    },
+    active_run_exists: {
+      message: "当前会话已有一项任务正在处理，请先等待、停止或完成审批。",
+      retryLabel: "重新检查",
+    },
+    knowledge_attachment_unavailable: {
+      message: "附带资料已被删除、尚未解析完成，或已随另一条消息发送。请重新选择资料。",
+      retryLabel: "重新选择资料",
+    },
+    approval_expired: {
+      message: "这项修改建议已经过期，请基于当前教案重新生成。",
+      retryLabel: "基于最新内容重新生成",
+    },
+    approval_resume_failed: {
+      message: "修改决定已经保存，但后续回复未能恢复。教案状态不会被重复写入。",
+      retryLabel: "继续新一轮",
+    },
+    agent_rate_limited: {
+      message: "模型服务当前请求较多，请稍后重试。",
+      retryLabel: "稍后重试",
+    },
+    agent_timeout: {
+      message: "本轮处理超时，未确认的修改不会写入。",
+      retryLabel: "编辑后重新发送",
+    },
+    agent_run_failed: {
+      message: "备课助手本轮未能完成，未确认的修改不会写入。",
+      retryLabel: "编辑后重新发送",
+    },
+  };
+  return known[error] ?? {
+    message: "备课助手本轮未能完成，未确认的修改不会写入。",
+    retryLabel: "编辑后重新发送",
   };
 }
 
@@ -57,4 +85,11 @@ export async function resolveBranchSourceMessage(message, listMessages) {
 
 export function lastRetryableUserMessage(messages) {
   return [...messages].reverse().find((message) => message.role === "user" && message.status !== "streaming") ?? null;
+}
+
+export function canRetryApprovalDecision(error) {
+  return !new Set([
+    "approval_expired",
+    "stale_document",
+  ]).has(error);
 }

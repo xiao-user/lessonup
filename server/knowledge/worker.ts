@@ -15,6 +15,7 @@ type KnowledgeSourceRow = {
   storage_key: string | null;
   source_version: number;
   metadata: Record<string, unknown> | null;
+  worker_id: string;
 };
 
 type IndexedChunk = {
@@ -60,11 +61,11 @@ export function chunkPlainText(text: string, chunkSize = 1_500, overlap = 160): 
   return chunks;
 }
 
-async function parseChunks(source: KnowledgeSourceRow, bytes: ArrayBuffer) {
-  if (source.media_type === "text/plain") {
+export async function parseKnowledgeBytes(mediaType: string, bytes: ArrayBuffer) {
+  if (mediaType === "text/plain" || mediaType === "text/markdown") {
     return { chunks: chunkPlainText(new TextDecoder().decode(bytes)), warnings: [] as string[] };
   }
-  const fileType = mediaTypeToOfficeType[source.media_type];
+  const fileType = mediaTypeToOfficeType[mediaType];
   if (!fileType) throw new Error("unsupported_knowledge_file");
   const warnings: string[] = [];
   const converted = await OfficeConverter.convert(Buffer.from(bytes), "chunks", {
@@ -93,10 +94,27 @@ async function parseChunks(source: KnowledgeSourceRow, bytes: ArrayBuffer) {
 }
 
 const pause = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+const parseTimeoutMs = 45_000;
+const maxChunksPerSource = 2_000;
+
+async function withTimeout<T>(operation: Promise<T>, milliseconds: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("knowledge_parse_timeout")), milliseconds);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 export class KnowledgeIndexWorker {
   private readonly client: SupabaseClient | null;
   private readonly embeddings = new BgeM3EmbeddingProvider();
+  private readonly workerId = crypto.randomUUID();
   private active = false;
   private stopped = false;
 
@@ -136,7 +154,9 @@ export class KnowledgeIndexWorker {
 
   async processNext() {
     if (!this.client) return false;
-    const claimed = await this.client.rpc("claim_knowledge_source");
+    const claimed = await this.client.rpc("claim_knowledge_source", {
+      p_worker_id: this.workerId,
+    });
     if (claimed.error) throw new Error(claimed.error.message);
     const source = (Array.isArray(claimed.data) ? claimed.data[0] : claimed.data) as KnowledgeSourceRow | undefined;
     if (!source?.id) return false;
@@ -153,44 +173,62 @@ export class KnowledgeIndexWorker {
     if (!this.client || !source.storage_key) throw new Error("knowledge_source_file_missing");
     const download = await this.client.storage.from("knowledge-private").download(source.storage_key);
     if (download.error) throw new Error(`knowledge_download_failed:${download.error.message}`);
-    const parsed = await parseChunks(source, await download.data.arrayBuffer());
+    const parsed = await withTimeout(
+      parseKnowledgeBytes(source.media_type, await download.data.arrayBuffer()),
+      parseTimeoutMs,
+    );
     if (parsed.chunks.length === 0) throw new Error("knowledge_source_empty");
-
-    const vectors: number[][] = [];
-    for (let index = 0; index < parsed.chunks.length; index += 16) {
-      const passages = parsed.chunks.slice(index, index + 16).map((chunk) => chunk.passage);
-      vectors.push(...await this.embedWithRetry(passages));
-    }
+    if (parsed.chunks.length > maxChunksPerSource) throw new Error("knowledge_source_too_many_chunks");
 
     const indexVersion = `bge-m3:${config.BGE_M3_MODEL}:v1:source-${source.source_version}`;
-    const rows = parsed.chunks.map((chunk, index) => ({
-      source_id: source.id,
-      owner_id: source.owner_id,
-      notebook_id: source.notebook_id,
-      lesson_file_id: source.lesson_file_id,
-      scope: source.scope,
-      stable_chunk_id: this.stableChunkId(source, chunk, index),
-      section: chunk.section,
-      page: chunk.page,
-      passage: chunk.passage,
-      adjacent_before: parsed.chunks[index - 1]?.passage.slice(-400),
-      adjacent_after: parsed.chunks[index + 1]?.passage.slice(0, 400),
-      embedding: vectors[index],
-      index_version: indexVersion,
-    }));
+    for (let index = 0; index < parsed.chunks.length; index += 16) {
+      await this.heartbeat(source.id);
+      const batch = parsed.chunks.slice(index, index + 16);
+      const vectors = await this.embedWithRetry(batch.map((chunk) => chunk.passage));
+      const rows = batch.map((chunk, batchIndex) => {
+        const absoluteIndex = index + batchIndex;
+        return {
+          stable_chunk_id: this.stableChunkId(source, chunk, absoluteIndex),
+          section: chunk.section,
+          page: chunk.page,
+          passage: chunk.passage,
+          adjacent_before: parsed.chunks[absoluteIndex - 1]?.passage.slice(-400),
+          adjacent_after: parsed.chunks[absoluteIndex + 1]?.passage.slice(0, 400),
+          embedding: vectors[batchIndex],
+        };
+      });
+      const staged = await this.client.rpc("stage_knowledge_chunk_batch", {
+        p_source_id: source.id,
+        p_worker_id: this.workerId,
+        p_index_version: indexVersion,
+        p_chunks: rows,
+      });
+      if (staged.error) throw new Error(staged.error.message);
+    }
 
-    const published = await this.client.rpc("publish_knowledge_index", {
+    await this.heartbeat(source.id);
+    const published = await this.client.rpc("publish_staged_knowledge_index", {
       p_source_id: source.id,
+      p_worker_id: this.workerId,
       p_index_version: indexVersion,
-      p_chunks: rows,
+      p_expected_count: parsed.chunks.length,
       p_metadata: {
         ...(source.metadata ?? {}),
-        chunkCount: rows.length,
+        chunkCount: parsed.chunks.length,
         parserWarnings: parsed.warnings,
         indexedAt: new Date().toISOString(),
       },
     });
     if (published.error) throw new Error(published.error.message);
+  }
+
+  private async heartbeat(sourceId: string) {
+    if (!this.client) return;
+    const result = await this.client.rpc("heartbeat_knowledge_source", {
+      p_source_id: sourceId,
+      p_worker_id: this.workerId,
+    });
+    if (result.error) throw new Error(result.error.message);
   }
 
   private async embedWithRetry(passages: string[]) {
@@ -217,19 +255,10 @@ export class KnowledgeIndexWorker {
   private async fail(source: KnowledgeSourceRow, error: string) {
     if (!this.client) return;
     const message = error.slice(0, 500);
-    const result = await this.client.from("knowledge_sources").update({
-      status: "failed",
-      metadata: { ...(source.metadata ?? {}), error: message, failedAt: new Date().toISOString() },
-      updated_at: new Date().toISOString(),
-    }).eq("id", source.id).eq("status", "processing");
-    if (result.error) throw new Error(result.error.message);
-    await this.audit(source, "index.failed", { error: message });
-  }
-
-  private async audit(source: KnowledgeSourceRow, action: string, details: unknown) {
-    if (!this.client) return;
-    const result = await this.client.from("knowledge_audit_events").insert({
-      owner_id: source.owner_id, source_id: source.id, action, details,
+    const result = await this.client.rpc("fail_knowledge_source", {
+      p_source_id: source.id,
+      p_worker_id: this.workerId,
+      p_error: message,
     });
     if (result.error) throw new Error(result.error.message);
   }

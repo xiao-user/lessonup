@@ -20,10 +20,12 @@ import {
   GitBranch,
   LoaderCircle,
   Paperclip,
+  RotateCcw,
   Square,
   X,
 } from "lucide-react";
-import { Streamdown } from "streamdown";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
 
 import { Button } from "@/components/ui/button";
@@ -35,6 +37,8 @@ import {
   presentAgentActivities,
   shouldShowAgentThinking,
 } from "@/features/assistant/agent-turn-presentation";
+import { lessonFieldLabels } from "@/features/assistant/document-patch";
+import { dedupeAgentSources } from "@/features/assistant/source-state";
 import { cn } from "@/lib/utils";
 
 export function CraftConversation({ className, ...props }) {
@@ -67,12 +71,23 @@ export function CraftConversationScrollButton() {
 
 const CraftMarkdown = memo(function CraftMarkdown({ children, isAnimating = false }) {
   return (
-    <Streamdown
-      className="craft-markdown"
-      isAnimating={isAnimating}
-    >
-      {children}
-    </Streamdown>
+    <div className="craft-markdown" data-streaming={isAnimating || undefined}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          a: ({ children: linkChildren, ...props }) => (
+            <a {...props} target="_blank" rel="noreferrer">{linkChildren}</a>
+          ),
+          table: ({ children: tableChildren }) => (
+            <div className="craft-markdown-table-scroll">
+              <table>{tableChildren}</table>
+            </div>
+          ),
+        }}
+      >
+        {children}
+      </ReactMarkdown>
+    </div>
   );
 });
 
@@ -158,16 +173,17 @@ function CraftTurnActions({ onCopy, onBranch }) {
 }
 
 function CraftSources({ sources }) {
-  if (!sources.length) return null;
+  const visibleSources = dedupeAgentSources(sources);
+  if (!visibleSources.length) return null;
   return (
     <details className="craft-sources">
       <summary>
         <BookOpen aria-hidden="true" />
-        {sources.length} 个来源
+        {visibleSources.length} 个来源
         <ChevronDown aria-hidden="true" />
       </summary>
       <div>
-        {sources.map((source) => source.url ? (
+        {visibleSources.map((source) => source.url ? (
           <a href={source.url} target="_blank" rel="noreferrer" key={source.id}>{source.title}</a>
         ) : (
           <span key={source.id}>{source.title}{source.page ? ` · 第 ${source.page} 页` : ""}</span>
@@ -177,11 +193,21 @@ function CraftSources({ sources }) {
   );
 }
 
-export function CraftUserTurn({ message, onCopy, onBranch }) {
+export function CraftUserTurn({ message, onCopy }) {
   return (
     <article className="craft-turn craft-turn-user" data-from="user">
       <div className="craft-user-bubble">{message.content}</div>
-      {message.status !== "streaming" ? <CraftTurnActions onCopy={onCopy} onBranch={onBranch} /> : null}
+      {message.sources?.length ? (
+        <div className="craft-message-attachments" aria-label="随消息发送的资料">
+          {message.sources.map((source) => (
+            <span className="craft-message-attachment" key={source.id} title={source.title}>
+              <FileText aria-hidden="true" />
+              <span>{source.title}</span>
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {message.status !== "streaming" ? <CraftTurnActions onCopy={onCopy} /> : null}
     </article>
   );
 }
@@ -192,6 +218,7 @@ export function CraftAssistantTurn({
   status,
   sources = [],
   onCopy,
+  onBranch,
 }) {
   const hasResponse = Boolean(message.content);
   return (
@@ -202,7 +229,7 @@ export function CraftAssistantTurn({
           <div className="craft-response-content">
             <CraftMarkdown isAnimating={message.status === "streaming"}>{message.content}</CraftMarkdown>
           </div>
-          {message.status !== "streaming" ? <CraftTurnActions onCopy={onCopy} /> : null}
+          {message.status !== "streaming" ? <CraftTurnActions onCopy={onCopy} onBranch={onBranch} /> : null}
         </div>
       ) : null}
       <CraftSources sources={sources} />
@@ -210,21 +237,29 @@ export function CraftAssistantTurn({
   );
 }
 
-export function CraftAttachments({ uploads, onRemove }) {
+export function CraftAttachments({ uploads, onRemove, onRetry }) {
   if (!uploads.length) return null;
   return (
     <div className="craft-attachments">
       {uploads.map((upload) => {
         const state = upload.status === "ready" ? "可用"
-          : upload.status === "failed" ? "失败"
+          : upload.status === "failed" && upload.last_error === "knowledge_source_empty" ? "文件内容为空"
+            : upload.status === "failed" ? "处理失败"
             : upload.status === "processing" ? "解析中"
               : "排队中";
-        const label = `${upload.title} · ${state}`;
+        const label = `${upload.title}，${state}`;
+        const retryable = upload.status === "failed" && upload.last_error !== "knowledge_source_empty";
         return (
           <span className="craft-attachment" key={upload.id}>
             <FileText aria-hidden="true" />
-            <span>{label}</span>
-            <Button variant="ghost" size="icon-xs" type="button" onClick={() => onRemove(upload.id)} aria-label={`移除${label}`}><X /></Button>
+            <span className="craft-attachment-name" title={upload.title}>{upload.title}</span>
+            <span className="craft-attachment-status">{state}</span>
+            {retryable && (
+              <Button variant="ghost" size="icon-xs" type="button" onClick={() => onRetry(upload.id)} aria-label={`重试${label}`}>
+                <RotateCcw />
+              </Button>
+            )}
+            <Button variant="ghost" size="icon-xs" type="button" onClick={() => onRemove(upload.id)} aria-label={`删除${label}`}><X /></Button>
           </span>
         );
       })}
@@ -236,6 +271,7 @@ export function CraftApproval({
   approval,
   onApprove,
   onReject,
+  onContinue,
 }) {
   if (!approval) return null;
   const pending = approval.state === "pending" || approval.state === "responding";
@@ -245,7 +281,7 @@ export function CraftApproval({
       <div className="craft-approval-diff">
         {approval.patch.operations.map((operation, index) => (
           <div key={`${operation.field}-${operation.start}-${index}`}>
-            <span>{operation.field} · {operation.start}—{operation.end}</span>
+            <span>{lessonFieldLabels[operation.field] ?? "教案栏目"} · {operation.start}—{operation.end}</span>
             <del>{operation.expectedText || "（空）"}</del>
             <ins>{operation.replacement || "（删除）"}</ins>
           </div>
@@ -254,7 +290,18 @@ export function CraftApproval({
       {approval.patch.citations?.length ? (
         <p>附有 {approval.patch.citations.length} 个可追溯来源</p>
       ) : null}
-      {pending ? (
+      {approval.state === "continuation" ? (
+        <div className="craft-approval-actions">
+          <Button type="button" size="sm" onClick={onContinue}>
+            继续生成
+          </Button>
+        </div>
+      ) : approval.state === "responding" ? (
+        <div className="craft-approval-progress" role="status">
+          <LoaderCircle className="animate-spin" aria-hidden="true" />
+          <span>{approval.decision === "approved" ? "正在应用修改并继续生成…" : "正在保留原文并继续生成…"}</span>
+        </div>
+      ) : pending ? (
         <div className="craft-approval-actions">
           <Button type="button" variant="ghost" size="sm" onClick={onReject} disabled={approval.state === "responding"}><X data-icon="inline-start" />拒绝</Button>
           <Button type="button" size="sm" onClick={onApprove} disabled={approval.state === "responding"}><Check data-icon="inline-start" />接受修改</Button>
@@ -275,6 +322,7 @@ export function CraftComposer({
   attachmentInputRef,
   uploads,
   onRemoveUpload,
+  onRetryUpload,
   status,
   statusLabel,
   disabled,
@@ -285,7 +333,7 @@ export function CraftComposer({
   const running = status === "streaming";
   return (
     <form className="craft-composer" onSubmit={onSubmit}>
-      <CraftAttachments uploads={uploads} onRemove={onRemoveUpload} />
+      <CraftAttachments uploads={uploads} onRemove={onRemoveUpload} onRetry={onRetryUpload} />
       <Textarea
         className="craft-composer-textarea"
         value={value}

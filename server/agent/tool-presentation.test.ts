@@ -25,4 +25,13 @@ describe("safeToolPresentation", () => {
       groupKey: "document-read",
     });
   });
+
+  it("labels an attached-source read without exposing its source id", () => {
+    expect(safeToolPresentation("read_attached_source", {
+      sourceId: "private-source-id",
+    })).toEqual({
+      label: "读取附带资料",
+      groupKey: "knowledge-read",
+    });
+  });
 });

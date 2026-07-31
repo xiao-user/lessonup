@@ -1,3 +1,5 @@
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { config } from "../config.js";
 
 export type WebSearchResult = {
@@ -24,6 +26,46 @@ export function assertSafeWebUrl(value: string) {
   const url = new URL(value);
   if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("unsupported_url_protocol");
   if (privateHostPatterns.some((pattern) => pattern.test(url.hostname))) throw new Error("private_network_url_denied");
+  return url;
+}
+
+function isPrivateAddress(address: string) {
+  const normalized = address.replace(/^\[|\]$/g, "").toLowerCase();
+  if (isIP(normalized) === 4) {
+    const [first, second] = normalized.split(".").map(Number);
+    return first === 0
+      || first === 10
+      || first === 127
+      || (first === 100 && second >= 64 && second <= 127)
+      || (first === 169 && second === 254)
+      || (first === 172 && second >= 16 && second <= 31)
+      || (first === 192 && second === 168)
+      || first >= 224;
+  }
+  if (isIP(normalized) === 6) {
+    return normalized === "::"
+      || normalized === "::1"
+      || normalized.startsWith("fc")
+      || normalized.startsWith("fd")
+      || /^fe[89ab]/.test(normalized)
+      || normalized.startsWith("ff")
+      || normalized.startsWith("::ffff:127.")
+      || normalized.startsWith("::ffff:10.")
+      || normalized.startsWith("::ffff:192.168.");
+  }
+  return true;
+}
+
+export async function assertPublicWebUrl(
+  value: string,
+  resolve: typeof lookup = lookup,
+) {
+  const url = assertSafeWebUrl(value);
+  if (isIP(url.hostname.replace(/^\[|\]$/g, ""))) return url;
+  const addresses = await resolve(url.hostname, { all: true, verbatim: true });
+  if (!addresses.length || addresses.some((entry) => isPrivateAddress(entry.address))) {
+    throw new Error("private_network_url_denied");
+  }
   return url;
 }
 
@@ -57,7 +99,7 @@ export class TavilyWebSearchProvider implements WebSearchProvider {
   }
 
   async open(value: string) {
-    let url = assertSafeWebUrl(value);
+    let url = await assertPublicWebUrl(value);
     for (let redirect = 0; redirect < 4; redirect += 1) {
       const response = await fetch(url, {
         redirect: "manual",
@@ -67,7 +109,7 @@ export class TavilyWebSearchProvider implements WebSearchProvider {
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers.get("location");
         if (!location) throw new Error("invalid_redirect");
-        url = assertSafeWebUrl(new URL(location, url).toString());
+        url = await assertPublicWebUrl(new URL(location, url).toString());
         continue;
       }
       if (!response.ok) throw new Error(`open_web_failed:${response.status}`);

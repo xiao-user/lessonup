@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { Archive, Check, GitBranch, History, MoreHorizontal, Pencil, Plus, Trash2, X } from "lucide-react";
+import { toast } from "sonner";
 
 import {
   CraftApproval,
@@ -15,8 +16,8 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { assistantSuggestions } from "@/features/lesson-files/data";
 import { branchDisplayLabel, presentAgentError } from "@/features/assistant/agent-run-control";
+import { canSendAgentMessage } from "@/features/assistant/attachment-state";
 import { useAgentChat } from "@/features/assistant/use-agent-chat";
 
 const statusText = {
@@ -41,12 +42,15 @@ export function LessonAgentPanel({
   const chat = useAgentChat({
     notebookId: notebook.id,
     lessonFileId: file.id,
+    documentVersion: file.documentVersion,
     activeSectionId: activeSection,
     selection,
     onPatchApplied,
     onBeforeRun,
   });
   const activeThread = chat.threads.find((thread) => thread.id === chat.activeThreadId);
+  const starterSuggestions = activeThread?.starterSuggestions ?? [];
+  const hasPendingThreads = chat.threads.some((thread) => thread.status === "awaiting_approval");
   const errorPresentation = chat.error ? presentAgentError(chat.error) : null;
   const latestAssistantIndex = chat.messages.findLastIndex((message) => message.role === "assistant");
   const [renaming, setRenaming] = useState(false);
@@ -75,6 +79,11 @@ export function LessonAgentPanel({
     if (sourceFile) await chat.uploadKnowledge(sourceFile).catch(() => null);
   };
 
+  const createThread = async () => {
+    const result = await chat.createThread();
+    if (result?.reason === "current_thread_empty") toast.info("当前已是新会话");
+  };
+
   return (
     <>
       <header className="lesson-assistant-header">
@@ -91,23 +100,39 @@ export function LessonAgentPanel({
                 <span className="lesson-agent-title" title={activeThread?.title ?? "新会话"}>
                   {activeThread?.title ?? "新会话"}
                 </span>
-                {chat.threads.length > 0 && (
-                  <Select value={chat.activeThreadId ?? undefined} onValueChange={chat.selectThread}>
-                    <SelectTrigger className="lesson-thread-switcher" size="sm" aria-label="切换备课会话">
-                      <History />
-                    </SelectTrigger>
-                    <SelectContent align="start">
-                      <SelectGroup>
-                        {chat.threads.map((thread) => <SelectItem value={thread.id} key={thread.id}>{thread.title}</SelectItem>)}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                )}
+                {activeThread?.status === "awaiting_approval" ? (
+                  <span className="lesson-thread-status-dot" aria-label="有修改等待确认" />
+                ) : null}
               </>
             )}
           </div>
           <div className="lesson-agent-heading-actions">
-            <Button size="icon-sm" variant="ghost" type="button" aria-label="新建会话" onClick={chat.createThread}>
+            {chat.threads.length > 0 && (
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={(
+                    <Button className="lesson-history-trigger" size="icon-sm" variant="ghost" type="button" aria-label="切换备课会话">
+                      <History />
+                      {hasPendingThreads ? <span className="lesson-thread-status-dot" aria-label="有会话等待确认" /> : null}
+                    </Button>
+                  )}
+                />
+                <DropdownMenuContent align="end" side="bottom" sideOffset={4}>
+                  {chat.threads.map((thread) => (
+                    <DropdownMenuItem key={thread.id} onClick={() => chat.selectThread(thread.id)}>
+                      <span className="lesson-thread-menu-check" aria-hidden="true">
+                        {thread.id === chat.activeThreadId ? <Check /> : null}
+                      </span>
+                      <span className="lesson-thread-menu-title">{thread.title}</span>
+                      {thread.status === "awaiting_approval" ? (
+                        <span className="lesson-thread-status-dot" aria-label="有修改等待确认" />
+                      ) : null}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+            <Button size="icon-sm" variant="ghost" type="button" aria-label="新建会话" onClick={createThread}>
               <Plus />
             </Button>
             {activeThread && (
@@ -153,14 +178,14 @@ export function LessonAgentPanel({
 
       <CraftConversation className="lesson-agent-conversation">
         <CraftConversationContent>
-          {!chat.messages.length && chat.status !== "streaming" && (
+          {!chat.messages.length && chat.status !== "streaming" && chat.status !== "ready" && (
             <CraftConversationEmpty
               title={statusText[chat.status] ?? "备课助手"}
               description={chat.status === "unconfigured"
                 ? "请在服务端配置 DEEPSEEK_API_KEY。模型密钥不会进入浏览器。"
                 : chat.error === "lesson_file_not_found"
                   ? "请先确认导入本地备课数据，再开始新会话。"
-                  : "可以从整份教案出发提问；当前定位和文字选区会作为补充线索。需要写入时，我会先展示逐字段修改。"}
+                  : errorPresentation?.message ?? "暂时无法开始会话。"}
             />
           )}
 
@@ -168,53 +193,77 @@ export function LessonAgentPanel({
             const isLatestAssistant = message.role === "assistant" && index === latestAssistantIndex;
             const sources = message.sources?.length
               ? message.sources
-              : isLatestAssistant && chat.activities.length
+              : isLatestAssistant
                 ? chat.sources
                 : [];
+            const linkedApprovals = chat.approvals.filter((approval) => (
+              approval.assistantMessageId === message.id
+              || (!approval.assistantMessageId && isLatestAssistant)
+            ));
             return message.role === "assistant" ? (
-              <CraftAssistantTurn
-                key={message.id}
-                message={message}
-                activities={isLatestAssistant ? chat.activities : []}
-                status={isLatestAssistant ? chat.status : "ready"}
-                sources={sources}
-                onCopy={() => navigator.clipboard.writeText(message.content)}
-              />
+              <Fragment key={message.id}>
+                <CraftAssistantTurn
+                  message={message}
+                  activities={isLatestAssistant ? chat.activities : []}
+                  status={isLatestAssistant ? chat.status : "ready"}
+                  sources={sources}
+                  onCopy={() => navigator.clipboard.writeText(message.content)}
+                  onBranch={message.status === "completed"
+                    && chat.status !== "streaming"
+                    && chat.status !== "awaiting_approval"
+                    && chat.status !== "loading"
+                    ? () => chat.branchFromMessage(message)
+                    : undefined}
+                />
+                {linkedApprovals.map((approval) => (
+                  <CraftApproval
+                    approval={approval}
+                    onApprove={() => chat.respondApproval(true)}
+                    onReject={() => chat.respondApproval(false)}
+                    onContinue={() => chat.respondApproval(approval.decision === "approved")}
+                    key={approval.id}
+                  />
+                ))}
+              </Fragment>
             ) : (
               <CraftUserTurn
                 key={message.id}
                 message={message}
                 onCopy={() => navigator.clipboard.writeText(message.content)}
-                onBranch={() => chat.branchFromMessage(message)}
               />
             );
           })}
 
-          <CraftApproval
-            approval={chat.approval}
-            onApprove={() => chat.respondApproval(true)}
-            onReject={() => chat.respondApproval(false)}
-          />
-
           {chat.error && chat.error !== "lesson_file_not_found" && (
             <>
               <p className="lesson-agent-error" role="alert">{errorPresentation.message}</p>
-              <Button size="sm" variant="outline" type="button" onClick={chat.retry}>{errorPresentation.retryLabel}</Button>
+              {chat.status !== "awaiting_approval" && chat.error !== "document_context_stale" && (
+                <Button size="sm" variant="outline" type="button" onClick={chat.retry}>{errorPresentation.retryLabel}</Button>
+              )}
             </>
           )}
         </CraftConversationContent>
         <CraftConversationScrollButton />
       </CraftConversation>
 
-      {chat.status === "ready" && !chat.messages.length && (
+      {chat.status === "ready" && !chat.messages.length && starterSuggestions.length > 0 && (
         <div className="lesson-assistant-suggestions" aria-label="建议操作">
-          {assistantSuggestions[activeSection].slice(0, 3).map((suggestion, index) => (
+          {starterSuggestions.slice(0, 3).map((suggestion, index) => (
             <Button className="lesson-assistant-suggestion" variant="ghost" size="sm" type="button" onClick={() => chat.send(suggestion)} key={suggestion}>
               <span data-tone={index % 2 ? "olive" : "teal"} aria-hidden="true" />{suggestion}
             </Button>
           ))}
         </div>
       )}
+      {chat.status === "ready" && !chat.messages.length && chat.startersLoading ? (
+        <p className="lesson-assistant-suggestions-status" role="status">正在结合当前教案生成建议…</p>
+      ) : null}
+      {chat.status === "ready" && !chat.messages.length && chat.startersError ? (
+        <div className="lesson-assistant-suggestions-status" role="status">
+          <span>暂时未能生成建议</span>
+          <Button size="sm" variant="ghost" type="button" onClick={chat.retryStarters}>重新生成</Button>
+        </div>
+      ) : null}
 
       <CraftComposer
         value={chat.draft}
@@ -225,10 +274,20 @@ export function LessonAgentPanel({
         attachmentInputRef={attachmentInputRef}
         uploads={chat.uploads}
         onRemoveUpload={chat.dismissUpload}
+        onRetryUpload={chat.retryUpload}
         status={chat.status}
-        statusLabel={statusText[chat.status] ?? chat.status}
+        statusLabel={chat.uploadError === "knowledge_source_empty"
+          ? "文件内容为空，请添加正文后重新上传"
+          : chat.uploadError
+            ? "资料上传失败，请重试"
+            : statusText[chat.status] ?? chat.status}
         disabled={!chat.runtime?.agent || chat.status === "loading" || chat.status === "awaiting_approval"}
-        sendDisabled={!chat.draft.trim() || !chat.runtime?.agent || chat.status === "awaiting_approval"}
+        sendDisabled={!canSendAgentMessage({
+          draft: chat.draft,
+          uploads: chat.uploads,
+          agentAvailable: chat.runtime?.agent,
+          status: chat.status,
+        })}
         uploadDisabled={!chat.runtime?.knowledge}
         placeholder={`询问整份教案（当前定位：${activeSectionData.label}）…`}
       />

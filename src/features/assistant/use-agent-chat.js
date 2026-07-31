@@ -2,18 +2,79 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { agentApi, consumeAgentStream } from "@/lib/agent-api";
 import {
+  canRetryApprovalDecision,
   lastRetryableUserMessage,
   resetAgentConversationState,
   resolveBranchSourceMessage,
   stopAgentRun,
   synchronizeCompletedAgentTurn,
 } from "./agent-run-control.js";
+import {
+  hasBlockingUploads,
+  readyUploadSources,
+} from "./attachment-state.js";
+import { dedupeAgentSources, latestAssistantSources } from "./source-state.js";
 
 const draftKey = (threadId) => `lessonup:agent-draft:${threadId ?? "new"}`;
+
+function activitiesFromEvents(events) {
+  const activities = [];
+  for (const event of events) {
+    if (event.type === "tool.started") {
+      activities.push({
+        id: event.toolCallId,
+        name: event.name,
+        label: event.label,
+        groupKey: event.groupKey,
+        state: "running",
+      });
+    }
+    if (event.type === "tool.completed") {
+      const index = activities.findIndex((activity) => activity.id === event.toolCallId);
+      if (index >= 0) {
+        activities[index] = {
+          ...activities[index],
+          state: event.ok ? "completed" : "failed",
+          label: event.label,
+          groupKey: event.groupKey ?? activities[index].groupKey,
+        };
+      }
+    }
+  }
+  return activities;
+}
+
+function sourcesFromEvents(events) {
+  return dedupeAgentSources(events
+    .filter((event) => event.type === "source.added")
+    .map((event) => event.source));
+}
+
+function presentApproval(record) {
+  const decision = record.state === "approved" || record.state === "rejected"
+    ? record.state
+    : null;
+  if (record.continuationStatus === "running") {
+    return { ...record, state: "responding", decision };
+  }
+  if (record.continuationStatus === "ready") {
+    return { ...record, state: "continuation", decision };
+  }
+  return { ...record, decision };
+}
+
+function activeApprovalFrom(records) {
+  return [...records].reverse().find((item) => (
+    item.state === "pending"
+    || item.state === "responding"
+    || item.state === "continuation"
+  )) ?? null;
+}
 
 export function useAgentChat({
   notebookId,
   lessonFileId,
+  documentVersion,
   activeSectionId,
   selection,
   onPatchApplied,
@@ -27,31 +88,33 @@ export function useAgentChat({
   const [messages, setMessages] = useState([]);
   const [activities, setActivities] = useState([]);
   const [sources, setSources] = useState([]);
-  const [approval, setApproval] = useState(null);
+  const [approvals, setApprovals] = useState([]);
   const [status, setStatus] = useState("loading");
   const [error, setError] = useState(null);
   const [runId, setRunId] = useState(null);
   const [draft, setDraftState] = useState("");
   const [uploads, setUploads] = useState([]);
-  const [storageRevision, setStorageRevision] = useState(0);
+  const [uploadError, setUploadError] = useState(null);
+  const [startersLoading, setStartersLoading] = useState(false);
+  const [startersError, setStartersError] = useState(null);
+  const documentVersionRef = useRef(documentVersion);
   const appliedApprovalRef = useRef(new Set());
   const activeThreadRef = useRef(null);
   const activeBranchRef = useRef(null);
   const threadsRef = useRef([]);
   const runtimeRef = useRef(null);
+  const messagesRef = useRef([]);
   const runScopesRef = useRef(new Map());
   const streamControllersRef = useRef(new Map());
+  const starterRequestsRef = useRef(new Set());
+  const approval = activeApprovalFrom(approvals);
+  documentVersionRef.current = documentVersion;
 
   useEffect(() => { activeThreadRef.current = activeThreadId; }, [activeThreadId]);
   useEffect(() => { activeBranchRef.current = activeBranchId; }, [activeBranchId]);
   useEffect(() => { threadsRef.current = threads; }, [threads]);
   useEffect(() => { runtimeRef.current = runtime; }, [runtime]);
-
-  useEffect(() => {
-    const handleStorageReady = () => setStorageRevision((revision) => revision + 1);
-    window.addEventListener("lessonup:agent-storage-ready", handleStorageReady);
-    return () => window.removeEventListener("lessonup:agent-storage-ready", handleStorageReady);
-  }, []);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
 
   useEffect(() => {
     const pending = uploads.filter((upload) => upload.status === "queued" || upload.status === "processing");
@@ -71,7 +134,12 @@ export function useAgentChat({
   }, [uploads]);
 
   useEffect(() => {
-    if (approval?.state === "pending") setStatus("awaiting_approval");
+    if (
+      approval?.state === "pending"
+      || approval?.state === "continuation"
+    ) {
+      setStatus("awaiting_approval");
+    }
   }, [approval?.state]);
 
   const setDraft = useCallback((value) => {
@@ -80,41 +148,111 @@ export function useAgentChat({
   }, [activeThreadId]);
 
   const loadMessages = useCallback(async (threadId, branchId, { preservePresentation = false } = {}) => {
-    const [records, approvals] = await Promise.all([
+    const [records, approvalRecords, presentation] = await Promise.all([
       agentApi.listMessages(threadId, branchId),
-      agentApi.listPendingApprovals(threadId, branchId),
+      agentApi.listApprovals(threadId, branchId),
+      agentApi.getLatestActivity(threadId, branchId),
     ]);
+    if (
+      activeThreadRef.current !== threadId
+      || activeBranchRef.current !== branchId
+    ) {
+      return null;
+    }
     setMessages(records);
-    if (!preservePresentation) setActivities([]);
-    setSources(records.flatMap((message) => message.sources ?? []));
-    const pending = approvals[0];
-    setApproval(pending ? { id: pending.id, runId: pending.runId, patch: pending.patch, state: "pending" } : null);
+    if (!preservePresentation) setActivities(activitiesFromEvents(presentation.events ?? []));
+    setSources(latestAssistantSources(records));
+    const presentedApprovals = approvalRecords.map(presentApproval);
+    setApprovals(presentedApprovals);
+    return { records, approvals: presentedApprovals, presentation };
+  }, []);
+
+  const ensureThreadStarters = useCallback(async (thread, hasMessages, { force = false } = {}) => {
+    if (
+      !thread
+      || hasMessages
+      || (!force && (
+        thread.starterSuggestions?.length
+        && thread.starterSuggestionsDocumentVersion === documentVersionRef.current
+      ))
+      || starterRequestsRef.current.has(thread.id)
+    ) return thread;
+    starterRequestsRef.current.add(thread.id);
+    if (activeThreadRef.current === thread.id) {
+      setStartersLoading(true);
+      setStartersError(null);
+    }
+    try {
+      const updated = await agentApi.generateThreadStarters(thread.id);
+      if (!updated.starterSuggestions?.length) throw new Error("thread_starters_empty");
+      setThreads((current) => current.map((item) => item.id === updated.id ? updated : item));
+      threadsRef.current = threadsRef.current.map((item) => item.id === updated.id ? updated : item);
+      return updated;
+    } catch (starterError) {
+      if (activeThreadRef.current === thread.id) {
+        setStartersError(starterError.message || "thread_starters_failed");
+      }
+      return thread;
+    } finally {
+      starterRequestsRef.current.delete(thread.id);
+      if (activeThreadRef.current === thread.id) setStartersLoading(false);
+    }
   }, []);
 
   const selectThread = useCallback(async (threadId) => {
+    activeThreadRef.current = threadId;
     setActiveThreadId(threadId);
+    setApprovals([]);
+    setUploads([]);
+    setUploadError(null);
+    setStartersLoading(false);
+    setStartersError(null);
     const records = await agentApi.listBranches(threadId);
+    if (activeThreadRef.current !== threadId) return;
     setBranches(records);
     const branchId = records.at(-1)?.id;
+    activeBranchRef.current = branchId ?? null;
     setActiveBranchId(branchId ?? null);
     setDraftState(window.localStorage.getItem(draftKey(threadId)) ?? "");
-    if (branchId) await loadMessages(threadId, branchId);
+    const loaded = branchId ? await loadMessages(threadId, branchId) : null;
     const selected = threadsRef.current.find((thread) => thread.id === threadId);
+    void ensureThreadStarters(selected, Boolean(loaded?.records.length));
     const activeRun = [...runScopesRef.current.entries()].find(([, scope]) => scope.threadId === threadId);
     const hasLocalStream = Boolean(activeRun && streamControllersRef.current.has(threadId));
-    setRunId(hasLocalStream ? activeRun?.[0] ?? null : null);
-    setError(selected?.status === "running" && !hasLocalStream
-      ? "run_interrupted"
-      : selected?.status === "failed" ? "上一轮运行失败，可以重试。" : null);
-    setStatus(selected?.status === "running" && hasLocalStream ? "streaming"
-      : selected?.status === "awaiting_approval" ? "awaiting_approval"
-        : selected?.status === "failed" || (selected?.status === "running" && !hasLocalStream) ? "error"
+    const persistedRun = loaded?.presentation.run;
+    const runningRun = persistedRun?.status === "running" || persistedRun?.status === "queued";
+    const pendingApproval = activeApprovalFrom(loaded?.approvals ?? []);
+    const nextRunId = activeRun?.[0] ?? (runningRun ? persistedRun.id : null);
+    if (nextRunId) {
+      runScopesRef.current.set(nextRunId, { threadId, branchId });
+    }
+    setRunId(nextRunId);
+    setError(selected?.status === "failed" ? persistedRun?.error ?? "agent_run_failed" : null);
+    setStatus(pendingApproval
+      ? pendingApproval.state === "responding" ? "streaming" : "awaiting_approval"
+      : selected?.status === "running" || runningRun || hasLocalStream ? "streaming"
+        : selected?.status === "failed" ? "error"
           : runtimeRef.current?.agent ? "ready" : "unconfigured");
-  }, [loadMessages]);
+  }, [ensureThreadStarters, loadMessages]);
 
-  const createThread = useCallback(async () => {
-    const result = await agentApi.createThread({ notebookId, lessonFileId });
+  const createThread = useCallback(async (force = false) => {
+    if (
+      force !== true
+      && activeThreadRef.current
+      && messagesRef.current.length === 0
+    ) {
+      return { created: false, reason: "current_thread_empty" };
+    }
+    const result = await agentApi.createThread({
+      notebookId,
+      lessonFileId,
+      currentThreadId: force === true ? undefined : activeThreadRef.current ?? undefined,
+      currentBranchId: force === true ? undefined : activeBranchRef.current ?? undefined,
+    });
+    activeThreadRef.current = result.thread.id;
+    activeBranchRef.current = result.branch.id;
     setThreads((current) => [result.thread, ...current]);
+    threadsRef.current = [result.thread, ...threadsRef.current];
     setActiveThreadId(result.thread.id);
     setBranches([result.branch]);
     setActiveBranchId(result.branch.id);
@@ -122,9 +260,19 @@ export function useAgentChat({
     setActivities([]);
     setSources([]);
     setDraftState("");
-    resetAgentConversationState({ runtime: runtimeRef.current, setApproval, setError, setRunId, setStatus });
-    return result;
-  }, [lessonFileId, notebookId]);
+    setUploads([]);
+    setUploadError(null);
+    setStartersError(null);
+    resetAgentConversationState({
+      runtime: runtimeRef.current,
+      setApproval: (value) => setApprovals(value ? [value] : []),
+      setError,
+      setRunId,
+      setStatus,
+    });
+    void ensureThreadStarters(result.thread, false);
+    return { ...result, created: true };
+  }, [ensureThreadStarters, lessonFileId, notebookId]);
 
   const updateActiveThread = useCallback(async (patch) => {
     if (!activeThreadId) return null;
@@ -140,7 +288,7 @@ export function useAgentChat({
     const records = await agentApi.listThreads(lessonFileId);
     setThreads(records);
     if (records[0]) await selectThread(records[0].id);
-    else await createThread();
+    else await createThread(true);
   }, [activeThreadId, createThread, lessonFileId, selectThread]);
 
   useEffect(() => {
@@ -151,13 +299,14 @@ export function useAgentChat({
       try {
         const nextRuntime = await agentApi.runtime();
         if (cancelled) return;
+        runtimeRef.current = nextRuntime;
         setRuntime(nextRuntime);
         const records = await agentApi.listThreads(lessonFileId);
         if (cancelled) return;
+        threadsRef.current = records;
         setThreads(records);
         if (records[0]) await selectThread(records[0].id);
-        else await createThread();
-        if (!cancelled) setStatus(nextRuntime.agent ? "ready" : "unconfigured");
+        else await createThread(true);
       } catch (loadError) {
         if (!cancelled) {
           setError(loadError.message);
@@ -171,7 +320,7 @@ export function useAgentChat({
       for (const controller of streamControllersRef.current.values()) controller.abort();
       streamControllersRef.current.clear();
     };
-  }, [createThread, lessonFileId, selectThread, storageRevision]);
+  }, [createThread, lessonFileId, selectThread]);
 
   const handleEvent = useCallback((event) => {
     if (event.type === "run.started") {
@@ -181,9 +330,18 @@ export function useAgentChat({
       if (!isActive) return;
       setRunId(event.runId);
       setStatus("streaming");
+      setSources([]);
       setMessages((current) => current.some((message) => message.status === "streaming")
         ? current
         : [...current, { id: `stream-${event.runId}`, role: "assistant", content: "", status: "streaming" }]);
+    }
+    if (event.type === "thread.updated") {
+      setThreads((current) => current.map((thread) => (
+        thread.id === event.thread.id ? event.thread : thread
+      )));
+      threadsRef.current = threadsRef.current.map((thread) => (
+        thread.id === event.thread.id ? event.thread : thread
+      ));
     }
     const scope = runScopesRef.current.get(event.runId);
     const isActive = scope
@@ -222,12 +380,22 @@ export function useAgentChat({
     }
     if (event.type === "source.added") {
       if (!isActive) return;
-      setSources((current) => current.some((source) => source.id === event.source.id) ? current : [...current, event.source]);
+      setSources((current) => dedupeAgentSources([...current, event.source]));
     }
     if (event.type === "approval.required") {
       if (scope) setThreads((current) => current.map((thread) => thread.id === scope.threadId ? { ...thread, status: "awaiting_approval" } : thread));
       if (!isActive) return;
-      setApproval({ id: event.approvalId, runId: event.runId, patch: event.patch, state: "pending" });
+      setApprovals((current) => [
+        ...current.filter((item) => item.id !== event.approvalId),
+        {
+          id: event.approvalId,
+          runId: event.runId,
+          assistantMessageId: event.assistantMessageId,
+          patch: event.patch,
+          state: "pending",
+          decision: null,
+        },
+      ]);
       setStatus("awaiting_approval");
     }
     if (event.type === "message.completed") {
@@ -258,32 +426,115 @@ export function useAgentChat({
     }
   }, []);
 
+  useEffect(() => {
+    if (
+      status !== "streaming"
+      || !runId
+      || !activeThreadId
+      || !activeBranchId
+      || streamControllersRef.current.has(activeThreadId)
+    ) return undefined;
+    let cancelled = false;
+    let timer;
+    const poll = async () => {
+      try {
+        const presentation = await agentApi.getLatestActivity(activeThreadId, activeBranchId);
+        if (cancelled || presentation.run?.id !== runId) return;
+        setActivities(activitiesFromEvents(presentation.events ?? []));
+        setSources(sourcesFromEvents(presentation.events ?? []));
+        const runStatus = presentation.run.status;
+        if (runStatus === "running" || runStatus === "queued") {
+          timer = window.setTimeout(poll, 1_000);
+          return;
+        }
+        const loaded = await loadMessages(activeThreadId, activeBranchId);
+        if (cancelled) return;
+        const threadRecords = await agentApi.listThreads(lessonFileId);
+        if (cancelled) return;
+        threadsRef.current = threadRecords;
+        setThreads(threadRecords);
+        setRunId(null);
+        runScopesRef.current.delete(runId);
+        const pending = activeApprovalFrom(loaded?.approvals ?? []);
+        if (pending) {
+          setStatus(pending.state === "responding" ? "streaming" : "awaiting_approval");
+        } else if (runStatus === "failed") {
+          setError(presentation.run.error ?? "agent_run_failed");
+          setStatus("error");
+        } else {
+          setError(null);
+          setStatus(runtimeRef.current?.agent ? "ready" : "unconfigured");
+        }
+      } catch {
+        if (!cancelled) timer = window.setTimeout(poll, 1_500);
+      }
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [activeBranchId, activeThreadId, lessonFileId, loadMessages, runId, status]);
+
   const send = useCallback(async (message = draft) => {
-    const prompt = message.trim();
-    if (!prompt || !activeThreadId || !activeBranchId || !runtime?.agent) return;
+    const attachmentSnapshot = readyUploadSources(uploads);
+    if (
+      hasBlockingUploads(uploads)
+      || (!message.trim() && !attachmentSnapshot.length)
+      || !activeThreadId
+      || !activeBranchId
+      || !runtime?.agent
+    ) return;
+    const prompt = message.trim() || "请阅读并概括随消息附带的资料。";
+    const uploadDraftSnapshot = uploads;
+    const optimisticUserId = `optimistic-${crypto.randomUUID()}`;
+    const optimisticAssistantId = `optimistic-${crypto.randomUUID()}`;
+    const controller = new AbortController();
+    streamControllersRef.current.set(activeThreadId, controller);
+    setDraft("");
+    setUploads([]);
+    setError(null);
+    setActivities([]);
+    setSources([]);
+    setRunId(null);
+    setStatus("streaming");
+    setMessages((current) => [
+      ...current,
+      {
+        id: optimisticUserId,
+        role: "user",
+        content: prompt,
+        status: "completed",
+        sources: attachmentSnapshot,
+      },
+      {
+        id: optimisticAssistantId,
+        role: "assistant",
+        content: "",
+        status: "streaming",
+      },
+    ]);
     try {
       await onBeforeRun?.();
     } catch {
+      setMessages((current) => current.filter((item) => (
+        item.id !== optimisticUserId && item.id !== optimisticAssistantId
+      )));
+      setDraft(message);
+      setUploads(uploadDraftSnapshot);
+      streamControllersRef.current.delete(activeThreadId);
       setError("document_save_failed");
       setStatus("error");
       return;
     }
-    setDraft("");
-    setError(null);
-    setActivities([]);
-    setSources([]);
-    setApproval(null);
-    setMessages((current) => [...current, {
-      id: `optimistic-${crypto.randomUUID()}`, role: "user", content: prompt, status: "completed",
-    }]);
-    const controller = new AbortController();
-    streamControllersRef.current.set(activeThreadId, controller);
     try {
       await consumeAgentStream(`/api/agent/threads/${activeThreadId}/runs`, {
         branchId: activeBranchId,
         message: prompt,
         activeSectionId,
+        documentVersion,
         selection: selection || undefined,
+        attachmentIds: attachmentSnapshot.map((attachment) => attachment.id),
       }, handleEvent, { signal: controller.signal });
       const records = await synchronizeCompletedAgentTurn({
         threadId: activeThreadId,
@@ -298,15 +549,33 @@ export function useAgentChat({
       setThreads(records);
     } catch (streamError) {
       if (streamError.name !== "AbortError") {
-        setError(streamError.message);
-        setStatus("error");
+        try {
+          const presentation = await agentApi.getLatestActivity(activeThreadId, activeBranchId);
+          const persistedRun = presentation.run;
+          if (persistedRun?.status === "running" || persistedRun?.status === "queued") {
+            runScopesRef.current.set(persistedRun.id, {
+              threadId: activeThreadId,
+              branchId: activeBranchId,
+            });
+            setRunId(persistedRun.id);
+            setActivities(activitiesFromEvents(presentation.events ?? []));
+            setStatus("streaming");
+            await loadMessages(activeThreadId, activeBranchId, { preservePresentation: true });
+          } else {
+            setError(persistedRun?.error ?? streamError.message);
+            setStatus("error");
+          }
+        } catch {
+          setError(streamError.message);
+          setStatus("error");
+        }
       }
     } finally {
       if (streamControllersRef.current.get(activeThreadId) === controller) {
         streamControllersRef.current.delete(activeThreadId);
       }
     }
-  }, [activeBranchId, activeSectionId, activeThreadId, draft, handleEvent, lessonFileId, loadMessages, onBeforeRun, runtime?.agent, selection, setDraft]);
+  }, [activeBranchId, activeSectionId, activeThreadId, documentVersion, draft, handleEvent, lessonFileId, loadMessages, onBeforeRun, runtime?.agent, selection, setDraft, uploads]);
 
   const stop = useCallback(async () => {
     const stoppedRunId = runId;
@@ -339,9 +608,20 @@ export function useAgentChat({
 
   const respondApproval = useCallback(async (approved) => {
     if (!approval) return;
-    setApproval((current) => ({ ...current, state: "responding" }));
+    try {
+      await onBeforeRun?.();
+    } catch {
+      setError("document_save_failed");
+      setStatus("awaiting_approval");
+      return;
+    }
+    setError(null);
+    setApprovals((current) => current.map((item) => (
+      item.id === approval.id ? { ...item, state: "responding" } : item
+    )));
+    setStatus("streaming");
     const idempotencyKey = crypto.randomUUID();
-    let applied = false;
+    let decisionCommitted = approval.state === "continuation";
     let terminalError = null;
     try {
       await consumeAgentStream(
@@ -349,26 +629,51 @@ export function useAgentChat({
         { approved },
         (event) => {
           if (event.type === "run.failed") terminalError = event.error;
-          if (approved && event.type === "run.started" && !appliedApprovalRef.current.has(approval.id)) {
-            appliedApprovalRef.current.add(approval.id);
-            applied = true;
-            onPatchApplied(approval.patch);
+          if (event.type === "run.started") {
+            decisionCommitted = true;
+            setApprovals((current) => current.map((item) => (
+              item.id === approval.id
+                ? {
+                    ...item,
+                    state: "responding",
+                    decision: approved ? "approved" : "rejected",
+                  }
+                : item
+            )));
+            if (approved && approval.decision !== "approved" && !appliedApprovalRef.current.has(approval.id)) {
+              appliedApprovalRef.current.add(approval.id);
+              onPatchApplied(approval.patch);
+            }
           }
           handleEvent(event);
         },
         { idempotencyKey },
       );
       if (terminalError) throw new Error(terminalError);
-      setApproval((current) => current ? { ...current, state: approved ? "approved" : "rejected" } : null);
+      setApprovals((current) => current.map((item) => (
+        item.id === approval.id
+          ? { ...item, state: approved ? "approved" : "rejected" }
+          : item
+      )));
     } catch (approvalError) {
-      if (applied) appliedApprovalRef.current.delete(approval.id);
       setError(approvalError.message);
       setStatus("error");
-      setApproval((current) => current ? { ...current, state: "pending" } : null);
+      setApprovals((current) => current.map((item) => {
+        if (item.id !== approval.id) return item;
+        if (!canRetryApprovalDecision(approvalError.message)) {
+          return { ...item, state: "expired" };
+        }
+        return {
+          ...item,
+          state: decisionCommitted ? "continuation" : "pending",
+          decision: decisionCommitted ? (approved ? "approved" : "rejected") : null,
+        };
+      }));
     }
-  }, [approval, handleEvent, onPatchApplied]);
+  }, [approval, handleEvent, onBeforeRun, onPatchApplied]);
 
   const switchBranch = useCallback(async (branchId) => {
+    activeBranchRef.current = branchId;
     setActiveBranchId(branchId);
     await loadMessages(activeThreadId, branchId);
   }, [activeThreadId, loadMessages]);
@@ -385,6 +690,7 @@ export function useAgentChat({
       branchId: activeBranchId,
     });
     setBranches((current) => [...current, branch]);
+    activeBranchRef.current = branch.id;
     setActiveBranchId(branch.id);
     await loadMessages(activeThreadId, branch.id);
     if (editedContent !== undefined) setDraft(editedContent);
@@ -392,29 +698,47 @@ export function useAgentChat({
 
   const retry = useCallback(() => {
     const message = lastRetryableUserMessage(messages);
-    return message ? send(message.content) : Promise.resolve();
-  }, [messages, send]);
+    if (!message) return;
+    setDraft(message.content);
+    setError(null);
+    setStatus(runtimeRef.current?.agent ? "ready" : "unconfigured");
+  }, [messages, setDraft]);
+
+  const retryStarters = useCallback(() => {
+    const thread = threadsRef.current.find((item) => item.id === activeThreadRef.current);
+    if (!thread || messagesRef.current.length) return;
+    void ensureThreadStarters(thread, false, { force: true });
+  }, [ensureThreadStarters]);
 
   const uploadKnowledge = useCallback(async (file) => {
-    setError(null);
+    setUploadError(null);
     try {
       const source = await agentApi.uploadKnowledge(file, { notebookId, lessonFileId });
       setUploads((current) => [...current, source]);
       return source;
     } catch (uploadError) {
-      setError(uploadError.message);
+      setUploadError(uploadError.message);
       throw uploadError;
     }
   }, [lessonFileId, notebookId]);
 
-  const dismissUpload = useCallback((sourceId) => {
+  const dismissUpload = useCallback(async (sourceId) => {
+    await agentApi.deleteKnowledgeUpload(sourceId);
     setUploads((current) => current.filter((upload) => upload.id !== sourceId));
+    setUploadError(null);
+  }, []);
+
+  const retryUpload = useCallback(async (sourceId) => {
+    const source = await agentApi.retryKnowledgeUpload(sourceId);
+    setUploads((current) => current.map((upload) => upload.id === sourceId ? source : upload));
+    setUploadError(null);
   }, []);
 
   return {
     runtime, threads, activeThreadId, branches, activeBranchId, messages,
-    activities, sources, approval, status, error, runId, draft, uploads,
+    activities, sources, approvals, approval, status, error, uploadError, runId, draft, uploads,
+    startersLoading, startersError,
     setDraft, send, retry, stop, respondApproval, selectThread, switchBranch, createThread, branchFromMessage,
-    updateActiveThread, removeActiveThread, uploadKnowledge, dismissUpload,
+    updateActiveThread, removeActiveThread, uploadKnowledge, dismissUpload, retryUpload, retryStarters,
   };
 }

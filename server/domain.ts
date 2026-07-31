@@ -100,6 +100,8 @@ export type NotebookRecord = {
   className: string;
   year: string;
   subject: string;
+  tone: "teal" | "sage" | "amber" | "coral";
+  updatedAt: string;
 };
 
 export type LessonFileRecord = {
@@ -115,6 +117,12 @@ export type LessonFileRecord = {
   updatedAt: string;
 };
 
+export type LessonFileSummary = Omit<LessonFileRecord, "document">;
+
+export type NotebookGraphRecord = NotebookRecord & {
+  files: LessonFileSummary[];
+};
+
 export type AgentThreadRecord = {
   id: string;
   ownerId: string;
@@ -122,6 +130,8 @@ export type AgentThreadRecord = {
   lessonFileId: string;
   title: string;
   status: "idle" | "running" | "awaiting_approval" | "failed";
+  starterSuggestions?: string[];
+  starterSuggestionsDocumentVersion?: number;
   archivedAt?: string;
   deletedAt?: string;
   createdAt: string;
@@ -147,6 +157,7 @@ export type AgentMessageRecord = {
   content: string;
   status: "completed" | "streaming" | "failed";
   sources?: SourceRef[];
+  sessionCursor?: number;
   createdAt: string;
 };
 
@@ -173,11 +184,18 @@ export type AgentApprovalRecord = {
   runId: string;
   threadId: string;
   branchId: string;
+  assistantMessageId?: string;
   state: "pending" | "approved" | "rejected" | "expired";
   patch: DocumentPatch;
   encryptedRunState: string;
   agentDefinitionVersion: string;
   documentVersion: number;
+  continuationStatus?: "pending" | "ready" | "running" | "completed";
+  continuationLeaseToken?: string;
+  continuationLeaseExpiresAt?: string;
+  continuationAttemptCount?: number;
+  continuationError?: string;
+  continuationMessageId?: string;
   expiresAt: string;
   createdAt: string;
 };
@@ -197,11 +215,12 @@ export type KnowledgeResult = SourceRef & {
 
 export type NormalizedAgentEvent =
   | { type: "run.started"; runId: string; threadId: string; branchId: string }
+  | { type: "thread.updated"; runId: string; thread: AgentThreadRecord }
   | { type: "message.delta"; runId: string; delta: string }
   | { type: "tool.started"; runId: string; toolCallId: string; name: string; label: string; groupKey?: string }
   | { type: "tool.completed"; runId: string; toolCallId: string; name: string; ok: boolean; label: string; groupKey?: string }
   | { type: "source.added"; runId: string; source: SourceRef }
-  | { type: "approval.required"; runId: string; approvalId: string; patch: DocumentPatch }
+  | { type: "approval.required"; runId: string; approvalId: string; assistantMessageId?: string; patch: DocumentPatch }
   | { type: "message.completed"; runId: string; message: AgentMessageRecord }
   | { type: "run.completed"; runId: string }
   | { type: "run.cancelled"; runId: string }

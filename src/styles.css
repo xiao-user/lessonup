@@ -966,10 +966,38 @@
   white-space: nowrap;
 }
 
-.lesson-thread-switcher {
+.lesson-thread-menu-check {
+  display: inline-flex;
+  width: 16px;
   flex: none;
-  gap: 4px;
-  padding-inline: 8px;
+  align-items: center;
+  justify-content: center;
+}
+
+.lesson-thread-menu-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lesson-thread-status-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--destructive);
+}
+
+.lesson-history-trigger {
+  position: relative;
+}
+
+.lesson-history-trigger > .lesson-thread-status-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
 }
 
 .lesson-branch-select {
@@ -1255,6 +1283,15 @@
   font-size: var(--text-label-13);
 }
 
+.craft-markdown-table-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.craft-markdown-table-scroll > table {
+  margin-block: 10px;
+}
+
 .craft-markdown :where(th, td) {
   padding: 6px 8px;
   border: 1px solid var(--border);
@@ -1353,6 +1390,8 @@
 
 .craft-attachment {
   display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
   height: 32px;
   align-items: center;
   gap: 4px;
@@ -1364,8 +1403,49 @@
 }
 
 .craft-attachment > svg { width: 12px; height: 12px; }
-.craft-attachment > span {
+.craft-attachment-name {
+  min-width: 0;
   max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.craft-attachment-status {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.craft-message-attachments {
+  display: flex;
+  max-width: 92%;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.craft-message-attachment {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  height: 28px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted-foreground);
+  font-size: var(--text-label-12);
+}
+
+.craft-message-attachment > svg {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+}
+
+.craft-message-attachment > span {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1443,6 +1523,19 @@
 
 .craft-approval-result svg { width: 12px; height: 12px; }
 
+.craft-approval-progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: var(--text-label-12);
+}
+
+.craft-approval-progress svg {
+  width: 12px;
+  height: 12px;
+}
+
 .lesson-agent-error {
   margin: 0;
   color: var(--destructive);
@@ -1454,6 +1547,16 @@
   display: grid;
   gap: 4px;
   margin-inline: var(--assistant-gutter-start) var(--assistant-gutter-end);
+}
+
+.lesson-assistant-suggestions-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 var(--assistant-gutter-end) 0 var(--assistant-gutter-start);
+  color: var(--muted-foreground);
+  font-size: var(--text-label-12);
 }
 
 .lesson-assistant-suggestion {
