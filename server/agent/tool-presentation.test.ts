@@ -34,4 +34,19 @@ describe("safeToolPresentation", () => {
       groupKey: "knowledge-read",
     });
   });
+
+  it("labels curriculum catalog tools without exposing textbook ids", () => {
+    expect(safeToolPresentation("lookup_curriculum_textbooks", {
+      subject: "语文",
+    })).toEqual({
+      label: "查找教材书目",
+      groupKey: "curriculum-read",
+    });
+    expect(safeToolPresentation("read_curriculum_outline", {
+      textbookId: "secret-id",
+    })).toEqual({
+      label: "读取教材目录",
+      groupKey: "curriculum-read",
+    });
+  });
 });

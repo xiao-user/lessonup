@@ -9,6 +9,7 @@ export type McpScope = {
   notebookId: string;
   lessonFileId: string;
   allowedKnowledgeScopes: string[];
+  attachmentSourceIds: string[];
 };
 
 const mcpScopeSchema = z.object({
@@ -17,6 +18,7 @@ const mcpScopeSchema = z.object({
   notebookId: z.string().min(1),
   lessonFileId: z.string().min(1),
   allowedKnowledgeScopes: z.array(z.string().min(1)).max(16),
+  attachmentSourceIds: z.array(z.uuid()).max(8),
 });
 
 const secret = () => new TextEncoder().encode(

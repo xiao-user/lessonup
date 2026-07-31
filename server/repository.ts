@@ -4,21 +4,34 @@ import type {
   AgentBranchRecord,
   AgentMessageRecord,
   AgentRunRecord,
+  AgentRunEvidenceKind,
+  AgentRunEvidenceRecord,
   AgentThreadRecord,
   CapabilityPlan,
+  CurriculumNodeRecord,
+  CurriculumNodeMatch,
+  CurriculumTextbookRecord,
   DocumentPatch,
   KnowledgeResult,
   LessonFileRecord,
+  LessonContextProfile,
   LessonPlan,
   NotebookGraphRecord,
   NotebookRecord,
   SourceRef,
   NormalizedAgentEvent,
 } from "./domain.js";
-import { withoutThreadMemorySummaryItems } from "./agent/session-history.js";
+import type { CurriculumFacets, CurriculumTextbookFilter } from "./curriculum/catalog.js";
+import { durableSessionHistoryItems } from "./agent/session-history.js";
 
-export type ImportedNotebook = Omit<NotebookRecord, "ownerId" | "tone" | "updatedAt"> & {
+export type ImportedNotebook = Omit<
+  NotebookRecord,
+  "ownerId" | "tone" | "updatedAt" | "stage" | "grade" | "edition"
+> & {
   tone?: NotebookRecord["tone"];
+  stage?: string;
+  grade?: string;
+  edition?: string;
   files: Array<{
     id: string;
     title: string;
@@ -44,11 +57,14 @@ export interface LessonRepository {
     className: string;
     year: string;
     subject: string;
+    stage?: string;
+    grade?: string;
+    edition?: string;
     tone: NotebookRecord["tone"];
   }): Promise<NotebookRecord>;
   updateNotebook(ownerId: string, notebookId: string, patch: Partial<Pick<
     NotebookRecord,
-    "title" | "className" | "year" | "subject" | "tone"
+    "title" | "className" | "year" | "subject" | "stage" | "grade" | "edition" | "tone"
   >>): Promise<NotebookRecord>;
   deleteNotebook(ownerId: string, notebookId: string): Promise<void>;
   getNotebook(ownerId: string, notebookId: string): Promise<NotebookRecord | null>;
@@ -58,11 +74,12 @@ export interface LessonRepository {
     type: string;
     image?: string;
     document: LessonPlan;
+    contextProfile?: LessonContextProfile;
     pageCount: number;
   }): Promise<LessonFileRecord>;
   updateLessonFile(ownerId: string, fileId: string, patch: Partial<Pick<
     LessonFileRecord,
-    "title" | "type" | "image"
+    "title" | "type" | "image" | "contextProfile"
   >>): Promise<LessonFileRecord>;
   deleteLessonFile(ownerId: string, fileId: string): Promise<void>;
   getLessonFile(ownerId: string, fileId: string): Promise<LessonFileRecord | null>;
@@ -75,6 +92,12 @@ export interface LessonRepository {
     source: "manual" | "agent" | "undo" | "import";
     runId?: string;
     idempotencyKey: string;
+  }): Promise<LessonFileRecord>;
+  updateLessonPageCount(args: {
+    ownerId: string;
+    fileId: string;
+    documentVersion: number;
+    pageCount: number;
   }): Promise<LessonFileRecord>;
   applyApprovedPatch(args: {
     ownerId: string;
@@ -97,13 +120,33 @@ export interface LessonRepository {
   appendMessage(input: Omit<AgentMessageRecord, "id" | "createdAt"> & { id?: string }): Promise<AgentMessageRecord>;
   updateMessage(ownerId: string, messageId: string, patch: Partial<Pick<
     AgentMessageRecord,
-    "content" | "status" | "sources" | "sessionCursor"
+    "content" | "status" | "error" | "sources" | "sessionCursor"
   >>): Promise<AgentMessageRecord>;
 
   createRun(input: Omit<AgentRunRecord, "startedAt"> & { startedAt?: string }): Promise<AgentRunRecord>;
   getRun(ownerId: string, runId: string): Promise<AgentRunRecord | null>;
   getLatestRun(ownerId: string, threadId: string, branchId: string): Promise<AgentRunRecord | null>;
   updateRun(ownerId: string, runId: string, patch: Partial<AgentRunRecord>): Promise<AgentRunRecord>;
+  heartbeatRun(args: {
+    ownerId: string;
+    runId: string;
+    leaseToken: string;
+    leaseExpiresAt: string;
+  }): Promise<AgentRunRecord>;
+  settleRun(args: {
+    ownerId: string;
+    runId: string;
+    leaseToken: string;
+    status: "awaiting_approval" | "completed" | "cancelled" | "failed";
+    tokenUsage?: Record<string, number>;
+    error?: string;
+    messageStatus?: "completed" | "cancelled" | "failed";
+    messageContent?: string;
+    messageSources?: SourceRef[];
+    sessionCursor?: number;
+  }): Promise<AgentRunRecord>;
+  requestRunCancellation(ownerId: string, runId: string): Promise<boolean>;
+  recoverExpiredRuns(ownerId: string, threadId?: string): Promise<number>;
   appendRunEvent(ownerId: string, runId: string, type: string, data: unknown): Promise<void>;
   listRunEvents(ownerId: string, runId: string): Promise<NormalizedAgentEvent[]>;
 
@@ -112,6 +155,7 @@ export interface LessonRepository {
   listApprovals(ownerId: string, threadId: string, branchId: string): Promise<AgentApprovalRecord[]>;
   listPendingApprovals(ownerId: string, threadId: string, branchId: string): Promise<AgentApprovalRecord[]>;
   resolveApproval(ownerId: string, approvalId: string, state: "approved" | "rejected" | "expired"): Promise<AgentApprovalRecord>;
+  expireApprovalLifecycle(ownerId: string, approvalId: string): Promise<AgentApprovalRecord>;
   decideApproval(args: {
     ownerId: string;
     approvalId: string;
@@ -131,8 +175,29 @@ export interface LessonRepository {
     status: "ready" | "completed";
     error?: string;
   }): Promise<AgentApprovalRecord>;
+  settleApprovalContinuation(args: {
+    ownerId: string;
+    approvalId: string;
+    leaseToken: string;
+    outcome: "ready" | "paused" | "completed" | "cancelled";
+    assistantMessageId?: string;
+    content?: string;
+    sources?: SourceRef[];
+    sessionCursor?: number;
+    tokenUsage?: Record<string, number>;
+    encryptedRunState?: string;
+    error?: string;
+  }): Promise<AgentApprovalRecord>;
 
   getSessionItems(ownerId: string, threadId: string, branchId: string, limit?: number): Promise<AgentInputItem[]>;
+  getSessionItemsAfter(
+    ownerId: string,
+    threadId: string,
+    branchId: string,
+    afterCursor: number,
+    limit?: number,
+  ): Promise<AgentInputItem[]>;
+  getSessionItemCount(ownerId: string, threadId: string, branchId: string): Promise<number>;
   addSessionItems(
     ownerId: string,
     threadId: string,
@@ -161,6 +226,29 @@ export interface LessonRepository {
     messageId: string,
     sourceIds: string[],
   ): Promise<SourceRef[]>;
+  recordRunEvidence(
+    ownerId: string,
+    runId: string,
+    kind: AgentRunEvidenceKind,
+    sources: SourceRef[],
+  ): Promise<void>;
+  listRunEvidence(ownerId: string, runId: string): Promise<AgentRunEvidenceRecord[]>;
+
+  listCurriculumFacets(): Promise<CurriculumFacets>;
+  searchCurriculumTextbooks(filter?: CurriculumTextbookFilter): Promise<CurriculumTextbookRecord[]>;
+  getCurriculumTextbook(textbookId: string): Promise<CurriculumTextbookRecord | null>;
+  listCurriculumNodes(args: {
+    textbookId: string;
+    parentId?: string | null;
+    maxLevel?: number;
+  }): Promise<CurriculumNodeRecord[]>;
+  searchCurriculumNodes(args: {
+    query: string;
+    textbookId?: string;
+    subject?: string;
+    stage?: string;
+    limit?: number;
+  }): Promise<CurriculumNodeMatch[]>;
 }
 
 export class RepositorySession implements Session {
@@ -172,6 +260,7 @@ export class RepositorySession implements Session {
     private readonly threadId: string,
     private readonly branchId: string,
     private readonly persistenceKey?: string,
+    private readonly historyLoader?: () => Promise<AgentInputItem[]>,
   ) {}
 
   async getSessionId() {
@@ -179,11 +268,14 @@ export class RepositorySession implements Session {
   }
 
   async getItems(limit?: number) {
+    if (limit === undefined && this.historyLoader) {
+      return this.historyLoader();
+    }
     return this.repository.getSessionItems(this.ownerId, this.threadId, this.branchId, limit);
   }
 
   async addItems(items: AgentInputItem[]) {
-    const durableItems = withoutThreadMemorySummaryItems(items);
+    const durableItems = durableSessionHistoryItems(items);
     if (durableItems.length) {
       const idempotencyKey = this.persistenceKey
         ? `${this.persistenceKey}:${this.appendIndex}`

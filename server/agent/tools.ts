@@ -1,6 +1,6 @@
 import { tool } from "@openai/agents";
 import { z } from "zod";
-import { documentPatchSchema, documentPatchToolSchema, lessonFieldSchema, type LessonAgentContext } from "../domain.js";
+import { documentPatchToolSchema, lessonFieldSchema, type LessonAgentContext } from "../domain.js";
 import type { LessonRepository } from "../repository.js";
 import { lessonFieldLabels } from "./tool-presentation.js";
 
@@ -24,6 +24,14 @@ export function createDocumentTools(repository: LessonRepository, allowWrite: bo
       return JSON.stringify({
         title: file.title, type: file.type, subject: notebook.subject,
         className: notebook.className, year: notebook.year,
+        contextProfile: file.contextProfile,
+        missingContext: [
+          !file.contextProfile.gradeLevel ? "gradeLevel" : null,
+          !file.contextProfile.textbookEdition && !file.contextProfile.textbookId ? "textbookEdition" : null,
+          !file.contextProfile.lessonDurationMinutes ? "lessonDurationMinutes" : null,
+          !file.contextProfile.learnerProfile ? "learnerProfile" : null,
+          !file.contextProfile.equipmentConditions ? "equipmentConditions" : null,
+        ].filter(Boolean),
         documentVersion: file.documentVersion,
       });
     },
@@ -103,9 +111,11 @@ export function createDocumentTools(repository: LessonRepository, allowWrite: bo
     parameters: documentPatchToolSchema,
     needsApproval: true,
     execute: async (patchInput, runContext) => {
-      const context = requireContext(runContext);
-      const patch = documentPatchSchema.parse({ ...patchInput, fileId: context.lessonFileId });
-      return JSON.stringify({ status: "approved_document_patch_applied", summary: patch.summary });
+      requireContext(runContext);
+      return JSON.stringify({
+        status: "approved_document_patch_applied",
+        summary: patchInput.summary,
+      });
     },
   }));
   return tools;

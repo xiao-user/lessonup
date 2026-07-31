@@ -30,7 +30,7 @@ export async function sendPrompt(page: Page, prompt: string) {
 
 export async function createThread(page: Page) {
   await page.getByRole("button", { name: "新建会话" }).click();
-  await expect(page.getByRole("log").getByText("可结合当前教案继续备课", { exact: true })).toBeVisible();
+  await expect(page.getByText("可结合当前教案继续备课", { exact: true })).toBeVisible();
 }
 
 export async function openLessonFile(page: Page) {

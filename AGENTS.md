@@ -1,112 +1,72 @@
-# Prototype Instructions
+# LessonUp Prototype Instructions
 
-Run the local server yourself and open the preview in the browser available to this environment. Do not give the user server-start instructions when you can run it.
+## Working rules
 
-Before making substantial visual changes, use the Product Design plugin's `get-context` skill when the visual source is unclear or no longer matches the current goal. When the user gives durable prototype-specific design feedback, preferences, or decisions, record them in `AGENTS.md`.
+- Run the local server and open the available browser preview yourself when validating changes.
+- Before substantial visual changes, use Product Design `get-context` when the visual source is unclear. Treat an explicitly selected mock as the visual source of truth.
+- Record only durable product decisions here; keep temporary implementation plans and issue lists elsewhere.
+- Keep reusable shadcn primitives in `src/components/ui`, notebook features in `src/features/notebooks`, lesson workspace features in `src/features/lesson-files`, shared helpers in `src/lib`, design tokens in `src/styles/design-system.css`, and runtime media in `public/assets`.
+- Do not retain builds, caches, browser logs, or transient QA captures in the project tree.
 
-When implementing from a selected generated mock, treat that image as the source of truth for layout, component anatomy, density, spacing, color, typography, visible content, and hierarchy.
+## Visual system and collection
 
-## Project organization
+- Treat `/Users/liuxiao/Desktop/vibe-coding/Writing/design.md/design.md` and `/Users/liuxiao/Desktop/vibe-coding/Writing/design.md/design.dark.md` as the light and dark theme sources of truth.
+- Use Geist Sans for interface and prose, Geist Mono for metadata, the Geist 4px spacing scale, named typography tokens, semantic color aliases, documented radii, focus, elevation, and 150/200/300ms motion tiers.
+- Use shadcn/ui Base Nova and Lucide for general controls and feedback. Keep folder artwork, paper materials, and GSAP spatial transitions purpose-built.
+- Keep the application and collection as a fixed-height, clipped viewport stage. Vertical wheel/touch input controls the horizontal collection track and must not fall through to document scrolling.
+- Resting folders remain full size. Hover changes only cover/paper transforms; it must not change layout width or material. Opening and closing follow one reversible spatial path without a visible intermediate hover phase or vertical folder movement.
+- Focused papers remain interactive. The back button, folder cover, and document-level outside hit testing return to the collection; do not use a full-page dismissal overlay.
+- Keep the focused folder/paper composition centered when it fits and left-clamped when it does not. Preserve compact mobile gaps and trailing collection padding.
+- Use `/assets/contra-labs-background.mp4` as the fixed, muted, looping, bottom-aligned background without a gradient overlay. Use “备好课” as the collection `h3` with no subtitle.
 
-- Keep reusable shadcn primitives in `src/components/ui`, notebook-specific components and fixture data in `src/features/notebooks`, shared helpers in `src/lib`, design tokens in `src/styles/design-system.css`, and runtime media in `public/assets`.
-- Do not keep generated builds, package caches, Playwright session logs, or transient QA captures in the project tree. They are covered by `.gitignore`; retain only source assets that are referenced by the application.
+## Lesson-file workspace
 
-## Durable LessonUp interaction decisions
+- Use one left/center/right workspace: lightweight section anchors, one editable A4 lesson-plan document, and one unified contextual assistant. Collapse side rails into drawers on narrow screens.
+- The center document is the only strong visual object. Keep side rails free of enclosing cards, elevation, decorative headers, and dense chrome.
+- Model every page as `210mm × 297mm` with `20mm` vertical and `16mm` horizontal insets, yielding a `178mm × 257mm` content box.
+- Render the lesson plan as one semantic, editable table across consecutive pages. Rows are content-driven; never shrink, clip, overlap, or assign section-specific heights.
+- Derive pagination from a hidden real table with the same geometry and typography as the visible document. Rebuild pages greedily from the canonical document so growth pushes forward and deletion pulls content back.
+- Preserve leading/trailing blank lines. Use auto-sizing plain-text textareas with browser-owned caret state; coalesce measurement during typing and flush on blur or composition end.
+- Keep undo/redo above pagination as complete lesson-plan transactions. Merge nearby typing, keep paste separate, clear redo after new edits, and route restored plans through normal pagination and persistence.
+- Keep document scrolling inside the center workspace. Derive the active anchor from that one scroll container and hold the clicked anchor during navigation.
+- Knowledge uploads are asynchronous: enqueue private objects, claim jobs with `SKIP LOCKED`, preserve stable chunks, batch BGE-M3 embeddings, and publish only after all chunks commit.
 
-- Keep the folder front cover on one persistent translucent, blurred material in default, hover, focused, and restored states. Never swap paper layers behind the solid back cover at the end of a hover animation.
-- Hover changes only the cover's opening angle and the two recent papers' transforms; it must not change folder layout width or material styling.
-- Center the desktop folder row vertically in the viewport while keeping compact fallbacks for shorter and mobile viewports.
-- In focused mode, the explicit back button, the folder cover, and any area outside the paper sheets return to the collection; clicking a paper does not close the folder.
-- In collection mode, global vertical wheel/touch input belongs to the horizontal folder track even at its boundaries. Do not let boundary input fall through to vertical document scrolling.
-- Keep the application, workspace, and collection as a fixed-height viewport stage with clipped overflow. Do not reintroduce `100vh` children inside a padded workspace or fixed pixel minimum heights that create document-level vertical scrolling in collection or focused mode.
-- Resting folders remain at full size. Internal paper sheets are always `85%` of the folder width and never use a paper-level scale transform in resting, hover, focused, or closing states.
-- Closing must return the outer collection through its reversible spatial path while tweening cover and papers directly from the focused state to the resting state. Do not visibly pass through hover or append a separate hover-to-rest phase.
-- Vertically center the resting folder row. When opening a folder, keep the selected folder at its existing vertical coordinate with GSAP `y: 0`; focus may reposition the composition horizontally but must not add vertical folder movement.
-- Focused-mode background dismissal uses document-level pointer hit testing, not a visual or invisible full-page overlay. Preserve pointer interactions inside papers, file-action buttons, and dialogs so papers can later navigate to a deeper level.
-- In focused mode, shift the two-paper group `80px` left in final viewport coordinates. Keep the aligned papers separated by a `24px` desktop gap and a `12px` mobile gap.
-- Center the complete focused composition (folder plus visible papers) horizontally when it fits inside the collection viewport. When its calculated width exceeds the available width, clamp its starting position to the collection's left edge instead of centering it with a negative offset. Preserve the selected folder's vertical position with `y: 0`; center the papers vertically within that folder.
-- Use `/assets/contra-labs-background.mp4` as a fixed, full-viewport, muted, looping background video with no color-gradient overlay.
-- The resting cover transform is `translate(0px, 0px) rotateY(-15deg) scale(1.00001, 1)`. The two resting paper transforms are `translate(31px, 27px) rotate(7deg)` and `translate(23px, 13px) rotate(6deg)`; their hover transforms are `translate(41px, 27px) rotate(12deg)` and `translate(43px, 3px) rotate(5deg)`. Focused folders remain at their native `180px` width with no ancestor scaling, and focused papers finish vertically centered against the folder with zero rotation.
-- Keep the folder hit target and its shadcn more-action button inside `.folder-front` so they share the cover's transform and stacking context; the menu remains above the hit surface.
-- Use “备好课” as the collection page `h3` with no subtitle. Keep `section.workspace` at zero margin and use the Geist spacing scale: 40px padding on desktop and 24px on compact viewports.
-- Treat `/Users/liuxiao/Desktop/vibe-coding/Writing/design.md/design.md` and `/Users/liuxiao/Desktop/vibe-coding/Writing/design.md/design.dark.md` as the source of truth for LessonUp's light and dark themes. Keep their shared token names aligned so theme changes never require component-level overrides.
-- Use Geist Sans for interface and prose, and Geist Mono for metadata and tabular values. All typography must use the named heading, button, label, or copy tokens from the Geist design system.
-- Use the Geist 4px spacing scale, 6/12/16px radii, documented elevation and focus tokens, and the 150/200/300ms motion tiers. Ordinary buttons are 40px high with 14/20 medium text and a 6px radius; small and large buttons are 32px and 48px.
-- Use only shadcn semantic aliases or Geist scale tokens in components and page styles. Raw palette values belong only in `src/styles/design-system.css`; do not add authored React `style` props, page-level color literals, or local typography overrides.
-- Map the folder color variants to Geist accent-scale tokens so their materials respond to both light and dark themes without a second custom palette.
-- Use shadcn/ui Base Nova as the system layer for all visible general-purpose controls and feedback: buttons, dialogs, fields, inputs, selects, empty states, and toasts. Use Lucide icons to match `components.json`; keep raw elements only for invisible interaction surfaces such as the full-folder hit target.
-- Keep the folder artwork, papers, cover materials, and GSAP spatial transitions as purpose-built visual components instead of forcing them into generic shadcn Card primitives.
-- Keep all visible action buttons on shadcn Button's built-in size, typography, icon spacing, and variants; page CSS may position button groups but must not redefine button dimensions or internal text spacing.
-- Give the horizontal folder track enough trailing padding that the last folder never lands against the viewport edge. Rest the collection track at `translate: 0 -100%` and render the fixed background video bottom-aligned at `width: 100%` with proportional height rather than cropping it with `cover`.
-- Use `--app-background: #fffbfa` for the light `main#top` application canvas while keeping general Geist surfaces tokenized through `background-100`; dark mode maps the application canvas back to `background-100`. The decorative background video remains visible in light mode and yields to the dark surface in dark mode.
+## Agent architecture and security
 
-## Durable lesson-file workspace decisions
+- Supabase is canonical for notebooks, lesson files, documents, threads, branches, runs, approvals, and knowledge metadata. Browser state may hold transient UI state and unsent drafts only.
+- Use Supabase password authentication. Seed `admin` / `1234` only against loopback Supabase; never accept it in shared or production environments.
+- Keep model and service credentials on the Hono server. The browser receives only the Supabase anonymous key and the signed-in access token.
+- Revalidate the complete isolation chain `auth.user → notebook → lesson_file → agent_thread → agent_branch → run`; treat every client-provided ID as untrusted.
+- Use `@openai/agents` for the Agent loop, persistent Session, HITL RunState, MCP clients, and tracing. DeepSeek is a custom provider limited to `deepseek-v4-pro` over Chat Completions and `deepseek-v4-flash` over Responses API. DeepSeek Responses remains stateless, so LessonUp's isolated Session stays canonical.
+- Use one visible `LessonPreparationManager`; curriculum, learning design, assessment, and critique agents are internal tools. Use Pro for visible/complex work and Flash for bounded routing, titles, memory compression, and lightweight critique.
+- Deterministic document access is a Function Tool, knowledge retrieval is Streamable HTTP MCP with five-minute server-signed scope tokens, and teaching methods are versioned platform Skills.
+- Never inject another lesson file or a private library by default. Inject verified IDs, document version, active-section and selection hints; let the Agent read canonical document fields and sources on demand.
+- Web retrieval must reject private networks, file URLs, and unsafe redirects. Never expose reasoning, provider-native events, raw tool JSON, prompts, credentials, or private source bodies to the browser.
 
-- A lesson-file detail view uses only a left, center, and right workspace structure. Do not add a separate persistent top navigation or dashboard-card layer.
-- The left rail is a compact anchor navigator for the lesson plan's major categories. It reflects the active category while the center document scrolls and moves the document to that category when selected.
-- The center is one real A4-proportioned lesson-plan sheet built as an editable table document, following the anatomy of a traditional Chinese lesson-plan form rather than a stack of independent cards. Its table sections and the left anchor categories share one data model and ordering.
-- The right rail is one general contextual lesson-preparation assistant. It follows the active document category and current text selection while remaining a unified assistant rather than separate assistants per section.
-- Keep document scrolling inside the center workspace so both side rails remain stable. On narrower screens, collapse the rails into drawers instead of changing the A4 document into unrelated responsive cards.
-- Make the center A4 document the detail view's only strong visual object. Keep both side rails extremely lightweight: no enclosing cards, panel borders, elevation, decorative headers, or dense control chrome. Express anchor state, assistant context, and available actions primarily through restrained text plus small, simple color blocks drawn from the design tokens.
-- Knowledge uploads are asynchronous: upload requests only validate scope and enqueue a private Storage object. A service-role worker must claim queued sources with `SKIP LOCKED`, preserve source structure in stable chunks, batch BGE-M3 embeddings, and publish a source only after every chunk is committed.
-- Determine final page boundaries from a hidden real table rendered at the same A4 content width with the same typography, columns, borders, and cell spacing as the visible document. Character or line estimation is only an initial pre-mount fallback; visible pages and persisted page counts must use the measured result.
-- Preserve intentional leading and trailing blank lines from editable lesson cells. They are document content and must participate in DOM height measurement and automatic pagination; do not trim them during input or blur commits.
-- Treat the lesson plan as the single canonical document during editing. Every non-composition input updates that document immediately; pagination always rebuilds pages greedily from the beginning so growth pushes content forward and deletion pulls later content back into earlier available space. Newly created pages must be visible without replaying the entry animation, while persistence remains independently debounced.
-- Keep keystrokes visually native inside the active editable cell, but coalesce rapid input before running whole-document DOM measurement and pagination. Flush immediately on blur or composition end so continuous typing never performs a synchronous A4 reflow for every key while paused input still repaginates perceptibly immediately.
-- Use auto-sizing plain-text `textarea` cells as the browser-owned edit surface. Read and restore the caret through `selectionStart`/`selectionEnd`; React must not replace the active textarea value between keystrokes. Restore an absolute document caret only when pagination genuinely remounts the active fragment across pages.
-- Maintain undo and redo as complete lesson-plan transactions above pagination rather than relying on each `contenteditable` browser history. Merge nearby typing in the same field, keep paste as its own undo step, clear redo after a new edit, and route restored plans through the same measured pagination and debounced persistence flow.
-- Model every lesson-plan page with physical A4 dimensions: `210mm × 297mm`. Keep the lesson table inset from the paper by `20mm` vertically and `16mm` horizontally, giving it a `178mm × 257mm` content box; do not fake the sheet with an approximate card ratio or resize its internal geometry independently.
-- Treat the lesson plan as one semantic document rendered across consecutive A4 sheets. When measured content exceeds the current `257mm` content height, continue it automatically on the next sheet without shrinking, clipping, or overlapping content. Preserve section identity across page boundaries so left-rail anchors and assistant context still refer to one logical section; repeat a continuation label when a long table section spans pages.
-- Keep lesson-table rows content-driven. Do not assign fixed, percentage, minimum, or section-specific millimeter heights to rows or editable cells; the input content and cell padding determine table height, while only the surrounding A4 sheet remains physically fixed.
-- Derive the active left anchor from one scroll-container position calculation across all rendered sections. While a GSAP anchor navigation tween is running, keep the clicked section selected; do not let competing observers or intermediate scroll callbacks overwrite it with another section.
+## Agent state, editing, and evidence
 
-## Durable LessonUp Agent decisions
+- Give each `thread + branch` an isolated Session. Branches inherit exactly the protocol-safe history through the fork message; the parent remains unchanged.
+- Keep raw messages durable. Compact only older context into a validated, versioned, untrusted structured summary while retaining recent turns and complete tool call/result groups.
+- Persist run, user message, and assistant placeholder before routing or MCP startup. A disconnect or refresh observes the same server-owned run and must not resend the user message.
+- Enclose run and MCP initialization in cleanup-safe control flow. Repair Session protocol units before runs and after cancellation or failure.
+- Explicit stop is terminal and persists as `cancelled`; only an intentional retry starts a new run.
+- Flush and await pending document edits before start, retry, approve, or reject. Hydrate the editor from the canonical server document and require new runs to match its visible version.
+- Keep `propose_document_patch` available by default but always approval-gated. Consultation does not imply a write.
+- Treat the global document version as snapshot chronology and the final write CAS, not as a blanket conflict boundary. Rebase approval operations onto the latest canonical document only when server-bound target text and context still identify the same non-overlapping ranges; preserve unrelated teacher edits and reject changed or ambiguous targets as real conflicts.
+- Make approval decision, document transaction, RunState continuation, and run/thread settlement recoverable and idempotent. The server-returned lesson-file snapshot is the only post-approval canonical state.
+- Persist pending approvals across refresh with encrypted RunState and pinned Agent/Skill versions. Keep each approval and resolved outcome attached to its proposing assistant response.
+- Bind attachments to the user message and run. Require direct `read_attached_source` evidence before citing, summarizing, comparing, or judging an attachment; broad search is not equivalent.
+- Bind factual patch citations to sources actually observed in the current run. Show sources only on the response that owns them.
+- Keep the SmartEdu-derived national textbook catalog as platform data (`curriculum_textbooks` / `curriculum_nodes`, seeded from `data/curriculum`). Expose it through authenticated curriculum APIs for create/context selectors and through on-demand Function Tools (`lookup_curriculum_textbooks`, `read_curriculum_outline`); never inject full catalogs into prompts, and never treat directory trees as textbook body text.
+- Bind notebook `subject` to catalog subjects. Bind lesson-file teaching context to an optional `textbookId` / `unitNodeId` (with denormalized `gradeLevel` + `textbookEdition` labels) so Agent tools and UI selectors share one curriculum source.
 
-- Use Supabase password authentication for the current prototype. Seed the `admin` / `1234` account only when the configured Supabase URL is loopback; never create or accept that weak test credential in a shared or production environment.
-- Keep notebooks, lesson files, documents, threads, branches, runs, approvals and knowledge metadata canonical in Supabase. Browser state may cache transient UI state and unsent drafts only; it must not become a second domain database.
-- Keep all model credentials and Supabase service credentials on the Hono server. The browser may receive only Supabase's anonymous key and the signed-in user's access token.
-- Keep the isolation chain `auth.user → notebook → lesson_file → agent_thread → agent_branch → run`. Treat every client-provided ID as untrusted and revalidate the full parent relationship on the server.
-- Use `@openai/agents` for the Agent loop, isolated persistent Session, HITL RunState recovery, MCP clients and tracing. DeepSeek remains a custom Chat Completions model provider with only `deepseek-v4-pro` and `deepseek-v4-flash` accepted.
-- Use Pro for visible conversation and complex teaching work. Use Flash for capability routing, first-message thread titles, structured history compression and lightweight critique.
-- Keep one user-visible `LessonPreparationManager`; curriculum, learning design, assessment and critique agents are internal tools. Knowledge retrieval is MCP, deterministic document access is a Function Tool, and teaching methods are versioned platform Skills.
-- Never inject another lesson file or full private library into a run by default. Inject only verified IDs, active section, exact text selection and document version; the Agent must read document fields and sources on demand.
-- Keep every `thread + branch` in its own Session. Retain roughly 12 recent conversation turns and add a versioned structured Flash summary when older items exceed the context budget; never delete raw messages during compaction.
-- Do not expose DeepSeek reasoning content, provider-native events, raw tool JSON, prompts or private source bodies in browser SSE or ordinary message history.
-- All document writes go through an approval-required `propose_document_patch`. Approval must recheck `baseDocumentVersion`, non-overlapping ranges and `expectedText`; conflicts return `stale_document` and never overwrite newer work.
-- Preserve pending approvals across refresh through encrypted RunState, pin the Agent and Skill versions used by the run, and make approve, reject, cancel and retry idempotent.
-- Use Streamable HTTP MCP with five-minute server-signed scope tokens. Knowledge results must remain inside public/user/notebook/file scopes; web retrieval must reject private networks, file URLs and unsafe redirects.
-- Keep the right assistant rail visually lightweight. Use one local Craft Agents presentation adapter for the complete agent conversation surface, including turns, task activity, Markdown, sources, approvals, attachments and composer. Do not mix AI Elements into this conversation rendering chain. Continue using shadcn/Base Nova for ordinary controls such as buttons, inputs, selects and menus.
-- Adapt Craft Agents' Apache-2.0 `TurnCard`, `InlineExecution` and Markdown presentation through dependency-light local components backed only by LessonUp's normalized run events. Bind every visible phase, task and source to real events; never fake task progress or expose provider reasoning, raw chain-of-thought, tool parameters or private tool output.
-- Keep knowledge uploads composer-local until indexing succeeds. Any visible queued, processing or failed upload blocks sending until it becomes ready or the teacher removes it; removal must delete the real private Storage object and source record. On send, snapshot ready uploads into the user message, clear them from the composer and preserve them with that message across refresh and branches.
-- Treat files attached to the first message of a new conversation exactly like later attachments. Bind verified source IDs to that user message and provision the attachment-reading capability without imposing a hard-coded first tool call. Let the Agent choose relevant attachments and reading depth from the teacher's task, but require direct `read_attached_source` evidence before citing, summarizing, comparing or judging attachment contents; broad search must never masquerade as reading a specified attachment.
-- Keep `propose_document_patch` available to the unified assistant by default, while preserving its approval requirement. Consultation does not require a patch, and tool availability must not be confused with permission to write.
-- Place user-created branch actions on completed assistant responses, not optimistic user turns. Never restore unsent composer attachments from the persistent project knowledge library after refresh, page exit or thread switching.
-- Generate empty-thread starter suggestions with Flash from the current canonical lesson document and persist them separately from the Agents SDK Session, pinned to the document version used. Do not seed a synthetic context message into conversation history, and do not replace generation failures with canned teaching prompts.
-- Treat the current whole lesson plan as the assistant's working context. The active document section is only a focus hint and a text selection is a narrower hint; neither replaces the whole-document scope. For broad review, read the whole document once. Label single-section reads with the real section name and aggregate legacy repeated section reads into one truthful whole-document activity.
-- Do not render a permanent explanatory assistant-context block. Keep the current thread title separate on the left of the assistant heading. Group the icon-only history switcher, new-thread button and more-actions button together on the right using the same shadcn ghost icon-button anatomy and default visual state; do not show a dropdown arrow or title inside the history trigger. Open the history menu below its trigger with spacing so it never covers the icon. Renaming replaces only the title area.
-- Use the browser or operating system's default scrollbar appearance. Do not set custom scrollbar colors, widths, tracks or thumbs.
-- Keep the assistant rail flush to its horizontal edges. Apply gutters to the header, conversation content and composer or suggestions instead, so the conversation scrollbar stays on the rail edge without touching message content.
-- Let assistant responses grow with their Markdown content; do not put a nested maximum-height scroller or elevation shadow on response cards.
-- Flush and await pending lesson-document edits before starting or retrying an Agent run. Present stale proposals as a safe, non-writing conflict with an action to regenerate from current content; never expose internal field identifiers in the error.
-- Hydrate the lesson-file detail from the server's canonical document before opening it, and require every new Agent run to match the document version visible in the editor. Never let the assistant read a newer server document while the teacher is looking at a stale local copy.
-- Treat an explicit stop as terminal for that run. Switching away and back must not resume it; only a deliberate retry may create a new run. Preserve user-created message branches as isolated alternatives within the same thread.
-- Persist the run plus optimistic user and assistant records before capability routing, title generation or MCP connection, and render the assistant's thinking state immediately on send. A browser disconnect or refresh must recover and observe that same server-owned run; it must never synthesize an interruption or resend the user message. Retry only restores editable input and requires an explicit send.
-- Keep every document-patch approval attached to the assistant response that proposed it, including its resolved outcome. Surface pending approvals on the owning thread title and history controls so teachers can find them from another thread.
-- Show sources only on the assistant response whose normalized run events or persisted message actually contain those sources. Never carry the previous response's sources into a later source-free response.
-- Create empty threads without waiting for Flash starter generation. Generate and persist starters asynchronously against the current document version, show a truthful loading state, and retry generation when an empty thread is revisited after a failure.
-- Updating the visible lesson document after an approval must never reinitialize the assistant or change the selected thread. Treat document-version changes as run context updates, not navigation events.
-- Keep first-message title generation off the critical Agent path, and use a bounded deterministic fallback when Flash capability routing is slow. Explicit document-change requests should take the deterministic local routing path so metadata work never delays the first real model or tool activity.
-- Run the visible Pro manager in non-thinking mode for low-latency tool orchestration. Reserve longer provider-native reasoning for bounded internal specialist work; never make a straightforward document read wait behind max-effort reasoning.
-- Before every run and after every cancellation or failed turn, repair the canonical SDK Session to protocol-safe units. Remove orphan tool calls and results while preserving valid messages and complete call/result groups; an initialization-stage cancellation is `cancelled`, never `failed`.
-- If empty-thread starter generation fails validation or transport, keep the empty thread usable and show a retryable unavailable state. Never silently replace the loading indicator with an empty area.
-- Without configured external credentials, expose a truthful unavailable state. Never replace the model with canned or fake assistant replies in the product UI.
+## Agent experience and verification
 
-## Durable LessonUp Agent remediation order
-
-Follow this order for Agent hardening work; do not optimize routing, presentation, token use, or model choice ahead of state correctness and recoverability.
-
-1. Unify branch semantics across visible messages, Agents SDK Session items, and structured memory. A child branch must inherit exactly the protocol-safe history through its fork message, while the parent branch remains unchanged.
-2. Flush and await pending document edits before approve or reject as well as before start or retry. Make the approval decision, document transaction, RunState continuation, and run/thread terminal state recoverable and idempotent across crashes and replay.
-3. Enclose the complete active-run and MCP lifecycle, including context creation, routing, connection and run persistence, in cleanup-safe control flow so initialization failures cannot leak an active run or connection.
-4. Correct compaction cursor semantics, capability fallback limits, intent-sensitive write-tool use, and public error sanitization before tuning prompts or models. The approval-gated patch tool remains available by default; intent controls whether the Agent should call it, not whether the Harness hides it.
-5. Add real Agents SDK integration and evaluation coverage for model/tool protocol, MCP, RunState recovery, branching and observed regressions; keep the deterministic browser harness for UI and database contracts, but never treat it as proof of the real Agent path.
+- Use the local Craft Agents adapter as the single conversation presentation chain for turns, task activity, Markdown, sources, approvals, attachments, and composer. Use shadcn/Base Nova for ordinary controls.
+- Render only normalized real events. Never fake progress or expose chain-of-thought, raw parameters, or private tool output.
+- Keep the assistant rail visually lightweight and flush to its edges, with gutters inside header/content/composer. Use the system scrollbar and let responses grow without nested scrollers or shadows.
+- Keep title/history/new-thread/actions compact in the assistant header. Preserve thread selection when document versions update.
+- Keep composer uploads local until indexing succeeds; block send while uploads are unresolved, snapshot ready files into the sent message, and never restore unsent attachments from project knowledge.
+- Create empty threads immediately and generate version-pinned starter suggestions asynchronously. Show truthful loading, unavailable, and retry states; never substitute canned model replies.
+- Keep active pending approval controls reachable near the composer and present field-named summaries by default, with an explicit full-diff expansion.
+- Verify Agent changes with real Agents SDK integration tests for model/tool protocol, Session, MCP, RunState, approvals, cancellation, and branching. Use the deterministic browser harness for UI/database contracts, not as proof of the real Agent path.

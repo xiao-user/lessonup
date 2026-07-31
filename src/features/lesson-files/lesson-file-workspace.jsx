@@ -4,7 +4,6 @@ import gsap from "gsap";
 import { ArrowLeft, Check, PanelLeft, Redo2, Sparkles, Undo2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { applyClientDocumentPatch } from "@/features/assistant/document-patch";
 import {
   createLessonPlanDraft,
   lessonPlanSections,
@@ -497,10 +496,12 @@ export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgen
   const saveTimerRef = useRef(null);
   const measureRef = useRef(null);
   const onSaveRef = useRef(onSave);
+  const onAgentVersionCommittedRef = useRef(onAgentVersionCommitted);
   const planRef = useRef(null);
   const dirtyPlanRef = useRef(null);
   const pendingSaveSourceRef = useRef("manual");
   const pendingSaveDataRef = useRef(null);
+  const pendingAgentCommitRef = useRef(null);
   const saveInFlightRef = useRef(Promise.resolve());
   const persistPendingSaveRef = useRef(() => Promise.resolve());
   const pendingCaretRef = useRef(null);
@@ -525,6 +526,7 @@ export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgen
   const [mobileRail, setMobileRail] = useState(null);
   const [pages, setPages] = useState(() => paginateLessonPlan(initialPlan));
   onSaveRef.current = onSave;
+  onAgentVersionCommittedRef.current = onAgentVersionCommitted;
   planRef.current = plan;
   documentVersionRef.current = documentVersion;
 
@@ -586,6 +588,16 @@ export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgen
 
     setEditorSyncVersion((version) => version + 1);
 
+    const agentCommit = pendingAgentCommitRef.current;
+    if (agentCommit?.plan === currentPlan) {
+      pendingAgentCommitRef.current = null;
+      Promise.resolve(onAgentVersionCommittedRef.current(
+        currentPlan,
+        agentCommit.documentVersion,
+        measuredPages.length,
+      )).catch(() => setSaveStatus("页数同步失败"));
+    }
+
     if (dirtyPlanRef.current === currentPlan) {
       pendingSaveDataRef.current = {
         plan: currentPlan,
@@ -609,6 +621,7 @@ export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgen
     window.clearTimeout(saveTimerRef.current);
     await persistPendingSaveRef.current();
     await saveInFlightRef.current;
+    return { documentVersion: documentVersionRef.current };
   }, []);
 
   useLayoutEffect(() => {
@@ -930,14 +943,25 @@ export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgen
     if (context) setSelectionContext(context);
   };
 
-  const applyAgentPatch = (patch) => {
-    const nextPlan = applyClientDocumentPatch(planRef.current, patch);
-    const nextVersion = documentVersionRef.current + 1;
-    documentVersionRef.current = nextVersion;
-    setDocumentVersion(nextVersion);
-    persistPlan(nextPlan, null, { field: "document", kind: "agent" });
-    onAgentVersionCommitted(nextPlan, nextVersion);
-  };
+  const applyCanonicalAgentDocument = useCallback((canonicalFile) => {
+    if (canonicalFile.id !== file.id) return;
+    if (canonicalFile.documentVersion < documentVersionRef.current) return;
+    if (
+      canonicalFile.documentVersion === documentVersionRef.current
+      && canonicalFile.document === planRef.current
+    ) return;
+    documentVersionRef.current = canonicalFile.documentVersion;
+    setDocumentVersion(canonicalFile.documentVersion);
+    pendingAgentCommitRef.current = {
+      plan: canonicalFile.document,
+      documentVersion: canonicalFile.documentVersion,
+    };
+    persistPlan(
+      canonicalFile.document,
+      null,
+      { field: "document", kind: "agent" },
+    );
+  }, [file.id]);
 
   const closeWorkspace = contextSafe(() => {
     if (closingRef.current) return;
@@ -1027,6 +1051,7 @@ export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgen
           type="button"
           aria-label="显示教案目录"
           aria-pressed={mobileRail === "outline"}
+          aria-controls="lesson-outline-panel"
           onClick={() => setMobileRail((current) => current === "outline" ? null : "outline")}
         >
           <PanelLeft />
@@ -1037,13 +1062,14 @@ export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgen
           type="button"
           aria-label="显示备课助手"
           aria-pressed={mobileRail === "assistant"}
+          aria-controls="lesson-assistant-panel"
           onClick={() => setMobileRail((current) => current === "assistant" ? null : "assistant")}
         >
           <Sparkles />
         </Button>
       </div>
 
-      <aside className={`lesson-side-rail lesson-outline-rail ${mobileRail === "outline" ? "is-mobile-open" : ""}`}>
+      <aside id="lesson-outline-panel" className={`lesson-side-rail lesson-outline-rail ${mobileRail === "outline" ? "is-mobile-open" : ""}`}>
         <div className="lesson-outline-header">
           <Button variant="ghost" size="sm" type="button" onClick={closeWorkspace}>
             <ArrowLeft data-icon="inline-start" /> 返回备课本
@@ -1107,6 +1133,7 @@ export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgen
         onPointerUp={captureSelection}
         onKeyUp={captureSelection}
       >
+        <p className="lesson-mobile-document-hint">左右滑动查看完整教案</p>
         <div className="lesson-document-pages">
           {pages.map((pageEntries, pageIndex) => (
             <article
@@ -1187,7 +1214,7 @@ export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgen
         </div>
       </main>
 
-      <aside className={`lesson-side-rail lesson-assistant-rail ${mobileRail === "assistant" ? "is-mobile-open" : ""}`}>
+      <aside id="lesson-assistant-panel" className={`lesson-side-rail lesson-assistant-rail ${mobileRail === "assistant" ? "is-mobile-open" : ""}`}>
         <Suspense fallback={<p className="lesson-agent-status">正在加载备课助手…</p>}>
           <LessonAgentPanel
             notebook={notebook}
@@ -1196,8 +1223,9 @@ export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgen
             activeSectionData={activeSectionData}
             selection={selectionContext}
             onClearSelection={() => setSelectionContext(null)}
-            onPatchApplied={applyAgentPatch}
+            onCanonicalDocument={applyCanonicalAgentDocument}
             onBeforeRun={flushDocumentBeforeAgentRun}
+            onNavigateToSection={scrollToSection}
           />
         </Suspense>
       </aside>

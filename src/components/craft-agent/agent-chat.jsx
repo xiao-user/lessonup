@@ -37,7 +37,8 @@ import {
   presentAgentActivities,
   shouldShowAgentThinking,
 } from "@/features/assistant/agent-turn-presentation";
-import { lessonFieldLabels } from "@/features/assistant/document-patch";
+import { presentAgentError } from "@/features/assistant/agent-run-control";
+import { presentPatchOperation } from "@/features/assistant/document-patch";
 import { dedupeAgentSources } from "@/features/assistant/source-state";
 import { cn } from "@/lib/utils";
 
@@ -195,7 +196,7 @@ function CraftSources({ sources }) {
 
 export function CraftUserTurn({ message, onCopy }) {
   return (
-    <article className="craft-turn craft-turn-user" data-from="user">
+    <article className="craft-turn craft-turn-user" data-from="user" aria-label="教师消息">
       <div className="craft-user-bubble">{message.content}</div>
       {message.sources?.length ? (
         <div className="craft-message-attachments" aria-label="随消息发送的资料">
@@ -221,8 +222,11 @@ export function CraftAssistantTurn({
   onBranch,
 }) {
   const hasResponse = Boolean(message.content);
+  const failure = message.status === "failed"
+    ? presentAgentError(message.error ?? "agent_run_failed")
+    : null;
   return (
-    <article className="craft-turn craft-turn-assistant" data-from="assistant">
+    <article className="craft-turn craft-turn-assistant" data-from="assistant" aria-label="备课助手回复">
       <CraftTurnProcess activities={activities} status={status} responseText={message.content} />
       {hasResponse ? (
         <div className="craft-response-card">
@@ -231,6 +235,16 @@ export function CraftAssistantTurn({
           </div>
           {message.status !== "streaming" ? <CraftTurnActions onCopy={onCopy} onBranch={onBranch} /> : null}
         </div>
+      ) : null}
+      {message.status === "cancelled" ? (
+        <p className="craft-turn-cancelled" role="status">
+          {hasResponse ? "已停止，以上是停止前生成的内容。" : "本次生成已停止。"}
+        </p>
+      ) : null}
+      {failure ? (
+        <p className="craft-turn-failed" role="status">
+          {hasResponse ? `本轮未能完成：${failure.message} 以上是中断前生成的内容。` : failure.message}
+        </p>
       ) : null}
       <CraftSources sources={sources} />
     </article>
@@ -272,20 +286,44 @@ export function CraftApproval({
   onApprove,
   onReject,
   onContinue,
+  onNavigate,
 }) {
   if (!approval) return null;
   const pending = approval.state === "pending" || approval.state === "responding";
   return (
-    <section className="craft-approval" aria-label="教案修改确认">
+    <section className="craft-approval" id={`approval-${approval.id}`} aria-label="教案修改确认">
       <h3>{approval.patch.summary}</h3>
       <div className="craft-approval-diff">
-        {approval.patch.operations.map((operation, index) => (
-          <div key={`${operation.field}-${operation.start}-${index}`}>
-            <span>{lessonFieldLabels[operation.field] ?? "教案栏目"} · {operation.start}—{operation.end}</span>
-            <del>{operation.expectedText || "（空）"}</del>
-            <ins>{operation.replacement || "（删除）"}</ins>
-          </div>
-        ))}
+        {approval.patch.operations.map((operation, index) => {
+          const preview = presentPatchOperation(operation);
+          return (
+            <div key={`${operation.field}-${operation.start}-${index}`}>
+              <div className="craft-approval-diff-heading">
+                <span>{preview.fieldLabel}</span>
+                {onNavigate ? (
+                  <Button type="button" variant="ghost" size="xs" onClick={() => onNavigate(operation.field)}>
+                    在教案中定位
+                  </Button>
+                ) : null}
+              </div>
+              {preview.isNoEffect ? (
+                <p className="craft-approval-no-effect">这项历史建议没有产生实际内容变化。</p>
+              ) : (
+                <>
+                  <del>{preview.before || "（新增内容）"}</del>
+                  <ins>{preview.after || "（删除这段内容）"}</ins>
+                </>
+              )}
+              {preview.isTruncated && !preview.isNoEffect ? (
+                <details>
+                  <summary>展开完整对比</summary>
+                  <del>{preview.fullBefore || "（新增内容）"}</del>
+                  <ins>{preview.fullAfter || "（删除这段内容）"}</ins>
+                </details>
+              ) : null}
+            </div>
+          );
+        })}
       </div>
       {approval.patch.citations?.length ? (
         <p>附有 {approval.patch.citations.length} 个可追溯来源</p>

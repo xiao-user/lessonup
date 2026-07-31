@@ -41,6 +41,13 @@ const badRequest = new Set([
   "empty_patch",
   "knowledge_file_required",
   "knowledge_source_empty",
+  "curriculum_textbook_not_found",
+  "curriculum_subject_mismatch",
+  "curriculum_stage_mismatch",
+  "curriculum_grade_mismatch",
+  "curriculum_edition_mismatch",
+  "curriculum_unit_requires_textbook",
+  "curriculum_unit_not_in_textbook",
 ]);
 
 export function publicApiError(error: unknown) {

@@ -1,5 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import OpenAI from "openai";
+import { resolveEvalGraderConfig } from "./config.js";
+import { gradeBusinessResponse } from "./grading.js";
 
 type EvalCase = {
   id: string;
@@ -9,7 +12,11 @@ type EvalCase = {
   forbiddenTools?: string[];
   requiresApproval: boolean;
   requiresSource: boolean;
-  manualRubric: string[];
+  rubric: string[];
+  minimumRubricScore?: number;
+  requireDocumentGrounding?: boolean;
+  rejectGeneric?: boolean;
+  rejectUnsupportedPrecision?: boolean;
 };
 
 type AgentEvent = {
@@ -19,6 +26,7 @@ type AgentEvent = {
   approvalId?: string;
   source?: { id?: string };
   error?: string;
+  patch?: unknown;
 };
 
 const requiredEnvironment = [
@@ -38,6 +46,11 @@ const headers = {
   authorization: `Bearer ${process.env.LESSONUP_EVAL_ACCESS_TOKEN}`,
   "content-type": "application/json",
 };
+const graderConfig = resolveEvalGraderConfig(process.env);
+const grader = new OpenAI({
+  apiKey: graderConfig.apiKey,
+  baseURL: graderConfig.baseURL,
+});
 
 async function request<T>(pathname: string, init: RequestInit = {}) {
   const response = await fetch(`${baseUrl}${pathname}`, {
@@ -100,8 +113,10 @@ for (const testCase of cases) {
   });
 
   let events: AgentEvent[] = [];
+  let lessonFile: { documentVersion: number; document: unknown } | undefined;
+  let assistantResponse = "";
   try {
-    const lessonFile = await request<{ documentVersion: number }>(
+    lessonFile = await request<{ documentVersion: number; document: unknown }>(
       `/api/lesson-files/${process.env.LESSONUP_EVAL_LESSON_FILE_ID}`,
     );
     events = await consumeSse(`/api/agent/threads/${created.thread.id}/runs`, {
@@ -110,7 +125,15 @@ for (const testCase of cases) {
       activeSectionId: "basics",
       documentVersion: lessonFile.documentVersion,
     });
+    const messages = await request<Array<{ role: string; content: string }>>(
+      `/api/agent/threads/${created.thread.id}/messages?branchId=${created.branch.id}`,
+    );
+    assistantResponse = [...messages].reverse()
+      .find((message) => message.role === "assistant")?.content ?? "";
     const approval = events.find((event) => event.type === "approval.required");
+    if (!assistantResponse && approval?.patch) {
+      assistantResponse = `待审批修改：${JSON.stringify(approval.patch)}`;
+    }
     if (approval?.approvalId && approval.runId) {
       await consumeSse(
         `/api/agent/runs/${approval.runId}/approvals/${approval.approvalId}`,
@@ -139,6 +162,22 @@ for (const testCase of cases) {
   const hasSource = events.some((event) => event.type === "source.added");
   if (testCase.requiresSource && !hasSource) failures.push("missing_source");
   if (events.some((event) => event.type === "run.failed")) failures.push("run_failed");
+  const businessGrade = await gradeBusinessResponse({
+    client: grader,
+    model: graderConfig.model,
+    prompt: testCase.prompt,
+    response: assistantResponse,
+    document: lessonFile?.document,
+    rubric: {
+      criteria: testCase.rubric,
+      minimumScore: testCase.minimumRubricScore ?? 0.75,
+      requireDocumentGrounding: testCase.requireDocumentGrounding,
+      rejectGeneric: testCase.rejectGeneric,
+      rejectUnsupportedPrecision: testCase.rejectUnsupportedPrecision,
+    },
+    observed: { toolNames, hasApproval, hasSource },
+  });
+  failures.push(...businessGrade.failures);
 
   results.push({
     id: testCase.id,
@@ -150,7 +189,8 @@ for (const testCase of cases) {
       hasSource,
       terminalEvent: events.at(-1)?.type,
     },
-    manualRubric: testCase.manualRubric,
+    assistantResponse,
+    businessGrade,
   });
 }
 

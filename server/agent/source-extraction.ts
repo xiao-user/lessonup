@@ -30,6 +30,9 @@ function unpackSourcePayload(value: unknown, depth = 0): Record<string, unknown>
   if (object.structuredContent !== undefined) {
     return unpackSourcePayload(object.structuredContent, depth + 1);
   }
+  if (Array.isArray(object.sources)) {
+    return unpackSourcePayload(object.sources, depth + 1);
+  }
   return [];
 }
 

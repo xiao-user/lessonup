@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DocumentPatchError } from "../document-patch.js";
+import { AgentEvidenceError } from "./evidence.js";
 import { publicAgentError } from "./public-error.js";
 
 describe("publicAgentError", () => {
@@ -7,6 +8,12 @@ describe("publicAgentError", () => {
     expect(publicAgentError(
       new DocumentPatchError("text_mismatch", "process 的原文已经变化"),
     )).toBe("stale_document");
+  });
+
+  it("turns an invalid semantic patch into an actionable public error", () => {
+    expect(publicAgentError(
+      new DocumentPatchError("invalid_patch", "objectives 中的修改原文不唯一"),
+    )).toBe("invalid_patch_proposal");
   });
 
   it("preserves stable non-document error codes", () => {
@@ -31,5 +38,12 @@ describe("publicAgentError", () => {
       .toBe("agent_rate_limited");
     expect(publicAgentError(new Error("upstream timed out after 15000ms")))
       .toBe("agent_timeout");
+  });
+
+  it("preserves evidence-boundary errors without exposing source bodies", () => {
+    expect(publicAgentError(new AgentEvidenceError("evidence_required")))
+      .toBe("evidence_required");
+    expect(publicAgentError(new AgentEvidenceError("unverified_patch_citation")))
+      .toBe("unverified_patch_citation");
   });
 });

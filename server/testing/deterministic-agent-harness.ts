@@ -13,6 +13,7 @@ type StartInput = {
   branchId: string;
   message: string;
   activeSectionId: string;
+  documentVersion: number;
   attachmentIds: string[];
 };
 
@@ -45,6 +46,7 @@ export class DeterministicAgentHarness {
     }
     const file = await this.repository.getLessonFile(input.userId, thread.lessonFileId);
     if (!file || file.notebookId !== thread.notebookId) throw new Error("lesson_scope_invalid");
+    if (file.documentVersion !== input.documentVersion) throw new Error("document_context_stale");
 
     const runId = crypto.randomUUID();
     let settle = () => {};
@@ -58,7 +60,13 @@ export class DeterministicAgentHarness {
       branchId: branch.id,
       model: "deterministic-agent-e2e",
       status: "running",
-      capabilityPlan: { skillIds: [], toolGroups: ["document-read"], mcpServers: [], specialistAgents: [] },
+      capabilityPlan: {
+        skillIds: [],
+        toolGroups: ["document-read"],
+        mcpServers: [],
+        specialistAgents: [],
+        evidenceRequired: false,
+      },
       agentDefinitionVersion: "deterministic-agent-e2e@1",
       skillVersions: {},
     });
@@ -178,6 +186,26 @@ export class DeterministicAgentHarness {
           encryptedRunState: "deterministic-e2e-after-decision",
         });
         approval = decision.approval;
+        await args.emit({
+          type: "approval.decided",
+          runId: approval.runId,
+          approvalId: approval.id,
+          decision: args.approved ? "approved" : "rejected",
+        });
+        if (decision.file) {
+          await args.emit({
+            type: "document.updated",
+            runId: approval.runId,
+            file: decision.file,
+          });
+        }
+      } else {
+        await args.emit({
+          type: "approval.decided",
+          runId: approval.runId,
+          approvalId: approval.id,
+          decision: args.approved ? "approved" : "rejected",
+        });
       }
       approval = await this.repository.claimApprovalContinuation({
         ownerId: args.userId,
@@ -186,14 +214,24 @@ export class DeterministicAgentHarness {
         leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
       });
       if (approval.continuationStatus === "completed") {
+        const file = args.approved
+          ? await this.repository.getLessonFile(args.userId, approval.patch.fileId)
+          : null;
         await args.emit({
           type: "run.started", runId: approval.runId,
           threadId: approval.threadId, branchId: approval.branchId,
         });
+        await args.emit({
+          type: "approval.decided",
+          runId: approval.runId,
+          approvalId: approval.id,
+          decision: args.approved ? "approved" : "rejected",
+        });
+        if (file) {
+          await args.emit({ type: "document.updated", runId: approval.runId, file });
+        }
         await args.emit({ type: "run.completed", runId: approval.runId });
-        return args.approved
-          ? this.repository.getLessonFile(args.userId, approval.patch.fileId)
-          : null;
+        return file;
       }
       continuationClaimed = true;
       await this.repository.updateRun(args.userId, approval.runId, { status: "running" });
@@ -257,11 +295,11 @@ export class DeterministicAgentHarness {
           status: "ready",
           error: "agent_run_failed",
         }).catch(() => undefined);
+        await this.repository.updateRun(args.userId, approval.runId, {
+          status: "failed", completedAt: new Date().toISOString(),
+        });
+        await this.repository.updateThread(args.userId, approval.threadId, { status: "failed" });
       }
-      await this.repository.updateRun(args.userId, approval.runId, {
-        status: "failed", completedAt: new Date().toISOString(),
-      });
-      await this.repository.updateThread(args.userId, approval.threadId, { status: "failed" });
       throw error;
     }
   }
@@ -333,7 +371,11 @@ export class DeterministicAgentHarness {
       status: "failed", error, completedAt: new Date().toISOString(),
     });
     await this.repository.updateThread(userId, threadId, { status: "failed" });
-    await this.repository.updateMessage(userId, assistantId, { content: "", status: "failed" });
+    await this.repository.updateMessage(userId, assistantId, {
+      content: "",
+      status: "failed",
+      error,
+    });
     await emit({ type: "run.failed", runId, error });
   }
 
@@ -349,7 +391,7 @@ export class DeterministicAgentHarness {
       status: "cancelled", completedAt: new Date().toISOString(),
     });
     await this.repository.updateThread(userId, threadId, { status: "idle" });
-    await this.repository.updateMessage(userId, assistantId, { content, status: "completed" });
+    await this.repository.updateMessage(userId, assistantId, { content, status: "cancelled" });
     await emit({ type: "run.cancelled", runId });
   }
 }

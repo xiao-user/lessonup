@@ -3,9 +3,11 @@ import {
   applyDocumentPatch,
   canonicalizeDocumentPatchRanges,
   DocumentPatchError,
+  materializeDocumentPatchProposal,
+  rebaseDocumentPatch,
   validateDocumentPatch,
 } from "./document-patch.js";
-import { documentPatchSchema, documentPatchToolSchema, type LessonPlan } from "./domain.js";
+import { documentPatchToolSchema, type LessonPlan } from "./domain.js";
 
 const plan: LessonPlan = {
   unit: "第一单元", period: "1", totalPeriods: "2", topic: "轴对称",
@@ -15,23 +17,50 @@ const plan: LessonPlan = {
 };
 
 describe("document patch", () => {
-  it("normalizes a model-provided null citations field to no citations", () => {
-    const toolInput = documentPatchToolSchema.parse({
-      baseDocumentVersion: 0,
+  it("accepts a semantic proposal without model-authored versions or offsets", () => {
+    const proposal = documentPatchToolSchema.parse({
       summary: "更新教学目标",
+      operations: [{
+        field: "objectives",
+        expectedText: "理解",
+        replacement: "解释",
+      }],
+    });
+    const patch = materializeDocumentPatchProposal({
+      proposal,
+      fileId: "m1",
+      documentVersion: 7,
+      plan,
+    });
+
+    expect(patch).toMatchObject({
+      fileId: "m1",
+      baseDocumentVersion: 7,
       operations: [{
         op: "replace_text",
         field: "objectives",
         start: 0,
-        end: 1,
-        expectedText: "旧",
-        replacement: "新",
+        end: 2,
+        expectedText: "理解",
+        replacement: "解释",
       }],
-      citations: null,
     });
-    const patch = documentPatchSchema.parse({ ...toolInput, fileId: "m1" });
+  });
 
-    expect(patch.citations).toBeUndefined();
+  it("rejects semantic proposals whose source text is not unique", () => {
+    expect(() => materializeDocumentPatchProposal({
+      proposal: {
+        summary: "替换重复内容",
+        operations: [{
+          field: "process",
+          expectedText: "。",
+          replacement: "；",
+        }],
+      },
+      fileId: "m1",
+      documentVersion: 7,
+      plan,
+    })).toThrow(/修改原文不唯一/);
   });
 
   it("applies multiple operations from the same base document without offset drift", () => {
@@ -98,5 +127,87 @@ describe("document patch", () => {
       fileId: "m1", baseDocumentVersion: 0, summary: "过期",
       operations: [{ op: "replace_text", field: "topic", start: 0, end: 2, expectedText: "几何", replacement: "图形" }],
     })).toThrow(/原文已经变化/);
+  });
+
+  it("rebases a safe replacement after unrelated text is inserted before it", () => {
+    const patch = canonicalizeDocumentPatchRanges({
+      fileId: "m1", baseDocumentVersion: 3, summary: "更新第二项目标",
+      operations: [{
+        op: "replace_text",
+        field: "objectives",
+        start: 6,
+        end: 8,
+        expectedText: "能够",
+        replacement: "独立",
+      }],
+    }, plan);
+    const current = {
+      ...plan,
+      objectives: `新增说明。${plan.objectives}`,
+    };
+
+    const rebased = rebaseDocumentPatch(patch, current, 4);
+
+    expect(rebased.baseDocumentVersion).toBe(4);
+    expect(applyDocumentPatch(current, rebased).objectives)
+      .toBe("新增说明。理解轴对称。独立判断轴对称图形。");
+  });
+
+  it("preserves later teacher edits when the proposed target is unchanged", () => {
+    const patch = canonicalizeDocumentPatchRanges({
+      fileId: "m1", baseDocumentVersion: 3, summary: "更新第一项目标",
+      operations: [{
+        op: "replace_text",
+        field: "objectives",
+        start: 0,
+        end: 2,
+        expectedText: "理解",
+        replacement: "解释",
+      }],
+    }, plan);
+    const current = {
+      ...plan,
+      objectives: `${plan.objectives}\n补充教师观察记录。`,
+    };
+
+    const rebased = rebaseDocumentPatch(patch, current, 4);
+
+    expect(applyDocumentPatch(current, rebased).objectives)
+      .toBe("解释轴对称。能够判断轴对称图形。\n补充教师观察记录。");
+  });
+
+  it("rejects a true conflict when the teacher changed the proposed target", () => {
+    const patch = canonicalizeDocumentPatchRanges({
+      fileId: "m1", baseDocumentVersion: 3, summary: "更新第一项目标",
+      operations: [{
+        op: "replace_text",
+        field: "objectives",
+        start: 0,
+        end: 2,
+        expectedText: "理解",
+        replacement: "解释",
+      }],
+    }, plan);
+    const current = {
+      ...plan,
+      objectives: "掌握轴对称。能够判断轴对称图形。",
+    };
+
+    expect(() => rebaseDocumentPatch(patch, current, 4))
+      .toThrow(/目标内容已变化或无法唯一定位/);
+  });
+
+  it("rejects operations and aggregate patches that do not change the document", () => {
+    expect(() => validateDocumentPatch({
+      fileId: "m1", baseDocumentVersion: 0, summary: "空修改",
+      operations: [{
+        op: "replace_text",
+        field: "process",
+        start: 0,
+        end: 0,
+        expectedText: "",
+        replacement: "",
+      }],
+    })).toThrow(/no_effect_patch|修改前后内容相同/);
   });
 });

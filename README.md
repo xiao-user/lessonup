@@ -12,11 +12,13 @@ LessonUp 是一个包含真实 A4 教案编辑器与上下文备课 Agent 的 Vi
 ## Agent 运行链路
 
 1. API 依据认证用户验证 `notebook → lesson_file → thread → branch` 归属。
-2. Flash 只选择本轮需要的 Skill、Tool、MCP 与专业 Agent；Harness 再校验白名单和具体版本。
+2. 同步能力路由使用确定性业务规则，不等待额外模型调用；Flash 通过 Responses API 承担异步标题、starter、记忆压缩和轻量审查。
 3. Pro 负责主对话与复杂教学任务，专业 Agent 以工具形式协作；整份教案是固定工作范围，当前栏目与文字选区只是焦点线索。
 4. SSE 只发送规范化文本、工具状态、来源和审批事件，不发送供应商原始事件或推理内容。
 5. 所有写入必须形成 `DocumentPatch` 并暂停等待审批。批准时在事务中校验文档版本与原文，再生成完整版本快照。
 6. 每个 `thread + branch` 使用独立 Session；超过最近约 12 轮的历史由 Flash 压缩为结构化摘要，原始消息继续保留。
+
+DeepSeek 协议按模型固定：`deepseek-v4-pro` 使用 Chat Completions，`deepseek-v4-flash` 使用 Responses API。DeepSeek Responses 当前仍是无状态接口，LessonUp 不使用 `previous_response_id` 或供应商会话替代自己的分支 Session。
 
 ## 目录
 
@@ -24,11 +26,15 @@ LessonUp 是一个包含真实 A4 教案编辑器与上下文备课 Agent 的 Vi
 - `server/mcp`：知识库和联网搜索的 Streamable HTTP MCP。
 - `server/knowledge`：私有资料上传、Office/PDF 结构化解析、异步队列与 BGE-M3 索引 worker。
 - `server/repositories`：内存开发仓库与 Supabase 持久仓库。
+- `server/curriculum`：国家教材书目与官方章节目录查询。
+- `data/curriculum`：SmartEdu 官方目录树清洗产物（仅 `official_tree`）。
 - `server/security`：短期 MCP 令牌和可恢复 RunState 加密。
 - `src/components/craft-agent`：从 Craft Agents 移植并适配 LessonUp 标准化事件的统一对话组件。
 - `src/features/assistant`：线程、分支、SSE、来源、工具活动和审批交互。
 - `docs/agent-interaction-contract.md`：整体上下文、读取策略、事件投射和对话展示合同。
-- `supabase/migrations`：RLS、版本、会话、运行、审批、知识库和审计表。
+- `supabase/migrations`：RLS、版本、会话、运行、审批、知识库、教材目录和审计表。
+
+本地 `npm run db:start` / `db:reset` 会在迁移后执行 `npm run curriculum:import`，将 `data/curriculum` 导入平台表。重新清洗原始导出可用 `npm run curriculum:prepare -- --source <exports目录>`。
 
 ## 验证
 

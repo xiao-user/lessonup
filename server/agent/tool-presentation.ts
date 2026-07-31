@@ -27,6 +27,9 @@ const fallbackLabels: Record<string, string> = {
   read_document_outline: "检查教案结构",
   get_document_version: "核对文档版本",
   propose_document_patch: "准备修改建议",
+  lookup_curriculum_textbooks: "查找教材书目",
+  search_curriculum_nodes: "检索教材篇目",
+  read_curriculum_outline: "读取教材目录",
   search_knowledge: "检索备课资料",
   read_attached_source: "读取附带资料",
   get_passage: "读取资料片段",
@@ -90,6 +93,17 @@ export function safeToolPresentation(
 
   if (name === "read_attached_source") {
     return { label: fallbackLabels.read_attached_source, groupKey: "knowledge-read" };
+  }
+
+  if (
+    name === "lookup_curriculum_textbooks"
+    || name === "search_curriculum_nodes"
+    || name === "read_curriculum_outline"
+  ) {
+    return {
+      label: fallbackLabels[name],
+      groupKey: "curriculum-read",
+    };
   }
 
   return { label: fallbackLabels[name] ?? "调用备课能力" };

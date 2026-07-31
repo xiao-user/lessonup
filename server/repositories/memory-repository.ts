@@ -1,17 +1,35 @@
 import type { AgentInputItem } from "@openai/agents";
-import { applyDocumentPatch, DocumentPatchError } from "../document-patch.js";
+import {
+  applyDocumentPatch,
+  DocumentPatchError,
+  rebaseDocumentPatch,
+} from "../document-patch.js";
 import type {
   AgentApprovalRecord,
   AgentBranchRecord,
   AgentMessageRecord,
   AgentRunRecord,
+  AgentRunEvidenceRecord,
   AgentThreadRecord,
+  CurriculumNodeRecord,
+  CurriculumTextbookRecord,
   KnowledgeResult,
   LessonFileRecord,
   NotebookRecord,
   SourceRef,
   NormalizedAgentEvent,
 } from "../domain.js";
+import {
+  buildCurriculumFacets,
+  buildCurriculumOutline,
+  filterCurriculumTextbooks,
+  searchCurriculumNodeRecords,
+  type CurriculumTextbookFilter,
+} from "../curriculum/catalog.js";
+import {
+  curriculumFixtureNodes,
+  curriculumFixtureTextbooks,
+} from "../testing/curriculum-fixture.js";
 import type { CreateThreadInput, ImportedNotebook, LessonRepository } from "../repository.js";
 
 let lastTimestamp = 0;
@@ -38,7 +56,15 @@ export class MemoryLessonRepository implements LessonRepository {
   }>();
   private sessionAppendBatches = new Map<string, string>();
   private runEvents: Array<{ ownerId: string; runId: string; type: string; data: NormalizedAgentEvent }> = [];
+  private runEvidence: AgentRunEvidenceRecord[] = [];
+  private curriculumTextbooks = curriculumFixtureTextbooks.map((book) => structuredClone(book));
+  private curriculumNodes = curriculumFixtureNodes.map((node) => structuredClone(node));
   private lastMessageTimestamp = 0;
+
+  seedCurriculumCatalog(textbooks: CurriculumTextbookRecord[], nodes: CurriculumNodeRecord[]) {
+    this.curriculumTextbooks = textbooks.map((book) => structuredClone(book));
+    this.curriculumNodes = nodes.map((node) => structuredClone(node));
+  }
 
   private nextMessageTimestamp() {
     this.lastMessageTimestamp = Math.max(Date.now(), this.lastMessageTimestamp + 1);
@@ -55,6 +81,9 @@ export class MemoryLessonRepository implements LessonRepository {
         className: notebook.className,
         year: notebook.year,
         subject: notebook.subject,
+        stage: notebook.stage ?? "",
+        grade: notebook.grade ?? "",
+        edition: notebook.edition ?? "",
         tone: notebook.tone ?? "teal",
         updatedAt: now(),
       });
@@ -69,6 +98,7 @@ export class MemoryLessonRepository implements LessonRepository {
           type: file.type ?? "教案",
           image: file.image,
           document: structuredClone(file.lessonPlan),
+          contextProfile: {},
           documentVersion: this.files.get(fileKey)?.documentVersion ?? file.documentVersion ?? 0,
           pageCount: file.pages ?? 1,
           updatedAt: now(),
@@ -97,6 +127,9 @@ export class MemoryLessonRepository implements LessonRepository {
       id: crypto.randomUUID(),
       ownerId,
       ...input,
+      stage: input.stage ?? "",
+      grade: input.grade ?? "",
+      edition: input.edition ?? "",
       updatedAt: timestamp,
     };
     this.notebooks.set(key(ownerId, notebook.id), notebook);
@@ -142,6 +175,7 @@ export class MemoryLessonRepository implements LessonRepository {
       type: input.type,
       image: input.image,
       document: structuredClone(input.document),
+      contextProfile: structuredClone(input.contextProfile ?? {}),
       documentVersion: 0,
       pageCount: input.pageCount,
       updatedAt: timestamp,
@@ -213,6 +247,22 @@ export class MemoryLessonRepository implements LessonRepository {
     return updated;
   }
 
+  async updateLessonPageCount(args: Parameters<LessonRepository["updateLessonPageCount"]>[0]) {
+    const current = await this.getLessonFile(args.ownerId, args.fileId);
+    if (!current) throw new Error("lesson_file_not_found");
+    if (current.documentVersion !== args.documentVersion) {
+      throw new DocumentPatchError("stale_document", "教案版本已经变化");
+    }
+    if (current.pageCount === args.pageCount) return structuredClone(current);
+    const updated = {
+      ...current,
+      pageCount: args.pageCount,
+      updatedAt: now(),
+    };
+    this.files.set(key(args.ownerId, args.fileId), updated);
+    return structuredClone(updated);
+  }
+
   async applyApprovedPatch(args: Parameters<LessonRepository["applyApprovedPatch"]>[0]) {
     const idempotencyKey = key(args.ownerId, args.idempotencyKey);
     const signature = JSON.stringify({ approvalId: args.approvalId });
@@ -228,12 +278,14 @@ export class MemoryLessonRepository implements LessonRepository {
     if (approval.state !== "pending" && approval.state !== "approved") throw new Error("approval_not_approvable");
     const current = await this.getLessonFile(args.ownerId, approval.patch.fileId);
     if (!current) throw new Error("lesson_file_not_found");
-    if (current.documentVersion !== approval.patch.baseDocumentVersion) {
-      throw new DocumentPatchError("stale_document", "教案已被继续编辑，建议已过期");
-    }
+    const patch = rebaseDocumentPatch(
+      approval.patch,
+      current.document,
+      current.documentVersion,
+    );
     const updated: LessonFileRecord = {
       ...current,
-      document: applyDocumentPatch(current.document, approval.patch),
+      document: applyDocumentPatch(current.document, patch),
       documentVersion: current.documentVersion + 1,
       updatedAt: now(),
     };
@@ -436,6 +488,129 @@ export class MemoryLessonRepository implements LessonRepository {
     return updated;
   }
 
+  async heartbeatRun(args: Parameters<LessonRepository["heartbeatRun"]>[0]) {
+    const run = await this.getRun(args.ownerId, args.runId);
+    if (!run) throw new Error("run_not_found");
+    if (
+      (run.status !== "queued" && run.status !== "running")
+      || run.leaseToken !== args.leaseToken
+      || !run.leaseExpiresAt
+      || new Date(run.leaseExpiresAt).getTime() <= Date.now()
+    ) {
+      throw new Error("run_lease_lost");
+    }
+    return this.updateRun(args.ownerId, args.runId, {
+      status: "running",
+      heartbeatAt: now(),
+      leaseExpiresAt: args.leaseExpiresAt,
+    });
+  }
+
+  async settleRun(args: Parameters<LessonRepository["settleRun"]>[0]) {
+    const run = await this.getRun(args.ownerId, args.runId);
+    if (!run) throw new Error("run_not_found");
+    if (run.status === args.status && !run.leaseToken) return structuredClone(run);
+    if (
+      (run.status !== "queued" && run.status !== "running")
+      || run.leaseToken !== args.leaseToken
+      || !run.leaseExpiresAt
+      || new Date(run.leaseExpiresAt).getTime() <= Date.now()
+    ) {
+      throw new Error("run_lease_lost");
+    }
+    if (run.cancelRequestedAt && args.status !== "cancelled") {
+      throw new Error("run_cancel_requested");
+    }
+
+    const updated = await this.updateRun(args.ownerId, args.runId, {
+      status: args.status,
+      tokenUsage: args.tokenUsage ?? run.tokenUsage,
+      error: args.error,
+      completedAt: args.status === "awaiting_approval" ? undefined : now(),
+      leaseToken: undefined,
+      leaseExpiresAt: undefined,
+      heartbeatAt: now(),
+    });
+    if (run.assistantMessageId && args.messageStatus) {
+      const messagePatch: Partial<AgentMessageRecord> = {
+        status: args.messageStatus,
+        error: args.error,
+      };
+      if (args.messageContent !== undefined) messagePatch.content = args.messageContent;
+      if (args.messageSources !== undefined) messagePatch.sources = args.messageSources;
+      if (args.sessionCursor !== undefined) messagePatch.sessionCursor = args.sessionCursor;
+      await this.updateMessage(args.ownerId, run.assistantMessageId, messagePatch);
+    }
+    await this.updateThread(args.ownerId, run.threadId, {
+      status: args.status === "awaiting_approval"
+        ? "awaiting_approval"
+        : args.status === "failed"
+          ? "failed"
+          : "idle",
+    });
+    return structuredClone(updated);
+  }
+
+  async requestRunCancellation(ownerId: string, runId: string) {
+    const run = await this.getRun(ownerId, runId);
+    if (!run) throw new Error("run_not_found");
+    if (run.status === "cancelled") return true;
+    if (run.status !== "queued" && run.status !== "running") return false;
+    const updated = await this.updateRun(ownerId, runId, {
+      cancelRequestedAt: run.cancelRequestedAt ?? now(),
+    });
+    if (!updated.leaseExpiresAt || new Date(updated.leaseExpiresAt).getTime() <= Date.now()) {
+      await this.updateRun(ownerId, runId, {
+        status: "cancelled",
+        completedAt: now(),
+        leaseToken: undefined,
+        leaseExpiresAt: undefined,
+      });
+      if (run.assistantMessageId) {
+        await this.updateMessage(ownerId, run.assistantMessageId, {
+          status: "cancelled",
+          error: undefined,
+        });
+      }
+      await this.updateThread(ownerId, run.threadId, { status: "idle" });
+    }
+    return true;
+  }
+
+  async recoverExpiredRuns(ownerId: string, threadId?: string) {
+    let recovered = 0;
+    for (const run of [...this.runs.values()]) {
+      if (
+        run.ownerId !== ownerId
+        || (threadId && run.threadId !== threadId)
+        || (run.status !== "queued" && run.status !== "running")
+        || !run.leaseExpiresAt
+        || new Date(run.leaseExpiresAt).getTime() > Date.now()
+      ) {
+        continue;
+      }
+      const cancelled = Boolean(run.cancelRequestedAt);
+      await this.updateRun(ownerId, run.id, {
+        status: cancelled ? "cancelled" : "failed",
+        error: cancelled ? undefined : "run_interrupted",
+        completedAt: now(),
+        leaseToken: undefined,
+        leaseExpiresAt: undefined,
+      });
+      if (run.assistantMessageId) {
+        await this.updateMessage(ownerId, run.assistantMessageId, {
+          status: cancelled ? "cancelled" : "failed",
+          error: cancelled ? undefined : "run_interrupted",
+        });
+      }
+      await this.updateThread(ownerId, run.threadId, {
+        status: cancelled ? "idle" : "failed",
+      });
+      recovered += 1;
+    }
+    return recovered;
+  }
+
   async appendRunEvent(ownerId: string, runId: string, type: string, data: unknown) {
     this.runEvents.push({ ownerId, runId, type, data: data as NormalizedAgentEvent });
   }
@@ -485,6 +660,28 @@ export class MemoryLessonRepository implements LessonRepository {
     const updated = { ...approval, state };
     this.approvals.set(approvalId, updated);
     return updated;
+  }
+
+  async expireApprovalLifecycle(ownerId: string, approvalId: string) {
+    const approval = await this.getApproval(ownerId, approvalId);
+    if (!approval) throw new Error("approval_not_found");
+    const updated = approval.state === "pending"
+      ? { ...approval, state: "expired" as const, continuationError: "approval_expired" }
+      : approval;
+    this.approvals.set(approvalId, updated);
+    const run = await this.getRun(ownerId, approval.runId);
+    if (run && run.status !== "completed" && run.status !== "cancelled") {
+      await this.updateRun(ownerId, run.id, {
+        status: "failed",
+        error: "approval_expired",
+        completedAt: now(),
+      });
+    }
+    const thread = await this.getThread(ownerId, approval.threadId);
+    if (thread?.status === "awaiting_approval" || thread?.status === "running") {
+      await this.updateThread(ownerId, thread.id, { status: "failed" });
+    }
+    return structuredClone(updated);
   }
 
   async decideApproval(args: {
@@ -589,9 +786,91 @@ export class MemoryLessonRepository implements LessonRepository {
     return structuredClone(updated);
   }
 
+  async settleApprovalContinuation(args: Parameters<LessonRepository["settleApprovalContinuation"]>[0]) {
+    const approval = await this.getApproval(args.ownerId, args.approvalId);
+    if (!approval) throw new Error("approval_not_found");
+    if (approval.continuationStatus === "completed") return structuredClone(approval);
+    if (
+      approval.continuationStatus !== "running"
+      || approval.continuationLeaseToken !== args.leaseToken
+    ) {
+      throw new Error("approval_lease_lost");
+    }
+
+    const terminal = args.outcome === "completed" || args.outcome === "cancelled";
+    const updated: AgentApprovalRecord = {
+      ...approval,
+      encryptedRunState: args.encryptedRunState ?? approval.encryptedRunState,
+      continuationStatus: terminal || args.outcome === "paused" ? "completed" : "ready",
+      continuationLeaseToken: undefined,
+      continuationLeaseExpiresAt: undefined,
+      continuationError: args.error,
+    };
+    this.approvals.set(args.approvalId, updated);
+
+    if (args.outcome === "paused") {
+      return structuredClone(updated);
+    }
+
+    const run = await this.getRun(args.ownerId, approval.runId);
+    if (!run) throw new Error("run_not_found");
+    if (terminal) {
+      await this.updateRun(args.ownerId, run.id, {
+        status: args.outcome === "cancelled" ? "cancelled" : "completed",
+        tokenUsage: args.tokenUsage ?? run.tokenUsage,
+        error: undefined,
+        completedAt: now(),
+      });
+      await this.updateThread(args.ownerId, approval.threadId, { status: "idle" });
+      if (args.assistantMessageId) {
+        await this.updateMessage(args.ownerId, args.assistantMessageId, {
+          content: args.content,
+          sources: args.sources,
+          sessionCursor: args.sessionCursor,
+          status: args.outcome === "cancelled" ? "cancelled" : "completed",
+        });
+      }
+    } else {
+      await this.updateRun(args.ownerId, run.id, {
+        status: "failed",
+        tokenUsage: args.tokenUsage ?? run.tokenUsage,
+        error: args.error,
+        completedAt: now(),
+      });
+      await this.updateThread(args.ownerId, approval.threadId, { status: "failed" });
+      if (args.assistantMessageId) {
+        await this.updateMessage(args.ownerId, args.assistantMessageId, {
+          content: args.content,
+          sources: args.sources,
+          sessionCursor: args.sessionCursor,
+          status: "failed",
+        });
+      }
+    }
+    return structuredClone(updated);
+  }
+
   async getSessionItems(ownerId: string, threadId: string, branchId: string, limit?: number) {
     const items = this.sessionItems.get(key(ownerId, threadId, branchId)) ?? [];
     return structuredClone(limit ? items.slice(-limit) : items);
+  }
+
+  async getSessionItemsAfter(
+    ownerId: string,
+    threadId: string,
+    branchId: string,
+    afterCursor: number,
+    limit?: number,
+  ) {
+    const items = this.sessionItems.get(key(ownerId, threadId, branchId)) ?? [];
+    const start = limit
+      ? Math.max(Math.max(0, afterCursor), items.length - limit)
+      : Math.max(0, afterCursor);
+    return structuredClone(items.slice(start));
+  }
+
+  async getSessionItemCount(ownerId: string, threadId: string, branchId: string) {
+    return (this.sessionItems.get(key(ownerId, threadId, branchId)) ?? []).length;
   }
 
   async addSessionItems(
@@ -664,5 +943,71 @@ export class MemoryLessonRepository implements LessonRepository {
   ): Promise<SourceRef[]> {
     if (sourceIds.length) throw new Error("knowledge_attachment_unavailable");
     return [];
+  }
+
+  async recordRunEvidence(
+    ownerId: string,
+    runId: string,
+    kind: Parameters<LessonRepository["recordRunEvidence"]>[2],
+    sources: SourceRef[],
+  ) {
+    const run = await this.getRun(ownerId, runId);
+    if (!run) throw new Error("run_not_found");
+    for (const source of sources) {
+      const index = this.runEvidence.findIndex((item) => (
+        item.ownerId === ownerId
+        && item.runId === runId
+        && item.kind === kind
+        && item.source.id === source.id
+      ));
+      const record: AgentRunEvidenceRecord = {
+        ownerId,
+        runId,
+        kind,
+        source: structuredClone(source),
+        createdAt: now(),
+      };
+      if (index >= 0) this.runEvidence[index] = record;
+      else this.runEvidence.push(record);
+    }
+  }
+
+  async listRunEvidence(ownerId: string, runId: string) {
+    return this.runEvidence
+      .filter((item) => item.ownerId === ownerId && item.runId === runId)
+      .map((item) => structuredClone(item));
+  }
+
+  async listCurriculumFacets() {
+    return buildCurriculumFacets(this.curriculumTextbooks);
+  }
+
+  async searchCurriculumTextbooks(filter: CurriculumTextbookFilter = {}) {
+    return filterCurriculumTextbooks(this.curriculumTextbooks, filter).map((book) => structuredClone(book));
+  }
+
+  async getCurriculumTextbook(textbookId: string) {
+    const book = this.curriculumTextbooks.find((item) => item.id === textbookId);
+    return book ? structuredClone(book) : null;
+  }
+
+  async listCurriculumNodes(args: {
+    textbookId: string;
+    parentId?: string | null;
+    maxLevel?: number;
+  }) {
+    const nodes = this.curriculumNodes.filter((node) => node.textbookId === args.textbookId);
+    return buildCurriculumOutline(nodes, {
+      parentId: args.parentId,
+      maxLevel: args.maxLevel,
+    }).map((node) => structuredClone(node));
+  }
+
+  async searchCurriculumNodes(args: Parameters<LessonRepository["searchCurriculumNodes"]>[0]) {
+    return searchCurriculumNodeRecords({
+      textbooks: this.curriculumTextbooks,
+      nodes: this.curriculumNodes,
+      ...args,
+    }).map((match) => structuredClone(match));
   }
 }

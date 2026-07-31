@@ -55,6 +55,7 @@ export async function resetE2EState(userId: string) {
   }
   const { error: updateError } = await client.from("lesson_files").update({
     document: initialDocument,
+    context_profile: {},
     document_version: 0,
     page_count: 1,
   }).eq("owner_id", userId).eq("id", lessonFileId);

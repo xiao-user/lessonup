@@ -1,0 +1,57 @@
+{
+  "schema_version": 2,
+  "source": "smartedu_national_tch_material",
+  "source_directory": "exports",
+  "generated_at": "2026-07-31T06:04:05.722Z",
+  "selection": "official_tree_only",
+  "textbooks": 957,
+  "nodes": 32382,
+  "files": {
+    "textbooks": {
+      "path": "textbooks.jsonl.gz",
+      "sha256": "aef752bc46c837b8d66eaa56bfef1acd306b13c6d2f60a83cc983b9f6fedb9cb",
+      "bytes": 109598
+    },
+    "nodes": {
+      "path": "nodes.jsonl.gz",
+      "sha256": "e0448cd8d362c70889ef53628811e6adf8e8158ee502d729246ccb320202d826",
+      "bytes": 1535283
+    }
+  },
+  "stages": [
+    "初中",
+    "初中（五•四学制）",
+    "小学",
+    "小学（五•四学制）",
+    "高中"
+  ],
+  "subjects": [
+    "体育与健康",
+    "信息技术",
+    "化学",
+    "历史",
+    "地理",
+    "地理图册",
+    "思想政治",
+    "数学",
+    "物理",
+    "生物学",
+    "科学",
+    "美术",
+    "艺术",
+    "艺术·美术",
+    "艺术·舞蹈/影视/戏剧",
+    "艺术·音乐",
+    "英语",
+    "语文",
+    "通用技术",
+    "道德与法治",
+    "音乐"
+  ],
+  "validation": {
+    "unique_textbook_ids": true,
+    "unique_node_ids_per_textbook": true,
+    "node_counts_match_source": true,
+    "parent_nodes_resolve": true
+  }
+}

@@ -1,4 +1,4 @@
-import { setTraceProcessors } from "@openai/agents";
+import { addTraceProcessor } from "@openai/agents";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
@@ -6,7 +6,7 @@ import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 import { requireUser, type AppBindings } from "./auth.js";
 import { config, hasDeepSeek, runtimeCapabilities } from "./config.js";
-import { lessonPlanSchema } from "./domain.js";
+import { lessonContextProfileSchema, lessonPlanSchema } from "./domain.js";
 import { LessonAgentHarness } from "./agent/harness.js";
 import { publicAgentError } from "./agent/public-error.js";
 import { handleMcpRequest } from "./mcp/servers.js";
@@ -19,6 +19,9 @@ import { KnowledgeUploadService } from "./knowledge/uploads.js";
 import { publicApiError } from "./public-api-error.js";
 import { shouldPersistRunEvent } from "./run-event-persistence.js";
 import { generateThreadStarters } from "./agent/thread-starters.js";
+import { canonicalizeLessonContextProfile } from "./curriculum/context-profile.js";
+
+let tracingConfigured = false;
 
 const selectionSchema = z.object({
   field: z.enum(["unit", "period", "totalPeriods", "topic", "objectives", "focus", "preparation", "process", "assessment", "homework", "board", "reflection"]),
@@ -38,6 +41,7 @@ const runInputSchema = z.object({
 
 const importedNotebookSchema = z.object({
   id: z.string(), title: z.string(), className: z.string(), year: z.string(), subject: z.string(),
+  stage: z.string().optional(), grade: z.string().optional(), edition: z.string().optional(),
   tone: z.enum(["teal", "sage", "amber", "coral"]).optional(),
   files: z.array(z.object({
     id: z.string(), title: z.string(), type: z.string().optional(), image: z.string().optional(),
@@ -67,7 +71,10 @@ export function createApp(
   const threadStarterGenerator = options.threadStarterGenerator === undefined
     ? config.NODE_ENV === "test" || !hasDeepSeek ? null : generateThreadStarters
     : options.threadStarterGenerator;
-  setTraceProcessors([new LessonTracingProcessor()]);
+  if (!tracingConfigured) {
+    addTraceProcessor(new LessonTracingProcessor());
+    tracingConfigured = true;
+  }
 
   app.use("*", logger());
   app.use("*", cors({
@@ -116,6 +123,9 @@ export function createApp(
       className: z.string().trim().min(1).max(120),
       year: z.string().trim().min(1).max(40),
       subject: z.string().trim().min(1).max(80),
+      stage: z.string().trim().max(40).default(""),
+      grade: z.string().trim().max(40).default(""),
+      edition: z.string().trim().max(40).default(""),
       tone: notebookToneSchema,
     }).parse(await c.req.json());
     return c.json(await repository.createNotebook(c.get("userId"), input), 201);
@@ -127,6 +137,9 @@ export function createApp(
       className: z.string().trim().min(1).max(120).optional(),
       year: z.string().trim().min(1).max(40).optional(),
       subject: z.string().trim().min(1).max(80).optional(),
+      stage: z.string().trim().max(40).optional(),
+      grade: z.string().trim().max(40).optional(),
+      edition: z.string().trim().max(40).optional(),
       tone: notebookToneSchema.optional(),
     }).refine((value) => Object.keys(value).length > 0, "empty_patch").parse(await c.req.json());
     return c.json(await repository.updateNotebook(c.get("userId"), c.req.param("id"), input));
@@ -144,9 +157,25 @@ export function createApp(
       type: z.string().trim().min(1).max(80).default("新教案"),
       image: z.string().max(500).optional(),
       document: lessonPlanSchema,
+      contextProfile: lessonContextProfileSchema.optional(),
       pageCount: z.number().int().positive().default(1),
     }).parse(await c.req.json());
-    return c.json(await repository.createLessonFile(c.get("userId"), input), 201);
+    const notebook = await repository.getNotebook(c.get("userId"), input.notebookId);
+    if (!notebook) throw new Error("notebook_not_found");
+    const contextProfile = input.contextProfile
+      ? await canonicalizeLessonContextProfile({
+        repository,
+        subject: notebook.subject,
+        stage: notebook.stage,
+        grade: notebook.grade,
+        edition: notebook.edition,
+        profile: input.contextProfile,
+      })
+      : undefined;
+    return c.json(await repository.createLessonFile(c.get("userId"), {
+      ...input,
+      contextProfile,
+    }), 201);
   });
 
   app.patch("/api/lesson-files/:id", async (c) => {
@@ -154,13 +183,86 @@ export function createApp(
       title: z.string().trim().min(1).max(160).optional(),
       type: z.string().trim().min(1).max(80).optional(),
       image: z.string().max(500).optional(),
+      contextProfile: lessonContextProfileSchema.optional(),
     }).refine((value) => Object.keys(value).length > 0, "empty_patch").parse(await c.req.json());
-    return c.json(await repository.updateLessonFile(c.get("userId"), c.req.param("id"), input));
+    if (!input.contextProfile) {
+      return c.json(await repository.updateLessonFile(c.get("userId"), c.req.param("id"), input));
+    }
+    const file = await repository.getLessonFile(c.get("userId"), c.req.param("id"));
+    if (!file) throw new Error("lesson_file_not_found");
+    const notebook = await repository.getNotebook(c.get("userId"), file.notebookId);
+    if (!notebook) throw new Error("notebook_not_found");
+    const contextProfile = await canonicalizeLessonContextProfile({
+      repository,
+      subject: notebook.subject,
+      stage: notebook.stage,
+      grade: notebook.grade,
+      edition: notebook.edition,
+      profile: input.contextProfile,
+    });
+    return c.json(await repository.updateLessonFile(c.get("userId"), c.req.param("id"), {
+      ...input,
+      contextProfile,
+    }));
   });
 
   app.delete("/api/lesson-files/:id", async (c) => {
     await repository.deleteLessonFile(c.get("userId"), c.req.param("id"));
     return c.body(null, 204);
+  });
+
+  app.get("/api/curriculum/facets", async (c) => (
+    c.json(await repository.listCurriculumFacets())
+  ));
+
+  app.get("/api/curriculum/textbooks", async (c) => {
+    const query = c.req.query();
+    const filter = z.object({
+      stage: z.string().trim().min(1).max(40).optional(),
+      subject: z.string().trim().min(1).max(40).optional(),
+      edition: z.string().trim().min(1).max(40).optional(),
+      grade: z.string().trim().min(1).max(40).optional(),
+      query: z.string().trim().min(1).max(80).optional(),
+      limit: z.coerce.number().int().min(1).max(200).optional(),
+    }).parse({
+      stage: query.stage || undefined,
+      subject: query.subject || undefined,
+      edition: query.edition || undefined,
+      grade: query.grade || undefined,
+      query: query.query || undefined,
+      limit: query.limit || undefined,
+    });
+    return c.json({
+      textbooks: await repository.searchCurriculumTextbooks(filter),
+    });
+  });
+
+  app.get("/api/curriculum/textbooks/:id", async (c) => {
+    const textbook = await repository.getCurriculumTextbook(c.req.param("id"));
+    if (!textbook) return c.json({ error: "curriculum_textbook_not_found" }, 404);
+    return c.json(textbook);
+  });
+
+  app.get("/api/curriculum/textbooks/:id/nodes", async (c) => {
+    const textbook = await repository.getCurriculumTextbook(c.req.param("id"));
+    if (!textbook) return c.json({ error: "curriculum_textbook_not_found" }, 404);
+    const query = c.req.query();
+    const filter = z.object({
+      parentId: z.string().trim().min(1).max(80).optional(),
+      maxLevel: z.coerce.number().int().min(1).max(5).optional(),
+      rootsOnly: z.enum(["true", "false"]).optional(),
+    }).parse({
+      parentId: query.parentId || undefined,
+      maxLevel: query.maxLevel || undefined,
+      rootsOnly: query.rootsOnly || undefined,
+    });
+    const rootsOnly = filter.rootsOnly === "true";
+    const nodes = await repository.listCurriculumNodes({
+      textbookId: textbook.id,
+      parentId: rootsOnly ? null : filter.parentId,
+      maxLevel: filter.maxLevel ?? (rootsOnly ? 1 : 3),
+    });
+    return c.json({ textbook, nodes });
   });
 
   app.post("/api/knowledge/uploads", async (c) => {
@@ -222,6 +324,19 @@ export function createApp(
       source: input.source, idempotencyKey,
     });
     return c.json(file);
+  });
+
+  app.patch("/api/lesson-files/:id/page-count", async (c) => {
+    const input = z.object({
+      documentVersion: z.number().int().nonnegative(),
+      pageCount: z.number().int().positive(),
+    }).parse(await c.req.json());
+    return c.json(await repository.updateLessonPageCount({
+      ownerId: c.get("userId"),
+      fileId: c.req.param("id"),
+      documentVersion: input.documentVersion,
+      pageCount: input.pageCount,
+    }));
   });
 
   app.get("/api/agent/threads", async (c) => {
@@ -323,6 +438,7 @@ export function createApp(
       repository.getBranch(userId, threadId, branchId),
     ]);
     if (!thread || !branch) return c.json({ error: "thread_scope_invalid" }, 403);
+    await repository.recoverExpiredRuns(userId, threadId);
     const run = await repository.getLatestRun(userId, threadId, branchId);
     return c.json({
       run,

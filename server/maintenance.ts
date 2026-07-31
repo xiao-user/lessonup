@@ -19,6 +19,8 @@ export class LessonUpMaintenance {
       if (active) return;
       active = true;
       try {
+        const recovery = await this.client!.rpc("recover_all_expired_agent_runs");
+        if (recovery.error) throw new Error(recovery.error.message);
         const result = await this.client!.rpc("perform_lessonup_maintenance");
         if (result.error) throw new Error(result.error.message);
       } catch (error) {

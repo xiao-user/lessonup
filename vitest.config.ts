@@ -3,7 +3,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     environment: "node",
-    include: ["server/**/*.test.ts", "src/**/*.vitest.{js,ts}"],
+    include: ["server/**/*.test.ts", "src/**/*.vitest.{js,ts}", "evals/**/*.test.ts"],
     env: {
       NODE_ENV: "test",
       LESSONUP_DEV_AUTH: "1",

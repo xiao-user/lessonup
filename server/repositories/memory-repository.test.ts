@@ -153,6 +153,26 @@ describe("memory repository isolation", () => {
     expect((await repository.getLessonFile("user-a", "f1"))?.documentVersion).toBe(7);
   });
 
+  it("updates measured page metadata without creating a new document version", async () => {
+    const repository = new MemoryLessonRepository();
+    await importFor(repository, "user-a");
+
+    const updated = await repository.updateLessonPageCount({
+      ownerId: "user-a",
+      fileId: "f1",
+      documentVersion: 0,
+      pageCount: 3,
+    });
+
+    expect(updated).toMatchObject({ pageCount: 3, documentVersion: 0 });
+    await expect(repository.updateLessonPageCount({
+      ownerId: "user-a",
+      fileId: "f1",
+      documentVersion: 1,
+      pageCount: 4,
+    })).rejects.toThrow(/版本已经变化/);
+  });
+
   it("isolates compressed memory by thread and branch", async () => {
     const repository = new MemoryLessonRepository();
     await repository.saveThreadMemory("user-a", "thread-a", "branch-a", "摘要 A", 24);
@@ -335,5 +355,225 @@ describe("memory repository isolation", () => {
       approved: false,
       encryptedRunState: "opposite-decision",
     })).rejects.toThrow("approval_already_resolved");
+  });
+
+  it("atomically settles approval continuation and never downgrades a completed replay", async () => {
+    const repository = new MemoryLessonRepository();
+    await importFor(repository, "user-a");
+    const { thread, branch } = await repository.createThread("user-a", {
+      notebookId: "n1",
+      lessonFileId: "f1",
+    });
+    const assistant = await repository.appendMessage({
+      id: "continuation-message",
+      ownerId: "user-a",
+      threadId: thread.id,
+      branchId: branch.id,
+      role: "assistant",
+      content: "",
+      status: "streaming",
+    });
+    await repository.createRun({
+      id: "run-settle",
+      ownerId: "user-a",
+      threadId: thread.id,
+      branchId: branch.id,
+      model: "test",
+      status: "running",
+    });
+    await repository.updateThread("user-a", thread.id, { status: "running" });
+    await repository.saveApproval({
+      id: "approval-settle",
+      ownerId: "user-a",
+      runId: "run-settle",
+      threadId: thread.id,
+      branchId: branch.id,
+      assistantMessageId: "proposal-message",
+      continuationMessageId: assistant.id,
+      state: "approved",
+      encryptedRunState: "approved-state",
+      agentDefinitionVersion: "1",
+      documentVersion: 0,
+      continuationStatus: "ready",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      createdAt: new Date().toISOString(),
+      patch: {
+        fileId: "f1",
+        baseDocumentVersion: 0,
+        summary: "已审批修改",
+        operations: [{
+          op: "replace_text",
+          field: "objectives",
+          start: 0,
+          end: 2,
+          expectedText: "目标",
+          replacement: "可评价目标",
+        }],
+      },
+    });
+    await repository.claimApprovalContinuation({
+      ownerId: "user-a",
+      approvalId: "approval-settle",
+      leaseToken: "lease-settle",
+      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    await repository.settleApprovalContinuation({
+      ownerId: "user-a",
+      approvalId: "approval-settle",
+      leaseToken: "lease-settle",
+      outcome: "completed",
+      assistantMessageId: assistant.id,
+      content: "后续回复完成",
+      sessionCursor: 4,
+      tokenUsage: { totalTokens: 12 },
+      encryptedRunState: "completed-state",
+    });
+    await repository.settleApprovalContinuation({
+      ownerId: "user-a",
+      approvalId: "approval-settle",
+      leaseToken: "lease-settle",
+      outcome: "ready",
+      assistantMessageId: assistant.id,
+      error: "late_failure",
+    });
+
+    expect(await repository.getApproval("user-a", "approval-settle"))
+      .toMatchObject({ continuationStatus: "completed", encryptedRunState: "completed-state" });
+    expect(await repository.getRun("user-a", "run-settle"))
+      .toMatchObject({ status: "completed", tokenUsage: { totalTokens: 12 } });
+    expect(await repository.getThread("user-a", thread.id))
+      .toMatchObject({ status: "idle" });
+    expect(await repository.getMessage("user-a", assistant.id))
+      .toMatchObject({ status: "completed", content: "后续回复完成", sessionCursor: 4 });
+  });
+
+  it("expires the approval, run and thread as one recoverable lifecycle", async () => {
+    const repository = new MemoryLessonRepository();
+    await importFor(repository, "user-a");
+    const { thread, branch } = await repository.createThread("user-a", {
+      notebookId: "n1",
+      lessonFileId: "f1",
+    });
+    await repository.createRun({
+      id: "run-expired",
+      ownerId: "user-a",
+      threadId: thread.id,
+      branchId: branch.id,
+      model: "test",
+      status: "awaiting_approval",
+    });
+    await repository.updateThread("user-a", thread.id, { status: "awaiting_approval" });
+    await repository.saveApproval({
+      id: "approval-expired",
+      ownerId: "user-a",
+      runId: "run-expired",
+      threadId: thread.id,
+      branchId: branch.id,
+      state: "pending",
+      encryptedRunState: "encrypted",
+      agentDefinitionVersion: "1",
+      documentVersion: 0,
+      expiresAt: new Date(Date.now() - 1_000).toISOString(),
+      createdAt: new Date().toISOString(),
+      patch: {
+        fileId: "f1",
+        baseDocumentVersion: 0,
+        summary: "过期修改",
+        operations: [{
+          op: "replace_text",
+          field: "objectives",
+          start: 0,
+          end: 2,
+          expectedText: "目标",
+          replacement: "新目标",
+        }],
+      },
+    });
+
+    await repository.expireApprovalLifecycle("user-a", "approval-expired");
+
+    expect(await repository.getApproval("user-a", "approval-expired"))
+      .toMatchObject({ state: "expired", continuationError: "approval_expired" });
+    expect(await repository.getRun("user-a", "run-expired"))
+      .toMatchObject({ status: "failed", error: "approval_expired" });
+    expect(await repository.getThread("user-a", thread.id))
+      .toMatchObject({ status: "failed" });
+  });
+
+  it("recovers an expired ordinary run and explains the failed assistant turn", async () => {
+    const repository = new MemoryLessonRepository();
+    await importFor(repository, "user-a");
+    const { thread, branch } = await repository.createThread("user-a", {
+      notebookId: "n1",
+      lessonFileId: "f1",
+    });
+    const assistant = await repository.appendMessage({
+      id: "assistant-expired-run",
+      ownerId: "user-a",
+      threadId: thread.id,
+      branchId: branch.id,
+      role: "assistant",
+      content: "",
+      status: "streaming",
+    });
+    await repository.createRun({
+      id: "ordinary-expired-run",
+      ownerId: "user-a",
+      threadId: thread.id,
+      branchId: branch.id,
+      model: "test",
+      status: "running",
+      assistantMessageId: assistant.id,
+      leaseToken: "expired-lease",
+      leaseExpiresAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    await repository.updateThread("user-a", thread.id, { status: "running" });
+
+    await expect(repository.recoverExpiredRuns("user-a", thread.id)).resolves.toBe(1);
+    expect(await repository.getRun("user-a", "ordinary-expired-run")).toMatchObject({
+      status: "failed",
+      error: "run_interrupted",
+    });
+    expect(await repository.getMessage("user-a", assistant.id)).toMatchObject({
+      status: "failed",
+      error: "run_interrupted",
+    });
+    expect(await repository.getThread("user-a", thread.id)).toMatchObject({
+      status: "failed",
+    });
+  });
+
+  it("fences stale workers after a persisted cancellation request", async () => {
+    const repository = new MemoryLessonRepository();
+    await importFor(repository, "user-a");
+    const { thread, branch } = await repository.createThread("user-a", {
+      notebookId: "n1",
+      lessonFileId: "f1",
+    });
+    await repository.createRun({
+      id: "ordinary-cancel-run",
+      ownerId: "user-a",
+      threadId: thread.id,
+      branchId: branch.id,
+      model: "test",
+      status: "running",
+      leaseToken: "live-lease",
+      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    await repository.requestRunCancellation("user-a", "ordinary-cancel-run");
+    await expect(repository.settleRun({
+      ownerId: "user-a",
+      runId: "ordinary-cancel-run",
+      leaseToken: "live-lease",
+      status: "completed",
+    })).rejects.toThrow("run_cancel_requested");
+    await expect(repository.settleRun({
+      ownerId: "user-a",
+      runId: "ordinary-cancel-run",
+      leaseToken: "live-lease",
+      status: "cancelled",
+    })).resolves.toMatchObject({ status: "cancelled" });
   });
 });

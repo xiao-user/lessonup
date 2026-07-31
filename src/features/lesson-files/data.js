@@ -22,12 +22,12 @@ export const assistantSuggestions = {
   reflection: ["整理课堂观察", "提炼改进建议", "生成课后复盘问题"],
 };
 
-export function createLessonPlanDraft(notebook, file) {
+export function createLessonPlanDraft(notebook, file, options = {}) {
   return {
-    unit: `${notebook.subject}课程单元`,
+    unit: options.unitTitle?.trim() || `${notebook.subject}课程单元`,
     period: "第 1 课时",
     totalPeriods: "2 课时",
-    topic: file.title,
+    topic: options.lessonTitle?.trim() || file.title,
     objectives: "1. 理解本课核心概念，并能够用自己的语言进行解释。\n2. 在观察、比较与讨论中形成解决问题的方法。\n3. 能够将所学内容迁移到新的学习情境中。",
     focus: "教学重点：理解核心概念之间的关系，并能够准确表达。\n教学难点：从具体情境中抽象方法，并完成迁移应用。",
     preparation: "教师：课件、示例材料与课堂任务单。\n学生：预习教材，准备学习用品并记录已有问题。",

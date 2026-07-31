@@ -50,4 +50,25 @@ describe("extractSources", () => {
     })).toEqual([]);
     expect(extractSources("not json")).toEqual([]);
   });
+
+  it("extracts the standard sources array from a structured function-tool result", () => {
+    expect(extractSources(JSON.stringify({
+      count: 1,
+      matches: [{ node: { title: "1 春", pageNumber: 9 } }],
+      sources: [{
+        id: "curriculum:book:9",
+        title: "语文七年级上册（国家智慧教育平台目录）",
+        url: "https://example.com/tree.json",
+        kind: "public",
+        page: 9,
+      }],
+    }))).toEqual([{
+      id: "curriculum:book:9",
+      title: "语文七年级上册（国家智慧教育平台目录）",
+      url: "https://example.com/tree.json",
+      kind: "public",
+      page: 9,
+      chunkId: undefined,
+    }]);
+  });
 });

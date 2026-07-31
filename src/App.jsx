@@ -75,12 +75,15 @@ export function App() {
           className: values.className,
           year: "2025—2026 学年",
           subject: values.subject,
+          stage: values.stage,
+          grade: values.grade,
+          edition: values.edition,
           tone: notebookTones[notebooks.length % notebookTones.length],
         });
         setNotebooks((current) => [materializeNotebook({ ...notebook, files: [] }), ...current]);
         toast.success(`“${values.title}”已创建`);
       } else {
-        const targetId = selectedId ?? values.notebookId;
+        const targetId = values.notebookId || selectedId;
         const targetNotebook = notebooks.find((notebook) => notebook.id === targetId);
         if (!targetNotebook) throw new Error("notebook_not_found");
         const image = coverAssets[targetNotebook.files.length % coverAssets.length];
@@ -90,7 +93,11 @@ export function App() {
           title: values.title,
           type: draftFile.type,
           image,
-          document: createLessonPlanDraft(targetNotebook, draftFile),
+          document: createLessonPlanDraft(targetNotebook, draftFile, {
+            unitTitle: values.unitTitle,
+            lessonTitle: values.lessonTitle,
+          }),
+          contextProfile: values.contextProfile,
           pageCount: 1,
         });
         setNotebooks((current) => current.map((notebook) => notebook.id === targetId ? {
@@ -227,9 +234,14 @@ export function App() {
           file={activeFileData}
           originRect={activeFile.originRect}
           onSave={updateLessonPlan}
-          onAgentVersionCommitted={(lessonPlan, documentVersion) => (
-            updateLocalLessonPlan(lessonPlan, activeFileData.pages, documentVersion)
-          )}
+          onAgentVersionCommitted={async (lessonPlan, documentVersion, pageCount) => {
+            updateLocalLessonPlan(lessonPlan, pageCount, documentVersion);
+            const saved = await agentApi.updateLessonPageCount(activeFileData.id, {
+              documentVersion,
+              pageCount,
+            });
+            updateLocalLessonPlan(saved.document, saved.pageCount, saved.documentVersion);
+          }}
           onClose={closeLessonFile}
           key={`${activeNotebook.id}-${activeFileData.id}`}
         />
@@ -238,6 +250,7 @@ export function App() {
         <CreateDialog
           kind={dialogKind}
           notebooks={notebooks}
+          initialNotebookId={selectedId}
           onClose={() => setDialogKind(null)}
           onCreate={createItem}
         />

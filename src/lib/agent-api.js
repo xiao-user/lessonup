@@ -37,6 +37,26 @@ export const agentApi = {
     `/api/lesson-files/${encodeURIComponent(fileId)}`,
     { method: "PATCH", body: JSON.stringify(input) },
   ),
+  listCurriculumFacets: () => request("/api/curriculum/facets"),
+  listCurriculumTextbooks: (filter = {}) => {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(filter)) {
+      if (value != null && value !== "") params.set(key, String(value));
+    }
+    const query = params.toString();
+    return request(`/api/curriculum/textbooks${query ? `?${query}` : ""}`);
+  },
+  getCurriculumTextbook: (textbookId) => request(
+    `/api/curriculum/textbooks/${encodeURIComponent(textbookId)}`,
+  ),
+  listCurriculumNodes: (textbookId, filter = {}) => {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(filter)) {
+      if (value != null && value !== "") params.set(key, String(value));
+    }
+    const query = params.toString();
+    return request(`/api/curriculum/textbooks/${encodeURIComponent(textbookId)}/nodes${query ? `?${query}` : ""}`);
+  },
   deleteLessonFile: (fileId) => request(
     `/api/lesson-files/${encodeURIComponent(fileId)}`,
     { method: "DELETE" },
@@ -48,6 +68,10 @@ export const agentApi = {
   saveLessonDocument: (fileId, input, idempotencyKey = crypto.randomUUID()) => request(
     `/api/lesson-files/${encodeURIComponent(fileId)}/document`,
     { method: "PATCH", headers: { "idempotency-key": idempotencyKey }, body: JSON.stringify(input) },
+  ),
+  updateLessonPageCount: (fileId, input) => request(
+    `/api/lesson-files/${encodeURIComponent(fileId)}/page-count`,
+    { method: "PATCH", body: JSON.stringify(input) },
   ),
   listThreads: (lessonFileId) => request(`/api/agent/threads?lessonFileId=${encodeURIComponent(lessonFileId)}`),
   createThread: (input) => request("/api/agent/threads", { method: "POST", body: JSON.stringify(input) }),

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  activitiesFromEvents,
   branchDisplayLabel,
   lastRetryableUserMessage,
   presentAgentError,
@@ -9,6 +10,32 @@ import {
   stopAgentRun,
   synchronizeCompletedAgentTurn,
 } from "./agent-run-control.js";
+
+describe("activitiesFromEvents", () => {
+  it("settles an unfinished tool as failed when the owning run fails", () => {
+    expect(activitiesFromEvents([
+      {
+        type: "tool.started",
+        toolCallId: "patch-1",
+        name: "propose_document_patch",
+        label: "准备修改建议",
+      },
+      { type: "run.failed", runId: "run-1", error: "agent_run_failed" },
+    ])).toMatchObject([{ id: "patch-1", state: "failed" }]);
+  });
+
+  it("settles an approval tool when its resumed run completes", () => {
+    expect(activitiesFromEvents([
+      {
+        type: "tool.started",
+        toolCallId: "patch-1",
+        name: "propose_document_patch",
+        label: "准备修改建议",
+      },
+      { type: "run.completed", runId: "run-1" },
+    ])).toMatchObject([{ id: "patch-1", state: "completed" }]);
+  });
+});
 
 describe("stopAgentRun", () => {
   it("aborts the local stream and reloads persisted messages when cancellation races completion", async () => {

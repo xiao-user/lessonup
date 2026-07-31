@@ -4,16 +4,54 @@ import type {
   AgentApprovalRecord,
   AgentBranchRecord,
   AgentMessageRecord,
+  AgentRunEvidenceRecord,
   AgentRunRecord,
   AgentThreadRecord,
+  CurriculumNodeRecord,
+  CurriculumTextbookRecord,
   KnowledgeResult,
   LessonFileRecord,
   NotebookRecord,
   SourceRef,
   NormalizedAgentEvent,
 } from "../domain.js";
-import { lessonPlanSchema } from "../domain.js";
+import { lessonContextProfileSchema, lessonPlanSchema } from "../domain.js";
+import {
+  buildCurriculumFacets,
+  buildCurriculumOutline,
+  normalizeCurriculumNodeQuery,
+  searchCurriculumNodeRecords,
+  type CurriculumTextbookFilter,
+} from "../curriculum/catalog.js";
 import type { CreateThreadInput, ImportedNotebook, LessonRepository } from "../repository.js";
+
+const mapCurriculumTextbook = (row: Record<string, any>): CurriculumTextbookRecord => ({
+  id: row.id,
+  title: row.title,
+  stage: row.stage,
+  subject: row.subject,
+  edition: row.edition,
+  grade: row.grade,
+  volume: row.volume ?? "",
+  publisherId: row.publisher_id ?? "",
+  ebookId: row.ebook_id ?? null,
+  detailUrl: row.detail_url ?? null,
+  treeUrl: row.tree_url ?? null,
+  sourcePdfUrl: row.source_pdf_url ?? null,
+  sourceListUrl: row.source_list_url ?? null,
+  nodeCount: row.node_count ?? 0,
+  sourceUpdatedAt: row.source_updated_at ?? null,
+});
+
+const mapCurriculumNode = (row: Record<string, any>): CurriculumNodeRecord => ({
+  textbookId: row.textbook_id,
+  nodeId: row.node_id,
+  parentId: row.parent_id ?? null,
+  level: row.level,
+  sortNo: row.sort_no,
+  title: row.title,
+  pageNumber: row.page_number ?? null,
+});
 
 function unwrap<T>(result: { data: T | null; error: { message: string } | null }): T {
   if (result.error) throw new Error(result.error.message);
@@ -48,6 +86,7 @@ const mapBranch = (row: Record<string, any>): AgentBranchRecord => ({
 const mapMessage = (row: Record<string, any>): AgentMessageRecord => ({
   id: row.id, ownerId: row.owner_id, threadId: row.thread_id, branchId: row.branch_id,
   role: row.role, content: row.content, status: row.status,
+  error: row.error ?? undefined,
   sources: row.sources ?? undefined,
   sessionCursor: row.session_cursor == null ? undefined : Number(row.session_cursor),
   createdAt: row.created_at,
@@ -58,9 +97,15 @@ const mapRun = (row: Record<string, any>): AgentRunRecord => ({
   model: row.model, status: row.status, capabilityPlan: row.capability_plan ?? undefined,
   agentDefinitionVersion: row.agent_definition_version ?? undefined,
   skillVersions: row.skill_versions ?? undefined,
+  attachmentSourceIds: row.attachment_source_ids ?? undefined,
   tokenUsage: row.token_usage ?? undefined,
   providerCost: row.provider_cost == null ? undefined : Number(row.provider_cost),
   error: row.error ?? undefined, startedAt: row.started_at, completedAt: row.completed_at ?? undefined,
+  leaseToken: row.lease_token ?? undefined,
+  leaseExpiresAt: row.lease_expires_at ?? undefined,
+  heartbeatAt: row.heartbeat_at ?? undefined,
+  cancelRequestedAt: row.cancel_requested_at ?? undefined,
+  assistantMessageId: row.assistant_message_id ?? undefined,
 });
 
 const mapApproval = (row: Record<string, any>): AgentApprovalRecord => ({
@@ -89,6 +134,7 @@ const mapFile = (row: Record<string, any>): LessonFileRecord => ({
   id: row.id, ownerId: row.owner_id, notebookId: row.notebook_id,
   title: row.title, type: row.type, image: row.image ?? undefined,
   document: lessonPlanSchema.parse(row.document), documentVersion: row.document_version,
+  contextProfile: lessonContextProfileSchema.parse(row.context_profile ?? {}),
   pageCount: row.page_count, updatedAt: row.updated_at,
 });
 
@@ -99,6 +145,9 @@ const mapNotebook = (row: Record<string, any>): NotebookRecord => ({
   className: row.class_name,
   year: row.year,
   subject: row.subject,
+  stage: row.stage ?? "",
+  grade: row.grade ?? "",
+  edition: row.edition ?? "",
   tone: row.tone ?? "teal",
   updatedAt: row.updated_at,
 });
@@ -158,6 +207,9 @@ export class SupabaseLessonRepository implements LessonRepository {
       class_name: input.className,
       year: input.year,
       subject: input.subject,
+      stage: input.stage ?? "",
+      grade: input.grade ?? "",
+      edition: input.edition ?? "",
       tone: input.tone,
     }).select("*").single();
     return mapNotebook(unwrap(result as any));
@@ -173,6 +225,9 @@ export class SupabaseLessonRepository implements LessonRepository {
     if (patch.className !== undefined) values.class_name = patch.className;
     if (patch.year !== undefined) values.year = patch.year;
     if (patch.subject !== undefined) values.subject = patch.subject;
+    if (patch.stage !== undefined) values.stage = patch.stage;
+    if (patch.grade !== undefined) values.grade = patch.grade;
+    if (patch.edition !== undefined) values.edition = patch.edition;
     if (patch.tone !== undefined) values.tone = patch.tone;
     const result = await this.client.from("notebooks").update(values)
       .eq("owner_id", ownerId).eq("id", notebookId).select("*").maybeSingle();
@@ -208,7 +263,13 @@ export class SupabaseLessonRepository implements LessonRepository {
       p_page_count: input.pageCount,
       p_idempotency_key: `create:${crypto.randomUUID()}`,
     });
-    return mapFile(unwrap(result as any));
+    const created = mapFile(unwrap(result as any));
+    if (input.contextProfile && Object.keys(input.contextProfile).length > 0) {
+      return this.updateLessonFile(ownerId, created.id, {
+        contextProfile: input.contextProfile,
+      });
+    }
+    return created;
   }
 
   async updateLessonFile(
@@ -220,6 +281,7 @@ export class SupabaseLessonRepository implements LessonRepository {
     if (patch.title !== undefined) values.title = patch.title;
     if (patch.type !== undefined) values.type = patch.type;
     if (patch.image !== undefined) values.image = patch.image;
+    if (patch.contextProfile !== undefined) values.context_profile = patch.contextProfile;
     const result = await this.client.from("lesson_files").update(values)
       .eq("owner_id", ownerId).eq("id", fileId).select("*").maybeSingle();
     if (result.error) throw new Error(result.error.message);
@@ -248,6 +310,21 @@ export class SupabaseLessonRepository implements LessonRepository {
       p_run_id: args.runId ?? null, p_idempotency_key: args.idempotencyKey,
     });
     return mapFile(unwrap(result as any));
+  }
+
+  async updateLessonPageCount(args: Parameters<LessonRepository["updateLessonPageCount"]>[0]) {
+    const result = await this.client.from("lesson_files")
+      .update({ page_count: args.pageCount, updated_at: new Date().toISOString() })
+      .eq("owner_id", args.ownerId)
+      .eq("id", args.fileId)
+      .eq("document_version", args.documentVersion)
+      .select("*")
+      .maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (result.data) return mapFile(result.data);
+    const current = await this.getLessonFile(args.ownerId, args.fileId);
+    if (!current) throw new Error("lesson_file_not_found");
+    throw new Error("stale_document");
   }
 
   async applyApprovedPatch(args: Parameters<LessonRepository["applyApprovedPatch"]>[0]) {
@@ -377,7 +454,7 @@ export class SupabaseLessonRepository implements LessonRepository {
 
   async updateMessage(ownerId: string, messageId: string, patch: Partial<AgentMessageRecord>) {
     const result = await this.client.from("agent_messages").update({
-      content: patch.content, status: patch.status, sources: patch.sources,
+      content: patch.content, status: patch.status, error: patch.error, sources: patch.sources,
       session_cursor: patch.sessionCursor,
     }).eq("owner_id", ownerId).eq("id", messageId).select("*").single();
     return mapMessage(unwrap(result as any));
@@ -389,8 +466,14 @@ export class SupabaseLessonRepository implements LessonRepository {
       model: input.model, status: input.status, capability_plan: input.capabilityPlan,
       agent_definition_version: input.agentDefinitionVersion,
       skill_versions: input.skillVersions,
+      attachment_source_ids: input.attachmentSourceIds,
       token_usage: input.tokenUsage,
       provider_cost: input.providerCost,
+      lease_token: input.leaseToken,
+      lease_expires_at: input.leaseExpiresAt,
+      heartbeat_at: input.heartbeatAt,
+      cancel_requested_at: input.cancelRequestedAt,
+      assistant_message_id: input.assistantMessageId,
       started_at: input.startedAt,
     }).select("*").single();
     return mapRun(unwrap(result as any));
@@ -416,11 +499,59 @@ export class SupabaseLessonRepository implements LessonRepository {
       status: patch.status, capability_plan: patch.capabilityPlan,
       agent_definition_version: patch.agentDefinitionVersion,
       skill_versions: patch.skillVersions,
+      attachment_source_ids: patch.attachmentSourceIds,
       token_usage: patch.tokenUsage,
       provider_cost: patch.providerCost,
+      lease_token: patch.leaseToken,
+      lease_expires_at: patch.leaseExpiresAt,
+      heartbeat_at: patch.heartbeatAt,
+      cancel_requested_at: patch.cancelRequestedAt,
+      assistant_message_id: patch.assistantMessageId,
       error: patch.error, completed_at: patch.completedAt,
     }).eq("owner_id", ownerId).eq("id", runId).select("*").single();
     return mapRun(unwrap(result as any));
+  }
+
+  async heartbeatRun(args: Parameters<LessonRepository["heartbeatRun"]>[0]) {
+    const result = await this.client.rpc("heartbeat_agent_run", {
+      p_owner_id: args.ownerId,
+      p_run_id: args.runId,
+      p_lease_token: args.leaseToken,
+      p_lease_expires_at: args.leaseExpiresAt,
+    });
+    return mapRun(unwrap(result as any));
+  }
+
+  async settleRun(args: Parameters<LessonRepository["settleRun"]>[0]) {
+    const result = await this.client.rpc("settle_agent_run", {
+      p_owner_id: args.ownerId,
+      p_run_id: args.runId,
+      p_lease_token: args.leaseToken,
+      p_status: args.status,
+      p_token_usage: args.tokenUsage ?? null,
+      p_error: args.error ?? null,
+      p_message_status: args.messageStatus ?? null,
+      p_message_content: args.messageContent ?? null,
+      p_message_sources: args.messageSources ?? null,
+      p_session_cursor: args.sessionCursor ?? null,
+    });
+    return mapRun(unwrap(result as any));
+  }
+
+  async requestRunCancellation(ownerId: string, runId: string) {
+    const result = await this.client.rpc("request_agent_run_cancellation", {
+      p_owner_id: ownerId,
+      p_run_id: runId,
+    });
+    return Boolean(unwrap(result as any));
+  }
+
+  async recoverExpiredRuns(ownerId: string, threadId?: string) {
+    const result = await this.client.rpc("recover_expired_agent_runs", {
+      p_owner_id: ownerId,
+      p_thread_id: threadId ?? null,
+    });
+    return Number(unwrap(result as any));
   }
 
   async appendRunEvent(ownerId: string, runId: string, type: string, data: unknown) {
@@ -489,6 +620,14 @@ export class SupabaseLessonRepository implements LessonRepository {
     return approval;
   }
 
+  async expireApprovalLifecycle(ownerId: string, approvalId: string) {
+    const result = await this.client.rpc("expire_agent_approval_lifecycle", {
+      p_owner_id: ownerId,
+      p_approval_id: approvalId,
+    });
+    return mapApproval(unwrap(result as any));
+  }
+
   async decideApproval(args: {
     ownerId: string;
     approvalId: string;
@@ -540,6 +679,23 @@ export class SupabaseLessonRepository implements LessonRepository {
     return mapApproval(unwrap(result as any));
   }
 
+  async settleApprovalContinuation(args: Parameters<LessonRepository["settleApprovalContinuation"]>[0]) {
+    const result = await this.client.rpc("settle_agent_approval_continuation", {
+      p_owner_id: args.ownerId,
+      p_approval_id: args.approvalId,
+      p_lease_token: args.leaseToken,
+      p_outcome: args.outcome,
+      p_assistant_message_id: args.assistantMessageId ?? null,
+      p_content: args.content ?? null,
+      p_sources: args.sources ?? null,
+      p_session_cursor: args.sessionCursor ?? null,
+      p_token_usage: args.tokenUsage ?? null,
+      p_encrypted_run_state: args.encryptedRunState ?? null,
+      p_error: args.error ?? null,
+    });
+    return mapApproval(unwrap(result as any));
+  }
+
   async getSessionItems(ownerId: string, threadId: string, branchId: string, limit?: number) {
     let query = this.client.from("agent_session_items").select("item")
       .eq("owner_id", ownerId).eq("thread_id", threadId).eq("branch_id", branchId)
@@ -549,6 +705,36 @@ export class SupabaseLessonRepository implements LessonRepository {
     if (result.error) throw new Error(result.error.message);
     const rows = limit ? (result.data ?? []).reverse() : (result.data ?? []);
     return rows.map((row) => row.item as AgentInputItem);
+  }
+
+  async getSessionItemsAfter(
+    ownerId: string,
+    threadId: string,
+    branchId: string,
+    afterCursor: number,
+    limit?: number,
+  ) {
+    let query = this.client.from("agent_session_items").select("item")
+      .eq("owner_id", ownerId)
+      .eq("thread_id", threadId)
+      .eq("branch_id", branchId)
+      .gt("sequence", afterCursor)
+      .order("sequence", { ascending: !limit });
+    if (limit) query = query.limit(limit);
+    const result = await query;
+    if (result.error) throw new Error(result.error.message);
+    const rows = limit ? (result.data ?? []).reverse() : (result.data ?? []);
+    return rows.map((row) => row.item as AgentInputItem);
+  }
+
+  async getSessionItemCount(ownerId: string, threadId: string, branchId: string) {
+    const result = await this.client.from("agent_session_items")
+      .select("id", { count: "exact", head: true })
+      .eq("owner_id", ownerId)
+      .eq("thread_id", threadId)
+      .eq("branch_id", branchId);
+    if (result.error) throw new Error(result.error.message);
+    return result.count ?? 0;
   }
 
   async addSessionItems(
@@ -670,5 +856,173 @@ export class SupabaseLessonRepository implements LessonRepository {
         : result.error.message,
     );
     return (result.data ?? []) as SourceRef[];
+  }
+
+  async recordRunEvidence(
+    ownerId: string,
+    runId: string,
+    kind: Parameters<LessonRepository["recordRunEvidence"]>[2],
+    sources: SourceRef[],
+  ) {
+    if (!sources.length) return;
+    const result = await this.client.from("agent_run_evidence").upsert(
+      sources.map((source) => ({
+        owner_id: ownerId,
+        run_id: runId,
+        kind,
+        source_id: source.id,
+        source,
+      })),
+      { onConflict: "owner_id,run_id,kind,source_id" },
+    );
+    if (result.error) throw new Error(result.error.message);
+  }
+
+  async listRunEvidence(ownerId: string, runId: string) {
+    const result = await this.client.from("agent_run_evidence").select("*")
+      .eq("owner_id", ownerId)
+      .eq("run_id", runId)
+      .order("created_at", { ascending: true });
+    if (result.error) throw new Error(result.error.message);
+    return (result.data ?? []).map((row): AgentRunEvidenceRecord => ({
+      ownerId: row.owner_id,
+      runId: row.run_id,
+      kind: row.kind,
+      source: row.source,
+      createdAt: row.created_at,
+    }));
+  }
+
+  async listCurriculumFacets() {
+    const result = await this.client
+      .from("curriculum_textbooks")
+      .select("stage,subject,edition,grade");
+    if (result.error) throw new Error(result.error.message);
+    return buildCurriculumFacets((result.data ?? []).map((row) => ({
+      id: "",
+      title: "",
+      stage: row.stage ?? "",
+      subject: row.subject ?? "",
+      edition: row.edition ?? "",
+      grade: row.grade ?? "",
+      volume: "",
+      publisherId: "",
+      ebookId: null,
+      detailUrl: null,
+      treeUrl: null,
+      sourcePdfUrl: null,
+      sourceListUrl: null,
+      nodeCount: 0,
+      sourceUpdatedAt: null,
+    })));
+  }
+
+  async searchCurriculumTextbooks(filter: CurriculumTextbookFilter = {}) {
+    const limit = Math.min(Math.max(filter.limit ?? 20, 1), 200);
+    let query = this.client
+      .from("curriculum_textbooks")
+      .select("*")
+      .order("stage", { ascending: true })
+      .order("subject", { ascending: true })
+      .order("edition", { ascending: true })
+      .order("title", { ascending: true })
+      .limit(limit);
+
+    if (filter.stage?.trim()) query = query.eq("stage", filter.stage.trim());
+    if (filter.subject?.trim()) query = query.eq("subject", filter.subject.trim());
+    if (filter.edition?.trim()) query = query.eq("edition", filter.edition.trim());
+    if (filter.grade?.trim()) query = query.eq("grade", filter.grade.trim());
+    if (filter.query?.trim()) {
+      const q = filter.query.trim();
+      query = query.or(
+        `title.ilike.%${q}%,volume.ilike.%${q}%,edition.ilike.%${q}%,subject.ilike.%${q}%`,
+      );
+    }
+
+    const result = await query;
+    if (result.error) throw new Error(result.error.message);
+    return (result.data ?? []).map(mapCurriculumTextbook);
+  }
+
+  async getCurriculumTextbook(textbookId: string) {
+    const result = await this.client
+      .from("curriculum_textbooks")
+      .select("*")
+      .eq("id", textbookId)
+      .maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    return result.data ? mapCurriculumTextbook(result.data) : null;
+  }
+
+  async listCurriculumNodes(args: {
+    textbookId: string;
+    parentId?: string | null;
+    maxLevel?: number;
+  }) {
+    const maxLevel = Math.min(Math.max(args.maxLevel ?? 3, 1), 8);
+    let query = this.client
+      .from("curriculum_nodes")
+      .select("*")
+      .eq("textbook_id", args.textbookId)
+      .lte("level", maxLevel)
+      .order("level", { ascending: true })
+      .order("sort_no", { ascending: true });
+
+    const result = await query;
+    if (result.error) throw new Error(result.error.message);
+    return buildCurriculumOutline((result.data ?? []).map(mapCurriculumNode), {
+      parentId: args.parentId,
+      maxLevel,
+    });
+  }
+
+  async searchCurriculumNodes(args: Parameters<LessonRepository["searchCurriculumNodes"]>[0]) {
+    const limit = Math.min(Math.max(args.limit ?? 20, 1), 100);
+    let nodeQuery = this.client
+      .from("curriculum_nodes")
+      .select("*")
+      .ilike("title", `%${normalizeCurriculumNodeQuery(args.query)}%`)
+      .order("title", { ascending: true })
+      .limit(Math.max(limit * 10, 100));
+    if (args.textbookId) nodeQuery = nodeQuery.eq("textbook_id", args.textbookId);
+    const nodeResult = await nodeQuery;
+    if (nodeResult.error) throw new Error(nodeResult.error.message);
+    const matchedNodes = (nodeResult.data ?? []).map(mapCurriculumNode);
+    const textbookIds = [...new Set(matchedNodes.map((node) => node.textbookId))];
+    if (!textbookIds.length) return [];
+    const booksResult = await this.client
+      .from("curriculum_textbooks")
+      .select("*")
+      .in("id", textbookIds);
+    if (booksResult.error) throw new Error(booksResult.error.message);
+    const textbooks = (booksResult.data ?? []).map(mapCurriculumTextbook);
+    const topMatches = searchCurriculumNodeRecords({
+      textbooks,
+      nodes: matchedNodes,
+      ...args,
+      limit,
+    });
+    const selectedTextbookIds = [...new Set(
+      topMatches.map((match) => match.textbook.id),
+    )];
+    const nodeResults = await Promise.all(selectedTextbookIds.map((textbookId) => (
+      this.client
+        .from("curriculum_nodes")
+        .select("*")
+        .eq("textbook_id", textbookId)
+        .order("level", { ascending: true })
+        .order("sort_no", { ascending: true })
+    )));
+    for (const result of nodeResults) {
+      if (result.error) throw new Error(result.error.message);
+    }
+    return searchCurriculumNodeRecords({
+      textbooks,
+      nodes: nodeResults.flatMap((result) => (
+        (result.data ?? []).map(mapCurriculumNode)
+      )),
+      ...args,
+      limit,
+    });
   }
 }

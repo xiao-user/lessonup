@@ -1,7 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { DeepSeekModelProvider, repairToolArgumentsJson } from "./deepseek-provider.js";
+import {
+  deepSeekApiProtocolForModel,
+  DeepSeekModelProvider,
+  repairToolArgumentsJson,
+} from "./deepseek-provider.js";
 
 describe("DeepSeekModelProvider", () => {
+  it("routes Pro through Chat Completions and Flash through Responses", () => {
+    expect(deepSeekApiProtocolForModel("deepseek-v4-pro")).toBe("chat-completions");
+    expect(deepSeekApiProtocolForModel("deepseek-v4-flash")).toBe("responses");
+    expect(() => deepSeekApiProtocolForModel("deepseek-chat")).toThrow(
+      "unsupported_deepseek_model",
+    );
+  });
+
   it("only resolves the two pinned V4 model ids", async () => {
     const provider = new DeepSeekModelProvider("test-key", "https://api.deepseek.com");
     await expect(provider.getModel("deepseek-chat")).rejects.toThrow("unsupported_deepseek_model");

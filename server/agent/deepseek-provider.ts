@@ -14,6 +14,15 @@ export const deepSeekModels = {
   flash: "deepseek-v4-flash",
 } as const;
 
+export type DeepSeekModel = typeof deepSeekModels[keyof typeof deepSeekModels];
+export type DeepSeekApiProtocol = "chat-completions" | "responses";
+
+export function deepSeekApiProtocolForModel(modelName: string): DeepSeekApiProtocol {
+  if (modelName === deepSeekModels.pro) return "chat-completions";
+  if (modelName === deepSeekModels.flash) return "responses";
+  throw new Error(`unsupported_deepseek_model:${modelName}`);
+}
+
 export function repairToolArgumentsJson(value: string) {
   try {
     JSON.parse(value);
@@ -99,31 +108,67 @@ class DeepSeekToolArgumentRepairModel implements Model {
 }
 
 export class DeepSeekModelProvider implements ModelProvider {
-  private readonly provider: OpenAIProvider;
+  private readonly chatCompletionsProvider: OpenAIProvider;
+  private readonly responsesProvider: OpenAIProvider;
 
   constructor(apiKey = config.DEEPSEEK_API_KEY, baseURL = config.DEEPSEEK_BASE_URL) {
     if (!apiKey) throw new Error("deepseek_not_configured");
-    this.provider = new OpenAIProvider({
+    this.chatCompletionsProvider = new OpenAIProvider({
       apiKey,
       baseURL,
       useResponses: false,
       strictFeatureValidation: true,
     });
+    this.responsesProvider = new OpenAIProvider({
+      apiKey,
+      baseURL,
+      useResponses: true,
+    });
   }
 
   async getModel(modelName: string = deepSeekModels.pro): Promise<Model> {
-    if (modelName !== deepSeekModels.pro && modelName !== deepSeekModels.flash) {
-      throw new Error(`unsupported_deepseek_model:${modelName}`);
-    }
-    return new DeepSeekToolArgumentRepairModel(await this.provider.getModel(modelName));
+    const protocol = deepSeekApiProtocolForModel(modelName);
+    const provider = protocol === "responses"
+      ? this.responsesProvider
+      : this.chatCompletionsProvider;
+    return new DeepSeekToolArgumentRepairModel(await provider.getModel(modelName));
   }
 
   async close() {
-    await this.provider.close();
+    await Promise.all([
+      this.chatCompletionsProvider.close(),
+      this.responsesProvider.close(),
+    ]);
   }
 }
 
 export function createDeepSeekClient() {
   if (!config.DEEPSEEK_API_KEY) throw new Error("deepseek_not_configured");
   return new OpenAI({ apiKey: config.DEEPSEEK_API_KEY, baseURL: config.DEEPSEEK_BASE_URL });
+}
+
+export async function requestDeepSeekFlashText(args: {
+  instructions: string;
+  input: string;
+  maxOutputTokens: number;
+  temperature?: number;
+  json?: boolean;
+  signal?: AbortSignal;
+}) {
+  const response = await createDeepSeekClient().responses.create({
+    model: deepSeekModels.flash,
+    instructions: args.instructions,
+    input: args.input,
+    max_output_tokens: args.maxOutputTokens,
+    temperature: args.temperature,
+    reasoning: { effort: "low" },
+    store: false,
+    text: args.json ? { format: { type: "json_object" } } : undefined,
+  }, { signal: args.signal });
+  if (response.status !== "completed") {
+    throw new Error(`deepseek_flash_response_${response.status}`);
+  }
+  const content = response.output_text.trim();
+  if (!content) throw new Error("deepseek_flash_response_empty");
+  return content;
 }
