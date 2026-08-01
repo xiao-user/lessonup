@@ -487,6 +487,7 @@ function SectionRow({ entry, onChange, onFocus, syncVersion, onHistoryAction }) 
 export function LessonFileWorkspace({ notebook, file, sourceElement, originRect, closeSignal = 0, onSave, onAgentVersionCommitted, onClose }) {
   const rootRef = useRef(null);
   const scrollRef = useRef(null);
+  const documentPagesRef = useRef(null);
   const firstSheetRef = useRef(null);
   const closingRef = useRef(false);
   const openingTimelineRef = useRef(null);
@@ -519,6 +520,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
   });
   const [editorSyncVersion, setEditorSyncVersion] = useState(0);
   const [activeSection, setActiveSection] = useState("basics");
+  const [previewSectionIndex, setPreviewSectionIndex] = useState(null);
   const [saveStatus, setSaveStatus] = useState("已自动保存");
   const [selectionContext, setSelectionContext] = useState(null);
   const [documentVersion, setDocumentVersion] = useState(file.documentVersion ?? 0);
@@ -536,6 +538,10 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
 
   const activeSectionData = lessonPlanSections.find((section) => section.id === activeSection)
     ?? lessonPlanSections[0];
+  const activeSectionIndex = Math.max(
+    0,
+    lessonPlanSections.findIndex((section) => section.id === activeSectionData.id),
+  );
 
   const persistPendingSave = useCallback(() => {
     const pendingSave = pendingSaveDataRef.current;
@@ -659,6 +665,33 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     return () => { cancelled = true; };
   }, []);
 
+  useLayoutEffect(() => {
+    const scrollRoot = scrollRef.current;
+    const pagesRoot = documentPagesRef.current;
+    if (!scrollRoot || !pagesRoot) return undefined;
+
+    const updateScale = () => {
+      const sheet = pagesRoot.querySelector(".lesson-sheet");
+      if (!sheet) return;
+      const scrollStyle = getComputedStyle(scrollRoot);
+      const horizontalPadding = Number.parseFloat(scrollStyle.paddingLeft)
+        + Number.parseFloat(scrollStyle.paddingRight);
+      const availableWidth = Math.max(0, scrollRoot.clientWidth - horizontalPadding);
+      const canonicalWidth = sheet.offsetWidth;
+      const scale = canonicalWidth
+        ? Math.min(1, Math.max(0.34, availableWidth / canonicalWidth))
+        : 1;
+      pagesRoot.style.setProperty("--lesson-paper-scale", String(scale));
+      pagesRoot.style.setProperty("--lesson-paper-display-width", `${canonicalWidth * scale}px`);
+      pagesRoot.style.setProperty("--lesson-paper-display-height", `${sheet.offsetHeight * scale}px`);
+    };
+
+    const observer = new ResizeObserver(updateScale);
+    observer.observe(scrollRoot);
+    updateScale();
+    return () => observer.disconnect();
+  }, []);
+
   useEffect(() => {
     const scrollRoot = scrollRef.current;
     const root = rootRef.current;
@@ -726,7 +759,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     if (!root || !firstSheet) return undefined;
     const rails = root.querySelectorAll(".lesson-side-rail");
     const pageContent = root.querySelectorAll(".lesson-sheet-content");
-    const secondarySheets = [...root.querySelectorAll(".lesson-sheet")].slice(1);
+    const secondarySheets = [...root.querySelectorAll(".lesson-sheet-frame")].slice(1);
     const finalRect = firstSheet.getBoundingClientRect();
     const currentSource = sourceElement?.isConnected
       ? sourceElement
@@ -749,7 +782,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     const finalRadius = finalSheetStyle.borderRadius;
     const finalPaper = finalSheetStyle.backgroundColor;
     const sourcePaper = getComputedStyle(currentSource ?? firstSheet).backgroundColor;
-    const sourceShadow = "0 0 0 0 rgb(60 50 34 / 0%)";
+    const sourceShadow = styles.getPropertyValue("--book-paper-shadow-clear").trim();
 
     if (rails.length) gsap.set(rails, { autoAlpha: 0 });
     if (pageContent.length) gsap.set(pageContent, { autoAlpha: 0 });
@@ -1022,16 +1055,15 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
       }
       const rails = root.querySelectorAll(".lesson-side-rail");
       const pageContent = root.querySelectorAll(".lesson-sheet-content");
-      const secondarySheets = [...root.querySelectorAll(".lesson-sheet")].slice(1);
+      const secondarySheets = [...root.querySelectorAll(".lesson-sheet-frame")].slice(1);
       const currentRect = firstSheet.getBoundingClientRect();
       const source = document.querySelector(`.folder-paper[data-file-id="${file.id}"]`);
       const targetRect = source?.getBoundingClientRect() ?? originRect;
       const duration = reduceMotion ? 0 : 0.72;
-      const clearBackground = getComputedStyle(document.documentElement)
-        .getPropertyValue("--app-background-clear")
-        .trim();
+      const rootStyles = getComputedStyle(document.documentElement);
+      const clearBackground = rootStyles.getPropertyValue("--app-background-clear").trim();
       const currentShadow = getComputedStyle(firstSheet).boxShadow;
-      const sourceShadow = "0 0 0 0 rgb(60 50 34 / 0%)";
+      const sourceShadow = rootStyles.getPropertyValue("--book-paper-shadow-clear").trim();
 
       if (!targetRect?.width || !targetRect?.height) {
         gsap.timeline({ onComplete: onClose })
@@ -1140,17 +1172,25 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
 
       <aside id="lesson-outline-panel" className={`lesson-side-rail lesson-outline-rail ${mobileRail === "outline" ? "is-mobile-open" : ""}`}>
         <div className="lesson-outline-header">
-          <Button variant="ghost" size="sm" type="button" onClick={closeWorkspace}>
-            <ArrowLeft data-icon="inline-start" /> 返回备课本
+          <Button
+            className="lesson-outline-back"
+            variant="ghost"
+            size="sm"
+            type="button"
+            aria-label={`返回备课本：${file.title}`}
+            onClick={closeWorkspace}
+          >
+            <ArrowLeft data-icon="inline-start" />
+            <span className="lesson-outline-back-copy">
+              <strong>{file.title}</strong>
+              <small>{notebook.subject} / {notebook.className}</small>
+            </span>
           </Button>
           <div className="lesson-file-identity">
-            <span>{notebook.subject} · {notebook.className}</span>
-            <h1>{file.title}</h1>
-            <p><Check aria-hidden="true" /> {saveStatus}</p>
+            <p className="lesson-save-status"><Check aria-hidden="true" /> {saveStatus}</p>
             <div className="lesson-history-actions" aria-label="编辑历史">
               <Button
-                variant="ghost"
-                size="icon-sm"
+                variant="outline"
                 type="button"
                 aria-label="撤销"
                 aria-keyshortcuts="Meta+Z Control+Z"
@@ -1158,11 +1198,10 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
                 disabled={!historyAvailability.canUndo}
                 onClick={() => handleHistoryAction("undo")}
               >
-                <Undo2 />
+                <Undo2 data-icon="inline-start" /> 撤销
               </Button>
               <Button
-                variant="ghost"
-                size="icon-sm"
+                variant="outline"
                 type="button"
                 aria-label="重做"
                 aria-keyshortcuts="Meta+Shift+Z Control+Y"
@@ -1170,28 +1209,43 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
                 disabled={!historyAvailability.canRedo}
                 onClick={() => handleHistoryAction("redo")}
               >
-                <Redo2 />
+                <Redo2 data-icon="inline-start" /> 重做
               </Button>
             </div>
           </div>
         </div>
 
-        <nav className="lesson-anchor-nav" aria-label="教案章节">
-          {lessonPlanSections.map((section) => (
-            <Button
-              className={`lesson-anchor ${activeSection === section.id ? "is-active" : ""}`}
-              variant="ghost"
-              size="sm"
-              data-tone={section.tone}
-              type="button"
-              aria-current={activeSection === section.id ? "location" : undefined}
-              onClick={() => scrollToSection(section.id)}
-              key={section.id}
-            >
-              <span aria-hidden="true" />
-              {section.label}
-            </Button>
-          ))}
+        <nav
+          className="lesson-anchor-nav"
+          data-preview={previewSectionIndex == null ? "false" : "true"}
+          aria-label="教案章节"
+          onMouseLeave={() => setPreviewSectionIndex(null)}
+        >
+          {lessonPlanSections.map((section, sectionIndex) => {
+            const visualFocusIndex = previewSectionIndex ?? activeSectionIndex;
+            const distance = Math.min(4, Math.abs(sectionIndex - visualFocusIndex));
+            const isActive = activeSection === section.id;
+            const isPreview = previewSectionIndex === sectionIndex;
+            return (
+              <Button
+                className={`lesson-anchor ${isActive ? "is-active" : ""} ${isPreview ? "is-preview" : ""}`}
+                variant="ghost"
+                size="sm"
+                data-distance={distance}
+                data-tone={section.tone}
+                type="button"
+                aria-current={isActive ? "location" : undefined}
+                onMouseEnter={() => setPreviewSectionIndex(sectionIndex)}
+                onFocus={() => setPreviewSectionIndex(sectionIndex)}
+                onBlur={() => setPreviewSectionIndex(null)}
+                onClick={() => scrollToSection(section.id)}
+                key={section.id}
+              >
+                <span className="lesson-anchor-mark" aria-hidden="true" />
+                <span className="lesson-anchor-label">{section.label}</span>
+              </Button>
+            );
+          })}
         </nav>
       </aside>
 
@@ -1202,70 +1256,71 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
         onPointerUp={captureSelection}
         onKeyUp={captureSelection}
       >
-        <p className="lesson-mobile-document-hint">左右滑动查看完整教案</p>
-        <div className="lesson-document-pages">
+        <p className="lesson-mobile-document-hint">上下滚动查看完整教案</p>
+        <div className="lesson-document-pages" ref={documentPagesRef}>
           {pages.map((pageEntries, pageIndex) => (
-            <article
-              className="lesson-sheet"
-              data-page-index={pageIndex}
+            <div
+              className="lesson-sheet-frame"
               ref={pageIndex === 0 ? firstSheetRef : undefined}
               key={`page-${pageIndex}`}
             >
-              <div className="lesson-sheet-content">
-                <table className="lesson-plan-table">
-                  <LessonTableColumns />
-                  <tbody>
-                    {pageEntries.map((entry) => {
-                      if (entry.kind === "basics") {
+              <article className="lesson-sheet" data-page-index={pageIndex}>
+                <div className="lesson-sheet-content">
+                  <table className="lesson-plan-table">
+                    <LessonTableColumns />
+                    <tbody>
+                      {pageEntries.map((entry) => {
+                        if (entry.kind === "basics") {
+                          return (
+                            <BasicsRow
+                              plan={plan}
+                              onChange={commitField}
+                              onFocus={() => setActiveSection("basics")}
+                              syncVersion={editorSyncVersion}
+                              onHistoryAction={handleHistoryAction}
+                              key={entry.key}
+                            />
+                          );
+                        }
+
+                        if (entry.kind === "topic") {
+                          return (
+                            <tr className="lesson-row-topic" key={entry.key}>
+                              <th scope="row">课题</th>
+                              <td colSpan={5}>
+                                <EditableCell
+                                  value={plan.topic}
+                                  onChange={(...change) => commitField("topic", ...change)}
+                                  onFocus={() => setActiveSection("basics")}
+                                  field="topic"
+                                  syncVersion={editorSyncVersion}
+                                  onHistoryAction={handleHistoryAction}
+                                  label="课题"
+                                />
+                              </td>
+                            </tr>
+                          );
+                        }
+
                         return (
-                          <BasicsRow
-                            plan={plan}
-                            onChange={commitField}
-                            onFocus={() => setActiveSection("basics")}
+                          <SectionRow
+                            entry={entry}
+                            onChange={commitSegment}
+                            onFocus={setActiveSection}
                             syncVersion={editorSyncVersion}
                             onHistoryAction={handleHistoryAction}
                             key={entry.key}
                           />
                         );
-                      }
-
-                      if (entry.kind === "topic") {
-                        return (
-                          <tr className="lesson-row-topic" key={entry.key}>
-                            <th scope="row">课题</th>
-                            <td colSpan={5}>
-                              <EditableCell
-                                value={plan.topic}
-                                onChange={(...change) => commitField("topic", ...change)}
-                                onFocus={() => setActiveSection("basics")}
-                                field="topic"
-                                syncVersion={editorSyncVersion}
-                                onHistoryAction={handleHistoryAction}
-                                label="课题"
-                              />
-                            </td>
-                          </tr>
-                        );
-                      }
-
-                      return (
-                        <SectionRow
-                          entry={entry}
-                          onChange={commitSegment}
-                          onFocus={setActiveSection}
-                          syncVersion={editorSyncVersion}
-                          onHistoryAction={handleHistoryAction}
-                          key={entry.key}
-                        />
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              <span className="lesson-page-number" aria-label={`第${pageIndex + 1}页，共${pages.length}页`}>
-                {pageIndex + 1} / {pages.length}
-              </span>
-            </article>
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <span className="lesson-page-number" aria-label={`第${pageIndex + 1}页，共${pages.length}页`}>
+                  {pageIndex + 1} / {pages.length}
+                </span>
+              </article>
+            </div>
           ))}
         </div>
       </main>

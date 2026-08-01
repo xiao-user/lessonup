@@ -27,6 +27,25 @@
   --lesson-paper-margin-inline: 16mm;
   --lesson-page-gap: 24px;
 
+  /* Purpose-built book materials */
+  --book-paper: #ffffff;
+  --book-paper-ink: #2a2721;
+  --book-paper-muted: #736f66;
+  --book-paper-subtle: #69645b;
+  --book-cover-ink: #211f20;
+  --book-highlight: rgb(255 255 255 / 10%);
+  --book-highlight-clear: rgb(255 255 255 / 0%);
+  --book-shadow-rgb: 60 50 34;
+  --book-paper-shadow-clear: 0 0 0 0 rgb(60 50 34 / 0%);
+  --book-tone-teal: #a36ae4;
+  --book-tone-teal-spine: #9b5ee2;
+  --book-tone-sage: #3ba53b;
+  --book-tone-sage-spine: #3b9d38;
+  --book-tone-amber: #f4c95d;
+  --book-tone-amber-spine: #ebbe4f;
+  --book-tone-coral: #f08283;
+  --book-tone-coral-spine: #e97374;
+
   --gray-100: #f2f2f2;
   --gray-200: #ebebeb;
   --gray-300: #e6e6e6;

@@ -17,6 +17,8 @@ const EASE = {
 };
 
 const OPEN_DURATION = 0.9;
+const OPEN_TITLE_DELAY = 0.28;
+const OPEN_TITLE_DURATION = OPEN_DURATION - OPEN_TITLE_DELAY;
 const CLOSE_DURATION = 1.02;
 const WHEEL_SCALE = 1 / 180;
 const WHEEL_SETTLE_DELAY = 140;
@@ -51,17 +53,9 @@ const interpolateNameSlot = (offset) => {
   return gsap.utils.interpolate(nameSlot(start), nameSlot(end), offset - start);
 };
 
-function pageLayer(index, pageIndex, fileCount) {
-  return index < pageIndex ? 40 + index : 10 + fileCount - index;
-}
-
-function stagePageLayers(book, pageIndex, fileCount, movingIndexes = []) {
-  const moving = new Set(Array.isArray(movingIndexes) ? movingIndexes : [movingIndexes]);
-  const leaves = gsap.utils.toArray(".book-volume-leaf", book);
-  leaves.forEach((leaf, index) => {
-    gsap.set(leaf, { zIndex: moving.has(index) ? 80 + index : pageLayer(index, pageIndex, fileCount) });
-  });
-  return leaves;
+function readPageAngle(leaf) {
+  if (!leaf) return 0;
+  return Number.parseFloat(getComputedStyle(leaf).getPropertyValue("--leaf-angle")) || 0;
 }
 
 function addPageTurn(timeline, leaf, {
@@ -71,10 +65,12 @@ function addPageTurn(timeline, leaf, {
   ease = EASE.swing,
 }) {
   if (!leaf) return timeline;
-  timeline
-    .to(leaf, { rotationY, duration, ease, overwrite: "auto" }, position)
-    .to(leaf, { x: -3, duration: duration * 0.45, ease: "sine.out", overwrite: "auto" }, position)
-    .to(leaf, { x: 0, duration: duration * 0.55, ease: "sine.in", overwrite: "auto" }, position + duration * 0.45);
+  timeline.to(leaf, {
+    "--leaf-angle": `${rotationY}deg`,
+    duration,
+    ease,
+    overwrite: "auto",
+  }, position);
   return timeline;
 }
 
@@ -96,13 +92,11 @@ function applyOpenBookPose(book, root) {
     "--book-rotation": "0deg",
     "--book-shadow-alpha": 0,
   });
-  gsap.set(cover, { rotationY: -180 });
+  gsap.set(cover, { "--cover-angle": "-180deg" });
   if (titleLeaf && book.querySelector('.book-volume-leaf[data-page-kind="file"]')) {
-    gsap.set(titleLeaf, { rotationY: -180, x: 0 });
+    gsap.set(titleLeaf, { "--leaf-angle": "-180deg" });
   }
   gsap.set(unit, { xPercent: 50 });
-  gsap.set(pages, { zIndex: 31 });
-  stagePageLayers(book, Number(page?.dataset.pageIndex ?? 0), book.querySelectorAll(".book-volume-leaf").length);
   gsap.set(pages, { borderRadius: `0px ${outer}px ${outer}px 0px` });
   gsap.set(page, { borderRadius: `0px ${inner}px ${inner}px 0px` });
   gsap.set(coverBack, { borderRadius: `${outer}px 0px 0px ${outer}px` });
@@ -128,11 +122,10 @@ function placeCarousel({ position, bookRefs, nameRefs }) {
     if (!name) return;
     const offset = index - position;
     const distance = Math.abs(offset);
-    const proximity = gsap.utils.clamp(0, 1, 1 - distance);
     const visibility = nameVisibility(offset);
     const variables = {
       "--name-y": `${interpolateNameSlot(offset)}cqh`,
-      color: gsap.utils.interpolate("#c2c0bc", "#1b1915", proximity),
+      "--name-proximity": gsap.utils.clamp(0, 1, 1 - distance),
       autoAlpha: visibility,
     };
     gsap.set(name, variables);
@@ -454,19 +447,6 @@ export const BookCarousel = forwardRef(function BookCarousel({
       }, position);
   };
 
-  const animateHeadingOut = (timeline, direction, position = 0) => {
-    const header = rootRef.current?.closest(".notebook-collection")?.querySelector(".page-heading");
-    if (!header) return;
-    timeline.to(header.children, {
-      y: direction * -8,
-      autoAlpha: 0,
-      duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 0.2,
-      ease: EASE.fade,
-      stagger: 0.025,
-      overwrite: "auto",
-    }, position);
-  };
-
   const openNotebook = contextSafe((notebookId) => {
     const index = notebooks.findIndex((notebook) => notebook.id === notebookId);
     if (index < 0 || isAnimatingRef.current) return;
@@ -492,15 +472,9 @@ export const BookCarousel = forwardRef(function BookCarousel({
     const { outer, inner } = pageRadii();
     const openScale = Number.parseFloat(getComputedStyle(book).getPropertyValue("--book-open-scale")) || 1.32;
     const hasFiles = notebooks[index].files.length > 0;
-    const activePageIndex = hasFiles ? (pageIndexesRef.current[notebookId] ?? 0) + 1 : 0;
     gsap.set(book, { zIndex: 40 });
-    gsap.set(pages, { zIndex: 20 });
-    stagePageLayers(book, activePageIndex, notebooks[index].files.length + 1);
     if (hasFiles) gsap.set(titleLeaf, {
-      rotationY: 0,
-      x: 0,
-      zIndex: 29,
-      transformOrigin: "-0.5% 50%",
+      "--leaf-angle": "0deg",
     });
     const timeline = gsap.timeline({
       onComplete: () => {
@@ -508,20 +482,20 @@ export const BookCarousel = forwardRef(function BookCarousel({
         setBookAnimating(false);
       },
     });
-    animateHeadingOut(timeline, 1, 0);
+    timeline
+      .addLabel("coverTurn", 0)
+      .addLabel("titleTurn", OPEN_TITLE_DELAY);
     animateChrome(timeline, true, 0);
     if (hasFiles) {
       addPageTurn(timeline, titleLeaf, {
         rotationY: -180,
-        duration: OPEN_DURATION * 0.84,
-        position: 0,
+        duration: OPEN_TITLE_DURATION,
+        position: "titleTurn",
       });
     }
     timeline
       .call(() => onSelect(notebookId), [], 0.23)
-      .to(cover, { rotationY: -180, duration: OPEN_DURATION * 0.84, ease: EASE.swing }, 0)
-      .to(cover, { rotationY: -178, duration: OPEN_DURATION * 0.08, ease: "sine.out" }, OPEN_DURATION * 0.84)
-      .to(cover, { rotationY: -180, duration: OPEN_DURATION * 0.08, ease: EASE.soft }, OPEN_DURATION * 0.92)
+      .to(cover, { "--cover-angle": "-180deg", duration: OPEN_DURATION, ease: EASE.swing }, "coverTurn")
       .to(unit, { xPercent: 50, duration: OPEN_DURATION * 0.88, ease: EASE.drift }, 0)
       .to(book, { "--book-scale": openScale, duration: OPEN_DURATION * 0.86, ease: EASE.settle }, 0)
       .to(book, { "--book-shadow-alpha": 0, duration: OPEN_DURATION * 0.62, ease: EASE.fade }, 0)
@@ -534,9 +508,7 @@ export const BookCarousel = forwardRef(function BookCarousel({
       }, 0)
       .fromTo(coverBack, { borderRadius: outer }, {
         borderRadius: `${outer}px 0px 0px ${outer}px`, duration: OPEN_DURATION * 0.78, ease: EASE.soft,
-      }, 0)
-      .set(pages, { zIndex: 31 }, OPEN_DURATION * 0.42);
-    if (hasFiles) timeline.set(titleLeaf, { zIndex: 40 }, OPEN_DURATION * 0.42);
+      }, 0);
   });
 
   const closeNotebook = contextSafe(() => {
@@ -568,7 +540,7 @@ export const BookCarousel = forwardRef(function BookCarousel({
       .map((leaf) => ({
         leaf,
         index: Number(leaf.dataset.pageIndex),
-        rotation: Number(gsap.getProperty(leaf, "rotationY")) || 0,
+        rotation: readPageAngle(leaf),
       }))
       .filter(({ rotation }) => rotation < -0.5)
       .filter(({ leaf }) => leaf !== titleLeaf)
@@ -577,58 +549,50 @@ export const BookCarousel = forwardRef(function BookCarousel({
 
     const timeline = gsap.timeline({
       onComplete: () => {
-        stagePageLayers(book, 0, leaves.length);
-        gsap.set(leaves, { rotationY: 0, x: 0 });
+        gsap.set(leaves, { "--leaf-angle": "0deg" });
+        gsap.set(cover, { "--cover-angle": "0deg" });
         commitPageIndex(selectedNotebookId, 0, true);
         gsap.set([pages, page, coverBack], { clearProps: "borderRadius" });
-        gsap.set([cover, unit], { clearProps: "transform" });
+        gsap.set(unit, { clearProps: "transform" });
         gsap.set(book, { zIndex: slot.zIndex, clearProps: "--book-shadow-alpha" });
         isAnimatingRef.current = false;
         setBookAnimating(false);
         onSelect(null);
         window.requestAnimationFrame(() => {
           if (!book.isConnected) return;
-          gsap.set(leaves, { clearProps: "transform,transformOrigin" });
+          gsap.set(leaves, { clearProps: "--leaf-angle" });
+          gsap.set(cover, { clearProps: "--cover-angle" });
         });
       },
     });
 
-    turnedLeaves.forEach(({ leaf, index: leafIndex }, order) => {
+    turnedLeaves.forEach(({ leaf }, order) => {
       const start = reduceMotion ? 0 : order * 0.075;
-      timeline
-        .set(leaf, { zIndex: 70 + leafIndex }, start)
-        .to(leaf, {
-          rotationY: 0,
-          x: 0,
-          duration: reduceMotion ? 0 : 0.54,
-          ease: "power3.inOut",
-        }, start);
+      timeline.to(leaf, {
+        "--leaf-angle": "0deg",
+        duration: reduceMotion ? 0 : 0.54,
+        ease: "power3.inOut",
+      }, start);
     });
 
-    animateHeadingOut(timeline, -1, reduceMotion ? 0 : 0.16);
     animateChrome(timeline, false, reduceMotion ? 0 : 0.3);
     if (titleLeaf) {
-      gsap.set(titleLeaf, { zIndex: 40, transformOrigin: "-0.5% 50%" });
-      timeline
-        .to(titleLeaf, {
-          rotationY: 0,
-          x: 0,
-          duration: reduceMotion ? 0 : CLOSE_DURATION,
-          ease: "power3.inOut",
-          overwrite: "auto",
-        }, 0)
-        .set(titleLeaf, { zIndex: 29 }, reduceMotion ? 0 : CLOSE_DURATION * 0.5);
+      timeline.to(titleLeaf, {
+        "--leaf-angle": "0deg",
+        duration: reduceMotion ? 0 : CLOSE_DURATION,
+        ease: "power3.inOut",
+        overwrite: "auto",
+      }, 0);
     }
     timeline
-      .to(cover, { rotationY: 0, duration: reduceMotion ? 0 : CLOSE_DURATION, ease: "power3.inOut" }, 0)
+      .to(cover, { "--cover-angle": "0deg", duration: reduceMotion ? 0 : CLOSE_DURATION, ease: "power3.inOut" }, 0)
       .to(unit, { xPercent: 0, duration: reduceMotion ? 0 : CLOSE_DURATION, ease: "power3.inOut" }, 0)
       .to(book, { "--book-scale": slot.scale, duration: reduceMotion ? 0 : CLOSE_DURATION, ease: "power3.inOut" }, 0)
       .to(book, { "--book-shadow-alpha": 0.28, duration: reduceMotion ? 0 : CLOSE_DURATION * 0.72, ease: EASE.fade }, CLOSE_DURATION * 0.2)
       .to(book, { "--book-rotation": `${restingRotation}deg`, duration: reduceMotion ? 0 : CLOSE_DURATION * 0.66, ease: "power2.inOut" }, CLOSE_DURATION * 0.34)
       .to(pages, { borderRadius: outer, duration: reduceMotion ? 0 : CLOSE_DURATION * 0.74, ease: EASE.soft }, 0)
       .to(page, { borderRadius: inner, duration: reduceMotion ? 0 : CLOSE_DURATION * 0.74, ease: EASE.soft }, 0)
-      .to(coverBack, { borderRadius: outer, duration: reduceMotion ? 0 : CLOSE_DURATION * 0.74, ease: EASE.soft }, 0)
-      .set(pages, { zIndex: 20 }, reduceMotion ? 0 : CLOSE_DURATION * 0.5);
+      .to(coverBack, { borderRadius: outer, duration: reduceMotion ? 0 : CLOSE_DURATION * 0.74, ease: EASE.soft }, 0);
   });
 
   useImperativeHandle(ref, () => ({ close: closeNotebook }));
@@ -654,8 +618,7 @@ export const BookCarousel = forwardRef(function BookCarousel({
     const leaf = book?.querySelector(`.book-volume-leaf[data-page-index="${movingIndex}"]`);
     if (!leaf) return;
 
-    const currentRotation = Number(gsap.getProperty(leaf, "rotationY"))
-      || (movingIndex < currentIndex ? -180 : 0);
+    const currentRotation = readPageAngle(leaf);
     const nextPageIndexes = { ...pageIndexesRef.current, [notebookId]: nextIndex };
     pageIndexesRef.current = nextPageIndexes;
     flushSync(() => {
@@ -664,14 +627,8 @@ export const BookCarousel = forwardRef(function BookCarousel({
     });
     pageAnimatingRef.current = true;
     pageTimelinesRef.current.get(leaf)?.kill();
-    const movingIndexes = [
-      ...pageTimelinesRef.current.keys(),
-      leaf,
-    ].map((movingLeaf) => Number(movingLeaf.dataset.pageIndex));
-    stagePageLayers(book, nextPageIndex, notebook.files.length + 1, movingIndexes);
     gsap.set(leaf, {
-      rotationY: currentRotation,
-      transformOrigin: "-0.5% 50%",
+      "--leaf-angle": `${currentRotation}deg`,
     });
     const targetRotation = nextPageIndex > currentPageIndex ? -180 : 0;
     const distance = Math.abs(targetRotation - currentRotation);
@@ -681,10 +638,7 @@ export const BookCarousel = forwardRef(function BookCarousel({
       onComplete: () => {
         if (pageTimelinesRef.current.get(leaf) !== timeline) return;
         pageTimelinesRef.current.delete(leaf);
-        gsap.set(leaf, { zIndex: pageLayer(movingIndex, nextPageIndex, notebook.files.length + 1) });
-        const stillMoving = [...pageTimelinesRef.current.keys()]
-          .map((movingLeaf) => Number(movingLeaf.dataset.pageIndex));
-        stagePageLayers(book, (pageIndexesRef.current[notebookId] ?? nextIndex) + 1, notebook.files.length + 1, stillMoving);
+        gsap.set(leaf, { clearProps: "--leaf-angle" });
         pageAnimatingRef.current = pageTimelinesRef.current.size > 0;
         setPageAnimating(pageAnimatingRef.current);
       },

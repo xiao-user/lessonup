@@ -65,7 +65,7 @@ export function BookVolume({
                 className={`book-volume-leaf ${index < activePageIndex ? "is-turned" : ""} ${index === activePageIndex ? "is-current" : ""}`}
                 data-page-index={index}
                 data-page-kind={page.kind}
-                style={{ zIndex: index < activePageIndex ? 40 + index : 10 + pages.length - index }}
+                style={{ "--leaf-layer": pages.length - index + 1 }}
                 aria-hidden={index !== activePageIndex}
                 key={page.id}
               >
@@ -109,6 +109,7 @@ export function BookVolume({
             className="book-volume-cover"
             type="button"
             aria-label={isOpen ? `合上${notebook.title}` : `打开${notebook.title}`}
+            style={{ "--cover-layer": pages.length + 2 }}
             onClick={onToggle}
             onPointerUp={(event) => event.currentTarget.blur()}
           >
