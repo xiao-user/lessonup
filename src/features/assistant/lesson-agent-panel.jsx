@@ -69,6 +69,11 @@ export function LessonAgentPanel({
   const latestAssistant = latestAssistantIndex >= 0 ? chat.messages[latestAssistantIndex] : null;
   const latestTurnOwnsError = latestAssistant?.status === "failed"
     && (latestAssistant.error ?? "agent_run_failed") === chat.error;
+  const hasContinuationFailureTurn = chat.messages.some((message) => (
+    message.role === "assistant"
+    && message.status === "failed"
+    && message.error === "approval_resume_failed"
+  ));
   const [renaming, setRenaming] = useState(false);
   const [threadTitle, setThreadTitle] = useState("");
   const [deleteConfirmationOpen, setDeleteConfirmationOpen] = useState(false);
@@ -333,6 +338,7 @@ export function LessonAgentPanel({
                     onReject={() => chat.respondApproval(false)}
                     onContinue={() => chat.respondApproval(approval.decision === "approved")}
                     onNavigate={onNavigateToSection}
+                    showContinuationNotice={approval.state === "continuation" && !hasContinuationFailureTurn}
                     key={approval.id}
                   />
                 ))}

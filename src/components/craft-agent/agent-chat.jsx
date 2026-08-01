@@ -287,6 +287,7 @@ export function CraftApproval({
   onReject,
   onContinue,
   onNavigate,
+  showContinuationNotice = false,
 }) {
   if (!approval) return null;
   const pending = approval.state === "pending" || approval.state === "responding";
@@ -329,11 +330,18 @@ export function CraftApproval({
         <p>附有 {approval.patch.citations.length} 个可追溯来源</p>
       ) : null}
       {approval.state === "continuation" ? (
-        <div className="craft-approval-actions">
-          <Button type="button" size="sm" onClick={onContinue}>
-            继续生成
-          </Button>
-        </div>
+        <>
+          {showContinuationNotice ? (
+            <p className="craft-approval-result">
+              修改决定已经保存，但后续回复未能恢复。教案状态不会被重复写入。
+            </p>
+          ) : null}
+          <div className="craft-approval-actions">
+            <Button type="button" size="sm" onClick={onContinue}>
+              继续生成
+            </Button>
+          </div>
+        </>
       ) : approval.state === "responding" ? (
         <div className="craft-approval-progress" role="status">
           <LoaderCircle className="animate-spin" aria-hidden="true" />

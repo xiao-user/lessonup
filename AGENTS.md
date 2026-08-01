@@ -17,7 +17,9 @@
 - Resting folders remain full size. Hover changes only cover/paper transforms; it must not change layout width or material. Opening and closing follow one reversible spatial path without a visible intermediate hover phase or vertical folder movement.
 - Focused papers remain interactive. The back button, folder cover, and document-level outside hit testing return to the collection; do not use a full-page dismissal overlay.
 - Keep the focused folder/paper composition centered when it fits and left-clamped when it does not. Preserve compact mobile gaps and trailing collection padding.
-- Use `/assets/contra-labs-background.mp4` as the fixed, muted, looping, bottom-aligned background without a gradient overlay. Use “备好课” as the collection `h3` with no subtitle.
+- Keep the collection background free of video or gradient overlays. Use “备好课” as the collection `h3` with no subtitle.
+- Preserve LessonUp's own collection shell, background, and single action header. Reuse only the center book scene from `/Users/liuxiao/Downloads/Kimi_Agent_Deployment_ed07f5c/index.html` as an isolated, data-driven `BookCarousel`: stacked books, side metadata, floating title index, scroll indicator, wheel/touch/keyboard switching, cover/page shading, and reversible GSAP choreography. The active book cover itself is the open control; do not render a separate central open button. The carousel must not own page chrome or duplicate create actions. Covers show only notebook title and file count; pages use paper rather than lesson-file images and retain previous/next controls plus the detail-view transition origin. During close, keep the page block and cover back rendered until the moving cover conceals them naturally, then clear selection state.
+- Treat the carousel's active notebook as the target of collection-level file creation. Creation dialogs must serialize their mutation, expose a truthful submitting state, and prevent duplicate submission while the request is pending.
 
 ## Lesson-file workspace
 

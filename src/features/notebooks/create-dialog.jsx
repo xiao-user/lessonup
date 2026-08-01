@@ -62,6 +62,7 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
   const [loadingCurriculum, setLoadingCurriculum] = useState(true);
   const [loadingUnits, setLoadingUnits] = useState(false);
   const [loadingLessonNodes, setLoadingLessonNodes] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
 
   const selectedNotebook = notebooks.find((notebook) => notebook.id === notebookId);
   const subjectForLesson = selectedNotebook?.subject ?? subject;
@@ -230,40 +231,45 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
     return () => { cancelled = true; };
   }, [isNotebook, textbookId, unitNodeId]);
 
-  const submit = (event) => {
+  const submit = async (event) => {
     event.preventDefault();
-    if (!title.trim()) return;
-    if (isNotebook) {
-      onCreate({
+    if (!title.trim() || submitting) return;
+    setSubmitting(true);
+    try {
+      if (isNotebook) {
+        await onCreate({
+          title: title.trim(),
+          className,
+          subject,
+          stage: stage === NONE ? "" : stage,
+          grade: grade === NONE ? "" : grade,
+          edition: edition === NONE ? "" : edition,
+          notebookId,
+        });
+        return;
+      }
+      await onCreate({
         title: title.trim(),
         className,
-        subject,
-        stage: stage === NONE ? "" : stage,
-        grade: grade === NONE ? "" : grade,
-        edition: edition === NONE ? "" : edition,
+        subject: subjectForLesson,
         notebookId,
+        unitTitle: selectedUnit?.title,
+        lessonTitle: selectedLessonNode
+          ? formatCurriculumNodeTitle(selectedLessonNode.title)
+          : undefined,
+        contextProfile: buildContextProfileFromTextbook(
+          selectedTextbook,
+          unitNodeId === NONE ? undefined : unitNodeId,
+          lessonNodeId === NONE ? undefined : lessonNodeId,
+        ),
       });
-      return;
+    } finally {
+      setSubmitting(false);
     }
-    onCreate({
-      title: title.trim(),
-      className,
-      subject: subjectForLesson,
-      notebookId,
-      unitTitle: selectedUnit?.title,
-      lessonTitle: selectedLessonNode
-        ? formatCurriculumNodeTitle(selectedLessonNode.title)
-        : undefined,
-      contextProfile: buildContextProfileFromTextbook(
-        selectedTextbook,
-        unitNodeId === NONE ? undefined : unitNodeId,
-        lessonNodeId === NONE ? undefined : lessonNodeId,
-      ),
-    });
   };
 
   return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <Dialog open onOpenChange={(open) => { if (!open && !submitting) onClose(); }}>
       <DialogContent>
         <form className="grid gap-4" onSubmit={submit}>
           <DialogHeader>
@@ -560,8 +566,13 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
           </FieldGroup>
 
           <DialogFooter>
-            <Button variant="outline" type="button" onClick={onClose}>取消</Button>
-            <Button type="submit" disabled={!title.trim() || (!isNotebook && !notebookId)}>创建</Button>
+            <Button variant="outline" type="button" disabled={submitting} onClick={onClose}>取消</Button>
+            <Button
+              type="submit"
+              disabled={submitting || !title.trim() || (!isNotebook && !notebookId)}
+            >
+              {submitting ? "创建中…" : "创建"}
+            </Button>
           </DialogFooter>
         </form>
       </DialogContent>

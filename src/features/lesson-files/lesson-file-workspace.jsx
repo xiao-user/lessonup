@@ -484,7 +484,7 @@ function SectionRow({ entry, onChange, onFocus, syncVersion, onHistoryAction }) 
   );
 }
 
-export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgentVersionCommitted, onClose }) {
+export function LessonFileWorkspace({ notebook, file, sourceElement, originRect, closeSignal = 0, onSave, onAgentVersionCommitted, onClose }) {
   const rootRef = useRef(null);
   const scrollRef = useRef(null);
   const firstSheetRef = useRef(null);
@@ -723,66 +723,108 @@ export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgen
   const { contextSafe } = useGSAP(() => {
     const root = rootRef.current;
     const firstSheet = firstSheetRef.current;
+    if (!root || !firstSheet) return undefined;
     const rails = root.querySelectorAll(".lesson-side-rail");
     const pageContent = root.querySelectorAll(".lesson-sheet-content");
     const secondarySheets = [...root.querySelectorAll(".lesson-sheet")].slice(1);
-    const preview = root.querySelector(".lesson-sheet-preview");
     const finalRect = firstSheet.getBoundingClientRect();
-    const sourceRect = originRect ?? finalRect;
+    const currentSource = sourceElement?.isConnected
+      ? sourceElement
+      : [...document.querySelectorAll(".book-volume-file")]
+        .find((element) => element.dataset.fileId === file.id);
+    const sourceRect = originRect ?? currentSource?.getBoundingClientRect();
+    const canMorph = Boolean(
+      sourceRect?.width
+      && sourceRect?.height
+      && finalRect.width
+      && finalRect.height,
+    );
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const duration = reduceMotion ? 0 : 0.72;
+    const duration = reduceMotion ? 0 : 0.82;
     const styles = getComputedStyle(document.documentElement);
     const background = styles.getPropertyValue("--app-background").trim();
     const clearBackground = styles.getPropertyValue("--app-background-clear").trim();
+    const finalSheetStyle = getComputedStyle(firstSheet);
+    const finalShadow = finalSheetStyle.boxShadow;
+    const finalRadius = finalSheetStyle.borderRadius;
+    const finalPaper = finalSheetStyle.backgroundColor;
+    const sourcePaper = getComputedStyle(currentSource ?? firstSheet).backgroundColor;
+    const sourceShadow = "0 0 0 0 rgb(60 50 34 / 0%)";
 
     if (rails.length) gsap.set(rails, { autoAlpha: 0 });
     if (pageContent.length) gsap.set(pageContent, { autoAlpha: 0 });
     if (secondarySheets.length) gsap.set(secondarySheets, { autoAlpha: 0, y: 24 });
-    if (preview) gsap.set(preview, { autoAlpha: 1 });
+
+    if (!canMorph || reduceMotion) {
+      gsap.set(root, { clearProps: "backgroundColor" });
+      if (pageContent.length) gsap.set(pageContent, { autoAlpha: 1 });
+      if (secondarySheets.length) gsap.set(secondarySheets, { autoAlpha: 1, clearProps: "transform" });
+      if (rails.length) gsap.set(rails, { autoAlpha: 1, clearProps: "transform" });
+      return undefined;
+    }
+
+    gsap.set(root, { backgroundColor: clearBackground });
+    gsap.set(firstSheet, {
+      position: "fixed",
+      top: finalRect.top,
+      left: finalRect.left,
+      width: finalRect.width,
+      height: finalRect.height,
+      zIndex: 6,
+      x: sourceRect.left - finalRect.left,
+      y: sourceRect.top - finalRect.top,
+      scaleX: sourceRect.width / finalRect.width,
+      scaleY: sourceRect.height / finalRect.height,
+      transformOrigin: "top left",
+      boxShadow: sourceShadow,
+      backgroundColor: sourcePaper,
+      borderRadius: 3,
+      willChange: "transform, box-shadow",
+    });
 
     const timeline = gsap.timeline({
-      defaults: { ease: "power3.inOut" },
+      defaults: { ease: "power2.inOut" },
       onComplete: () => { openingTimelineRef.current = null; },
     });
     openingTimelineRef.current = timeline;
     timeline
       .addLabel("open", 0)
-      .fromTo(root, { backgroundColor: clearBackground }, {
+      .to(root, {
         backgroundColor: background,
-        duration: reduceMotion ? 0 : 0.34,
+        duration: 0.58,
       }, "open")
-      .fromTo(firstSheet, {
-        position: "fixed",
-        top: sourceRect.top,
-        left: sourceRect.left,
-        width: sourceRect.width,
-        height: sourceRect.height,
-        zIndex: 6,
-      }, {
-        top: finalRect.top,
-        left: finalRect.left,
-        width: finalRect.width,
-        height: finalRect.height,
+      .to(firstSheet, {
+        x: 0,
+        y: 0,
+        scaleX: 1,
+        scaleY: 1,
+        boxShadow: finalShadow,
+        backgroundColor: finalPaper,
+        borderRadius: finalRadius,
         duration,
-        clearProps: "position,top,left,width,height,zIndex",
+        clearProps: "position,top,left,width,height,zIndex,transform,transformOrigin,boxShadow,backgroundColor,borderRadius,willChange",
       }, "open");
-    if (preview) timeline.to(preview, { autoAlpha: 0, duration: reduceMotion ? 0 : 0.2 }, duration * 0.46);
-    if (pageContent.length) timeline.to(pageContent, { autoAlpha: 1, duration: reduceMotion ? 0 : 0.28 }, duration * 0.5);
+    if (pageContent.length) timeline.to(pageContent, {
+      autoAlpha: 1,
+      duration: 0.32,
+      ease: "sine.inOut",
+    }, duration * 0.58);
     if (secondarySheets.length) timeline.to(secondarySheets, {
         y: 0,
         autoAlpha: 1,
-        stagger: reduceMotion ? 0 : 0.05,
-        duration: reduceMotion ? 0 : 0.34,
-      }, duration * 0.56);
+        stagger: 0.05,
+        duration: 0.34,
+      }, duration * 0.66);
     if (rails.length) timeline.fromTo(rails, {
         x: (index) => index === 0 ? -16 : 16,
         autoAlpha: 0,
       }, {
         x: 0,
         autoAlpha: 1,
-        stagger: reduceMotion ? 0 : 0.05,
-        duration: reduceMotion ? 0 : 0.34,
-      }, duration * 0.62);
+        stagger: 0.05,
+        duration: 0.34,
+      }, duration * 0.7);
+    return () => timeline.kill();
   }, { scope: rootRef });
 
   useGSAP(() => {
@@ -974,17 +1016,32 @@ export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgen
     const finishClose = () => {
       const root = rootRef.current;
       const firstSheet = firstSheetRef.current;
+      if (!root || !firstSheet) {
+        onClose();
+        return;
+      }
       const rails = root.querySelectorAll(".lesson-side-rail");
       const pageContent = root.querySelectorAll(".lesson-sheet-content");
       const secondarySheets = [...root.querySelectorAll(".lesson-sheet")].slice(1);
-      const preview = root.querySelector(".lesson-sheet-preview");
       const currentRect = firstSheet.getBoundingClientRect();
       const source = document.querySelector(`.folder-paper[data-file-id="${file.id}"]`);
-      const targetRect = source?.getBoundingClientRect() ?? originRect ?? currentRect;
-      const duration = reduceMotion ? 0 : 0.62;
+      const targetRect = source?.getBoundingClientRect() ?? originRect;
+      const duration = reduceMotion ? 0 : 0.72;
       const clearBackground = getComputedStyle(document.documentElement)
         .getPropertyValue("--app-background-clear")
         .trim();
+      const currentShadow = getComputedStyle(firstSheet).boxShadow;
+      const sourceShadow = "0 0 0 0 rgb(60 50 34 / 0%)";
+
+      if (!targetRect?.width || !targetRect?.height) {
+        gsap.timeline({ onComplete: onClose })
+          .to([...rails, ...secondarySheets, ...pageContent], {
+            autoAlpha: 0,
+            duration: reduceMotion ? 0 : 0.24,
+            ease: "sine.inOut",
+          });
+        return;
+      }
 
       gsap.set(firstSheet, {
         position: "fixed",
@@ -993,9 +1050,19 @@ export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgen
         width: currentRect.width,
         height: currentRect.height,
         zIndex: 6,
+        transformOrigin: "top left",
+        boxShadow: currentShadow,
+        willChange: "transform, box-shadow",
       });
 
-      const timeline = gsap.timeline({ defaults: { ease: "power3.inOut" }, onComplete: onClose })
+      const targetTransform = {
+        x: targetRect.left - currentRect.left,
+        y: targetRect.top - currentRect.top,
+        scaleX: targetRect.width / currentRect.width,
+        scaleY: targetRect.height / currentRect.height,
+      };
+
+      const timeline = gsap.timeline({ defaults: { ease: "power2.inOut" }, onComplete: onClose })
         .addLabel("close", 0);
       if (rails.length) timeline.to(rails, {
           autoAlpha: 0,
@@ -1007,19 +1074,17 @@ export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgen
           y: 20,
           duration: reduceMotion ? 0 : 0.22,
         }, "close");
-      if (pageContent.length) timeline.to(pageContent, { autoAlpha: 0, duration: reduceMotion ? 0 : 0.18 }, "close");
-      if (preview) timeline.to(preview, { autoAlpha: 1, duration: reduceMotion ? 0 : 0.2 }, "close+=0.08");
+      if (pageContent.length) timeline.to(pageContent, { autoAlpha: 0, duration: reduceMotion ? 0 : 0.24, ease: "sine.inOut" }, "close");
       timeline.to(firstSheet, {
-          top: targetRect.top,
-          left: targetRect.left,
-          width: targetRect.width,
-          height: targetRect.height,
+          ...targetTransform,
+          boxShadow: sourceShadow,
+          borderRadius: 3,
           duration,
-        }, "close+=0.08")
+        }, "close+=0.06")
         .to(root, {
           backgroundColor: clearBackground,
-          duration: reduceMotion ? 0 : 0.28,
-        }, `close+=${duration * 0.62}`);
+          duration: reduceMotion ? 0 : 0.42,
+        }, `close+=${duration * 0.5}`);
     };
 
     if (!scrollRoot.scrollTop || reduceMotion) {
@@ -1035,6 +1100,10 @@ export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgen
       onComplete: finishClose,
     });
   });
+
+  useEffect(() => {
+    if (closeSignal) closeWorkspace();
+  }, [closeSignal]);
 
   return (
     <section
@@ -1142,19 +1211,6 @@ export function LessonFileWorkspace({ notebook, file, originRect, onSave, onAgen
               ref={pageIndex === 0 ? firstSheetRef : undefined}
               key={`page-${pageIndex}`}
             >
-              {pageIndex === 0 && (
-                <div className="lesson-sheet-preview" aria-hidden="true">
-                  <div className="lesson-sheet-preview-image">
-                    <img src={file.image} alt="" />
-                    <span>{file.type}</span>
-                  </div>
-                  <div className="lesson-sheet-preview-copy">
-                    <h2>{file.title}</h2>
-                    <p>{pages.length} 页 · 更新于 {file.updated}</p>
-                  </div>
-                </div>
-              )}
-
               <div className="lesson-sheet-content">
                 <table className="lesson-plan-table">
                   <LessonTableColumns />

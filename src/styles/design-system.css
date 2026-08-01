@@ -175,8 +175,8 @@
   --duration-state: 150ms;
   --duration-popover: 200ms;
   --duration-overlay: 300ms;
+  --ease-state: cubic-bezier(0.2, 0, 0, 1);
   --ease-physical: cubic-bezier(0.175, 0.885, 0.32, 1.1);
-  --background-video-opacity: 1;
 }
 
 .dark {
@@ -291,7 +291,6 @@
   --ring: var(--blue-900);
   --sidebar-ring: var(--blue-900);
   --elevation-raised: 0 1px 2px rgb(0 0 0 / 16%);
-  --background-video-opacity: 0;
 }
 
 @media (color-gamut: p3) {

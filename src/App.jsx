@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import gsap from "gsap";
 import { toast } from "sonner";
 
 import { Toaster } from "@/components/ui/sonner";
@@ -28,14 +29,78 @@ const materializeNotebook = (notebook) => ({
   })),
 });
 
+const lessonFileRoute = (fileId) => `/lesson-files/${encodeURIComponent(fileId)}`;
+const getLessonFileRouteId = () => {
+  const match = window.location.pathname.match(/^\/lesson-files\/([^/]+)\/?$/);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+};
+
+const animatePageCopy = (page, opacity) => {
+  const targets = page ? [...page.children] : [];
+  if (!targets.length) return Promise.resolve();
+  gsap.killTweensOf(targets);
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    gsap.set(targets, { autoAlpha: opacity });
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    gsap.to(targets, {
+      autoAlpha: opacity,
+      duration: 0.18,
+      ease: "sine.inOut",
+      overwrite: true,
+      onComplete: resolve,
+    });
+  });
+};
+
+const restorePageCopy = (page) => {
+  const targets = page ? [...page.children] : [];
+  if (!targets.length) return;
+  gsap.killTweensOf(targets);
+  gsap.to(targets, {
+    autoAlpha: 1,
+    duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 0.2,
+    ease: "sine.out",
+    overwrite: true,
+    clearProps: "opacity,visibility",
+  });
+};
+
+const mergeRemoteFile = (notebooks, notebookId, fileId, remoteFile) => notebooks.map((notebook) => (
+  notebook.id === notebookId
+    ? {
+        ...notebook,
+        files: notebook.files.map((file) => (
+          file.id === fileId
+            ? {
+                ...file,
+                title: remoteFile.title,
+                type: remoteFile.type,
+                lessonPlan: remoteFile.document,
+                documentVersion: remoteFile.documentVersion,
+                pages: remoteFile.pageCount,
+              }
+            : file
+        )),
+      }
+    : notebook
+));
+
 export function App() {
   const [notebooks, setNotebooks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState(null);
   const [dialogKind, setDialogKind] = useState(null);
+  const [dialogNotebookId, setDialogNotebookId] = useState(null);
   const [activeFile, setActiveFile] = useState(null);
+  const [routeCloseRequest, setRouteCloseRequest] = useState(0);
 
-  const selectedNotebook = notebooks.find((notebook) => notebook.id === selectedId);
   const activeNotebook = notebooks.find((notebook) => notebook.id === activeFile?.notebookId);
   const activeFileData = activeNotebook?.files.find((file) => file.id === activeFile?.fileId);
 
@@ -47,7 +112,33 @@ export function App() {
       try {
         const remoteNotebooks = await agentApi.listNotebooks();
         if (cancelled) return;
-        setNotebooks(remoteNotebooks.map(materializeNotebook));
+        let hydratedNotebooks = remoteNotebooks.map(materializeNotebook);
+        const routedFileId = getLessonFileRouteId();
+        if (routedFileId) {
+          const routedNotebook = hydratedNotebooks.find((notebook) => (
+            notebook.files.some((file) => file.id === routedFileId)
+          ));
+          if (routedNotebook) {
+            const remoteFile = await agentApi.getLessonFile(routedFileId);
+            if (cancelled) return;
+            hydratedNotebooks = mergeRemoteFile(
+              hydratedNotebooks,
+              routedNotebook.id,
+              routedFileId,
+              remoteFile,
+            );
+            setSelectedId(routedNotebook.id);
+            setActiveFile({
+              notebookId: routedNotebook.id,
+              fileId: routedFileId,
+              sourceElement: null,
+              originRect: null,
+            });
+          } else {
+            window.history.replaceState({}, "", "/");
+          }
+        }
+        setNotebooks(hydratedNotebooks);
         setLoading(false);
         window.dispatchEvent(new CustomEvent("lessonup:agent-storage-ready"));
       } catch {
@@ -113,6 +204,7 @@ export function App() {
         toast.success(`“${values.title}”已加入备课本`);
       }
       setDialogKind(null);
+      setDialogNotebookId(null);
     } catch (error) {
       toast.error(`创建失败：${error.message}`);
     }
@@ -140,45 +232,85 @@ export function App() {
     )));
   };
 
-  const openLessonFile = async (nextActiveFile) => {
+  const openLessonFile = async (nextActiveFile, { historyMode = "push" } = {}) => {
+    const sourceElement = nextActiveFile.sourceElement;
+    if (sourceElement?.dataset.detailTransition === "pending") return false;
+    if (sourceElement) {
+      sourceElement.dataset.detailTransition = "pending";
+      sourceElement.setAttribute("aria-busy", "true");
+    }
     try {
       const remoteFile = await agentApi.getLessonFile(nextActiveFile.fileId);
-      setNotebooks((current) => current.map((notebook) => (
-        notebook.id === nextActiveFile.notebookId
-          ? {
-              ...notebook,
-              files: notebook.files.map((file) => (
-                file.id === nextActiveFile.fileId
-                  ? {
-                      ...file,
-                      title: remoteFile.title,
-                      type: remoteFile.type,
-                      image: remoteFile.image ?? file.image,
-                      lessonPlan: remoteFile.document,
-                      documentVersion: remoteFile.documentVersion,
-                      pages: remoteFile.pageCount,
-                    }
-                  : file
-              )),
-            }
-          : notebook
-      )));
+      setNotebooks((current) => mergeRemoteFile(
+        current,
+        nextActiveFile.notebookId,
+        nextActiveFile.fileId,
+        remoteFile,
+      ));
+      if (sourceElement?.isConnected) {
+        await animatePageCopy(sourceElement, 0);
+      }
+      setSelectedId(nextActiveFile.notebookId);
+      setRouteCloseRequest(0);
       setActiveFile(nextActiveFile);
+      if (historyMode) {
+        window.history[`${historyMode}State`]({}, "", lessonFileRoute(nextActiveFile.fileId));
+      }
+      return true;
     } catch (error) {
-      nextActiveFile.sourceElement?.focus({ preventScroll: true });
+      if (sourceElement) {
+        delete sourceElement.dataset.detailTransition;
+        sourceElement.removeAttribute("aria-busy");
+        restorePageCopy(sourceElement);
+        sourceElement.focus({ preventScroll: true });
+      }
       toast.error(error.message === "lesson_file_not_found"
         ? "这份教案已不存在，请刷新备课本"
         : "暂时无法同步云端教案，助手会在版本一致后才开始工作");
+      return false;
     }
   };
 
-  const closeLessonFile = () => {
+  const closeLessonFile = ({ historyMode = "push" } = {}) => {
     const sourceElement = activeFile?.sourceElement;
     setActiveFile(null);
+    if (historyMode && !routeCloseRequest) window.history[`${historyMode}State`]({}, "", "/");
+    setRouteCloseRequest(0);
     window.requestAnimationFrame(() => {
-      if (sourceElement?.isConnected) sourceElement.focus({ preventScroll: true });
+      if (!sourceElement?.isConnected) return;
+      delete sourceElement.dataset.detailTransition;
+      sourceElement.removeAttribute("aria-busy");
+      restorePageCopy(sourceElement);
+      sourceElement.focus({ preventScroll: true });
     });
   };
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const routedFileId = getLessonFileRouteId();
+      if (!routedFileId) {
+        if (activeFile?.fileId) {
+          setRouteCloseRequest((request) => request + 1);
+          return;
+        }
+        setSelectedId(null);
+        return;
+      }
+      if (routedFileId === activeFile?.fileId) return;
+      const routedNotebook = notebooks.find((notebook) => (
+        notebook.files.some((file) => file.id === routedFileId)
+      ));
+      if (!routedNotebook) return;
+      openLessonFile({
+        notebookId: routedNotebook.id,
+        fileId: routedFileId,
+        sourceElement: null,
+        originRect: null,
+      }, { historyMode: null });
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [activeFile?.fileId, notebooks]);
 
   const updateLessonPlan = async (
     lessonPlan,
@@ -209,30 +341,31 @@ export function App() {
 
   return (
     <main id="top">
-      <video className="background-video" autoPlay loop muted playsInline preload="auto" aria-hidden="true">
-        <source src="/assets/contra-labs-background.mp4" type="video/mp4" />
-      </video>
-      <section
-        className={`workspace ${selectedNotebook ? "is-focused" : ""} ${activeFile ? "has-file-open" : ""}`}
+      <NotebookCollection
+        notebooks={notebooks}
+        loading={loading}
+        selectedId={selectedId}
+        activeFileId={activeFile?.fileId}
         inert={Boolean(activeFile)}
-      >
-        <NotebookCollection
-          notebooks={notebooks}
-          loading={loading}
-          selectedId={selectedId}
-          activeFileId={activeFile?.fileId}
-          onSelect={setSelectedId}
-          onOpenFile={openLessonFile}
-          onCreateNotebook={() => setDialogKind("notebook")}
-          onCreateFile={() => setDialogKind("file")}
-          onSignOut={() => supabase?.auth.signOut()}
-        />
-      </section>
+        onSelect={setSelectedId}
+        onOpenFile={openLessonFile}
+        onCreateNotebook={() => {
+          setDialogNotebookId(null);
+          setDialogKind("notebook");
+        }}
+        onCreateFile={(notebookId) => {
+          setDialogNotebookId(notebookId ?? null);
+          setDialogKind("file");
+        }}
+        onSignOut={() => supabase?.auth.signOut()}
+      />
       {activeNotebook && activeFileData && (
         <LessonFileWorkspace
           notebook={activeNotebook}
           file={activeFileData}
+          sourceElement={activeFile.sourceElement}
           originRect={activeFile.originRect}
+          closeSignal={routeCloseRequest}
           onSave={updateLessonPlan}
           onAgentVersionCommitted={async (lessonPlan, documentVersion, pageCount) => {
             updateLocalLessonPlan(lessonPlan, pageCount, documentVersion);
@@ -250,8 +383,11 @@ export function App() {
         <CreateDialog
           kind={dialogKind}
           notebooks={notebooks}
-          initialNotebookId={selectedId}
-          onClose={() => setDialogKind(null)}
+          initialNotebookId={dialogNotebookId ?? selectedId}
+          onClose={() => {
+            setDialogKind(null);
+            setDialogNotebookId(null);
+          }}
           onCreate={createItem}
         />
       )}

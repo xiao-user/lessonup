@@ -82,12 +82,14 @@ export function useAgentChat({
   const activeBranchRef = useRef(null);
   const threadsRef = useRef([]);
   const runtimeRef = useRef(null);
+  const statusRef = useRef(status);
   const messagesRef = useRef([]);
   const runScopesRef = useRef(new Map());
   const streamControllersRef = useRef(new Map());
   const starterRequestsRef = useRef(new Set());
   const approval = activeApprovalFrom(approvals);
   documentVersionRef.current = documentVersion;
+  statusRef.current = status;
 
   useEffect(() => { activeThreadRef.current = activeThreadId; }, [activeThreadId]);
   useEffect(() => { activeBranchRef.current = activeBranchId; }, [activeBranchId]);
@@ -267,6 +269,7 @@ export function useAgentChat({
       force !== true
       && activeThreadRef.current
       && messagesRef.current.length === 0
+      && statusRef.current !== "error"
     ) {
       return { created: false, reason: "current_thread_empty" };
     }
@@ -747,11 +750,13 @@ export function useAgentChat({
       )));
     } catch (approvalError) {
       const effectiveError = terminalError ?? approvalError.message;
-      setError(effectiveError);
-      setStatus("error");
+      const retryableDecision = canRetryApprovalDecision(effectiveError);
+      const continuationReady = decisionCommitted && retryableDecision;
+      setError(continuationReady ? null : effectiveError);
+      setStatus(continuationReady ? "awaiting_approval" : "error");
       setApprovals((current) => current.map((item) => {
         if (item.id !== approval.id) return item;
-        if (!canRetryApprovalDecision(effectiveError)) {
+        if (!retryableDecision) {
           return { ...item, state: "expired" };
         }
         return {
