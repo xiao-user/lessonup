@@ -8,6 +8,7 @@ export function activitiesFromEvents(events, runStatus = null) {
   const activities = [];
   let failed = runStatus === "failed";
   let completed = runStatus === "completed";
+  let approvalCreated = false;
   for (const event of events) {
     if (event.type === "tool.started") {
       activities.push({
@@ -29,10 +30,17 @@ export function activitiesFromEvents(events, runStatus = null) {
         };
       }
     }
+    if (event.type === "approval.required") approvalCreated = true;
     if (event.type === "run.failed") failed = true;
     if (event.type === "run.completed") completed = true;
   }
   return activities.map((activity) => {
+    // A confirmation item proves that the proposal was successfully
+    // materialized and passed preflight. Older runs could later emit a false
+    // stale failure when the SDK acknowledged that same call after approval.
+    if (approvalCreated && activity.name?.startsWith("propose_")) {
+      return { ...activity, state: "completed" };
+    }
     if (activity.state !== "running") return activity;
     if (failed) return { ...activity, state: "failed" };
     if (completed) return { ...activity, state: "completed" };
@@ -53,6 +61,22 @@ export function presentAgentError(error) {
     document_context_stale: {
       message: "当前页面不是云端最新教案。为避免助手基于错误内容回答，请关闭并重新打开这份教案。",
       retryLabel: "重新打开后再试",
+    },
+    design_basis_context_stale: {
+      message: "教案设计依据已在其他会话中更新。为避免把过期判断写入教案，本轮已停止。",
+      retryLabel: "基于最新依据重新生成",
+    },
+    resource_context_stale: {
+      message: "当前页面不是云端最新学期框架。为避免助手基于过期规划回答，请重新打开框架后再试。",
+      retryLabel: "重新打开后再试",
+    },
+    stale_resource: {
+      message: "目标框架字段已被教师或另一会话更新，本次建议没有覆盖新内容。",
+      retryLabel: "基于最新框架重新生成",
+    },
+    stale_design_basis: {
+      message: "这项建议引用的学情或教学决定已经变化，本次投影没有写入教案。",
+      retryLabel: "基于最新依据重新生成",
     },
     run_interrupted: {
       message: "服务中断后，本轮回复已安全终止；未确认的修改不会写入。",
@@ -83,8 +107,12 @@ export function presentAgentError(error) {
       retryLabel: "重新读取来源",
     },
     invalid_patch_proposal: {
-      message: "助手提出的修改无法唯一对应当前原文，因此没有创建确认项，也没有写入教案。",
+      message: "助手生成的修改没有通过当前教案或设计依据校验，因此没有创建确认项，也没有写入教案。",
       retryLabel: "重新读取后生成",
+    },
+    patch_target_ambiguous: {
+      message: "教案中存在多处相同原文，助手这次没有提供足以区分目标位置的信息，因此没有创建确认项。",
+      retryLabel: "指定位置后重试",
     },
     approval_expired: {
       message: "这项修改建议已经过期，请基于当前教案重新生成。",
@@ -188,5 +216,6 @@ export function canRetryApprovalDecision(error) {
   return !new Set([
     "approval_expired",
     "stale_document",
+    "stale_design_basis",
   ]).has(error);
 }

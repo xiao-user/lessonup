@@ -5,6 +5,7 @@ import {
   agentTurnPhases,
   deriveAgentTurnPhase,
   presentAgentActivities,
+  presentConversationMessages,
   shouldShowAgentThinking,
 } from "./agent-turn-presentation.js";
 
@@ -40,6 +41,27 @@ describe("deriveAgentTurnPhase", () => {
   });
 });
 
+describe("presentConversationMessages", () => {
+  it("keeps approval and its continuation in one stable assistant turn", () => {
+    const messages = [
+      { id: "user", role: "user", content: "生成教案", status: "completed" },
+      { id: "proposal", role: "assistant", content: "", status: "completed", sources: [{ id: "s1" }] },
+      { id: "continuation", role: "assistant", content: "教案已写入。", status: "completed" },
+    ];
+    expect(presentConversationMessages(messages, [{
+      assistantMessageId: "proposal",
+      continuationMessageId: "continuation",
+    }])).toEqual([
+      messages[0],
+      expect.objectContaining({
+        id: "proposal",
+        content: "教案已写入。",
+        continuationMessageId: "continuation",
+      }),
+    ]);
+  });
+});
+
 describe("presentAgentActivities", () => {
   it("keeps a small number of section reads specific", () => {
     expect(presentAgentActivities([
@@ -67,6 +89,15 @@ describe("presentAgentActivities", () => {
     expect(presentAgentActivities([
       { id: "1", name: "search_web", label: "联网搜索", state: "running" },
       { id: "2", name: "search_web", label: "联网搜索", state: "completed" },
-    ])).toEqual([expect.objectContaining({ label: "联网搜索", state: "running" })]);
+    ])).toEqual([expect.objectContaining({ label: "联网搜索", state: "completed", attempts: 2 })]);
+  });
+
+  it("shows a proposal retry as correction instead of a generic reply wait", () => {
+    const activities = presentAgentActivities([
+      { id: "1", name: "propose_document_patch", label: "准备修改建议", state: "failed" },
+      { id: "2", name: "propose_document_patch", label: "准备修改建议", state: "running" },
+    ]);
+    expect(agentActivitySummary(activities, agentTurnPhases.toolActive))
+      .toBe("正在修正：准备修改建议");
   });
 });

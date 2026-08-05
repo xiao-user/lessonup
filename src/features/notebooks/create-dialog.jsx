@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -63,6 +63,7 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
   const [loadingUnits, setLoadingUnits] = useState(false);
   const [loadingLessonNodes, setLoadingLessonNodes] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const submissionRef = useRef(null);
 
   const selectedNotebook = notebooks.find((notebook) => notebook.id === notebookId);
   const subjectForLesson = selectedNotebook?.subject ?? subject;
@@ -237,7 +238,7 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
     setSubmitting(true);
     try {
       if (isNotebook) {
-        await onCreate({
+        const values = {
           title: title.trim(),
           className,
           subject,
@@ -245,10 +246,16 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
           grade: grade === NONE ? "" : grade,
           edition: edition === NONE ? "" : edition,
           notebookId,
-        });
+        };
+        const signature = JSON.stringify(values);
+        if (submissionRef.current?.signature !== signature) {
+          submissionRef.current = { signature, idempotencyKey: crypto.randomUUID() };
+        }
+        await onCreate({ ...values, idempotencyKey: submissionRef.current.idempotencyKey });
+        submissionRef.current = null;
         return;
       }
-      await onCreate({
+      const values = {
         title: title.trim(),
         className,
         subject: subjectForLesson,
@@ -262,7 +269,13 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
           unitNodeId === NONE ? undefined : unitNodeId,
           lessonNodeId === NONE ? undefined : lessonNodeId,
         ),
-      });
+      };
+      const signature = JSON.stringify(values);
+      if (submissionRef.current?.signature !== signature) {
+        submissionRef.current = { signature, idempotencyKey: crypto.randomUUID() };
+      }
+      await onCreate({ ...values, idempotencyKey: submissionRef.current.idempotencyKey });
+      submissionRef.current = null;
     } finally {
       setSubmitting(false);
     }

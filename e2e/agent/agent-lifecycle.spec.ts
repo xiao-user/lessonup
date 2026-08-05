@@ -1,5 +1,5 @@
 import { createThread, expect, openLessonFile, sendPrompt, test } from "./fixtures.js";
-import { adminClient } from "./test-data.js";
+import { adminClient, lessonFileId, notebookId } from "./test-data.js";
 
 test("covers empty state, streaming, tools, sources, sessions, retry, cancel and branches", async ({ lessonPage: page }) => {
   await expect(page.getByText("可结合当前教案继续备课", { exact: true })).toBeVisible();
@@ -22,7 +22,11 @@ test("covers empty state, streaming, tools, sources, sessions, retry, cancel and
   await expect(page.getByText("完成", { exact: true })).toBeVisible();
   await expect(page.getByText("工作范围", { exact: true })).toHaveCount(0);
   await expect(page.locator(".craft-response-content")).toHaveCSS("max-height", "none");
-  await expect(page.locator(".craft-response-card")).toHaveCSS("box-shadow", "none");
+  await expect(page.locator(".craft-response-card")).toHaveCSS(
+    "box-shadow",
+    "rgba(0, 0, 0, 0.07) 0px 5px 16px -4px",
+  );
+  await expect(page.locator(".craft-response-card")).toHaveCSS("border-radius", "24px");
   await expect(page.locator(".lesson-assistant-rail")).toHaveCSS("padding-left", "0px");
   await expect(page.locator(".lesson-document-scroll")).toHaveCSS("scrollbar-color", "auto");
   await expect(page.locator(".lesson-document-scroll")).toHaveCSS("scrollbar-width", "auto");
@@ -70,10 +74,13 @@ test("covers empty state, streaming, tools, sources, sessions, retry, cancel and
   await createThread(page);
   await sendPrompt(page, "请制造失败");
   await expect(page.locator(".craft-turn-failed")).toContainText("备课助手本轮未能完成");
+  await expect(page.locator(".craft-response-content").last()).toContainText("已完成问题定位");
+  await expect(page.locator(".craft-turn-failed")).toContainText("未完成草稿保留");
   await expect(page.locator(".lesson-agent-error")).toHaveCount(0);
   await page.reload();
   await openLessonFile(page);
   await expect(page.locator(".craft-turn-failed")).toContainText("备课助手本轮未能完成");
+  await expect(page.locator(".craft-response-content").last()).toContainText("已完成问题定位");
   await page.getByRole("button", { name: "编辑后重新发送" }).click();
   await page.getByLabel("向备课助手提问").press("Enter");
   await expect(page.getByRole("heading", { name: "确定性回复" })).toBeVisible();
@@ -113,6 +120,81 @@ test("reopens a thread on the branch that owns its pending approval", async ({ l
   await openLessonFile(page);
   await expect(page.getByRole("button", { name: "接受修改" })).toBeVisible();
   await expect(page.getByText("有一项修改等待确认", { exact: true })).toBeVisible();
+});
+
+test("deletes an unsent composer attachment when the user starts another thread", async ({ lessonPage: page }) => {
+  await sendPrompt(page, "先完成一轮对话以便新建会话");
+  await expect(page.getByRole("heading", { name: "确定性回复" })).toBeVisible();
+
+  await page.getByLabel("选择备课资料").setInputFiles({
+    name: "temporary-draft.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("这是一份不会发送的非敏感临时验收资料。"),
+  });
+  await expect(page.getByText("temporary-draft.txt", { exact: true })).toBeVisible();
+
+  await createThread(page);
+  await expect.poll(async () => {
+    const response = await page.request.get(
+      `/api/knowledge/uploads?lessonFileId=${encodeURIComponent(lessonFileId)}`,
+    );
+    if (!response.ok()) return `status:${response.status()}`;
+    return (await response.json()).length;
+  }).toBe(0);
+});
+
+test("keeps ready but unsent drafts outside project knowledge search", async ({ lessonPage: page }) => {
+  const userId = process.env.LESSONUP_E2E_USER_ID!;
+  const client = adminClient();
+  const sourceId = crypto.randomUUID();
+  try {
+    const inserted = await client.from("knowledge_sources").insert({
+      id: sourceId,
+      owner_id: userId,
+      notebook_id: notebookId,
+      lesson_file_id: lessonFileId,
+      scope: "file",
+      title: "未发送草稿",
+      media_type: "text/plain",
+      status: "ready",
+      index_version: "e2e-draft",
+    });
+    expect(inserted.error).toBeNull();
+    const listed = await client.rpc("list_scoped_knowledge_sources", {
+      p_owner_id: userId,
+      p_scopes: [`file:${lessonFileId}`],
+    });
+    expect(listed.error).toBeNull();
+    expect((listed.data ?? []).some((source: { id: string }) => source.id === sourceId)).toBe(false);
+  } finally {
+    await client.from("knowledge_sources").delete().eq("id", sourceId);
+  }
+  await expect(page.getByLabel("向备课助手提问")).toBeEnabled();
+});
+
+test("replays one atomic thread and main-branch creation", async ({ lessonPage: page }) => {
+  const idempotencyKey = crypto.randomUUID();
+  const data = {
+    notebookId,
+    lessonFileId,
+    title: "原子创建验收",
+  };
+  const first = await page.request.post("/api/agent/threads", {
+    headers: { "idempotency-key": idempotencyKey },
+    data,
+  });
+  const replay = await page.request.post("/api/agent/threads", {
+    headers: { "idempotency-key": idempotencyKey },
+    data,
+  });
+  expect(first.ok()).toBeTruthy();
+  expect(replay.ok()).toBeTruthy();
+  const firstAggregate = await first.json();
+  const replayedAggregate = await replay.json();
+  expect(replayedAggregate.thread.id).toBe(firstAggregate.thread.id);
+  expect(replayedAggregate.branch.id).toBe(firstAggregate.branch.id);
+  const removed = await page.request.delete(`/api/agent/threads/${firstAggregate.thread.id}`);
+  expect(removed.ok()).toBeTruthy();
 });
 
 test("recovers an ordinary run whose server lease expired", async ({ lessonPage: page }) => {

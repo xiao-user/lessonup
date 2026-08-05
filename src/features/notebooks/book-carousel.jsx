@@ -1,8 +1,20 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { Fragment, forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
 
+import {
+  addCarouselWheelImpulse,
+  advanceCarouselMotion,
+  applyCarouselEdgeResistance,
+  BOOK_CAROUSEL_MOTION,
+  carouselBookPose,
+  carouselNamePose,
+  clampCarouselPosition,
+  createCarouselMotion,
+  normalizeWheelDelta,
+  resolveCarouselReleaseVelocity,
+} from "@/features/notebooks/book-carousel-motion";
 import { BookVolume } from "@/features/notebooks/book-volume";
 
 gsap.registerPlugin(useGSAP);
@@ -20,38 +32,62 @@ const OPEN_DURATION = 0.9;
 const OPEN_TITLE_DELAY = 0.28;
 const OPEN_TITLE_DURATION = OPEN_DURATION - OPEN_TITLE_DELAY;
 const CLOSE_DURATION = 1.02;
-const WHEEL_SCALE = 1 / 180;
-const WHEEL_SETTLE_DELAY = 140;
-const OVERSCROLL_LIMIT = 0.22;
 const BASE_ROTATIONS = [-3, -2.8, 3.1, -7.5, 2, -4];
+const POINTER_DRAG_THRESHOLD = 3;
 
-const bookSlot = (offset) => {
-  if (offset <= -3) return { y: -60, scale: 0.5, rotationOffset: 14, zIndex: 4 };
-  if (offset === -2) return { y: -49.3, scale: 0.5, rotationOffset: 14, zIndex: 6 };
-  if (offset === -1) return { y: -0.8, scale: 0.56, rotationOffset: 10, zIndex: 8 };
-  if (offset === 0) return { y: 47.57, scale: 1, rotationOffset: 0, zIndex: 10 };
-  if (offset === 1) return { y: 95.8, scale: 0.56, rotationOffset: 2.5, zIndex: 9 };
-  if (offset === 2) return { y: 109.5, scale: 0.56, rotationOffset: 2.5, zIndex: 7 };
-  if (offset === 3) return { y: 118, scale: 0.56, rotationOffset: 2.5, zIndex: 5 };
-  return { y: 126, scale: 0.56, rotationOffset: 2.5, zIndex: 4 };
-};
-
-const nameSlot = (offset) => 50 + offset * 27.5;
-const nameVisibility = (offset) => gsap.utils.clamp(0.08, 1, 1 - Math.abs(offset) * 0.48);
+const bookPoseWriters = new WeakMap();
+const namePoseWriters = new WeakMap();
+const opacityWriters = new WeakMap();
+const scrollbarWriters = new WeakMap();
 
 const baseRotation = (index) => BASE_ROTATIONS[index % BASE_ROTATIONS.length];
-const interpolateBookSlot = (offset) => {
-  const start = Math.floor(offset);
-  const end = Math.ceil(offset);
-  if (start === end) return bookSlot(start);
-  return gsap.utils.interpolate(bookSlot(start), bookSlot(end), offset - start);
-};
-const interpolateNameSlot = (offset) => {
-  const start = Math.floor(offset);
-  const end = Math.ceil(offset);
-  if (start === end) return nameSlot(start);
-  return gsap.utils.interpolate(nameSlot(start), nameSlot(end), offset - start);
-};
+
+function getBookPoseWriters(book) {
+  let writers = bookPoseWriters.get(book);
+  if (!writers) {
+    writers = {
+      y: gsap.quickSetter(book, "--book-y", "cqh"),
+      scale: gsap.quickSetter(book, "--book-scale"),
+      rotation: gsap.quickSetter(book, "--book-rotation", "deg"),
+    };
+    bookPoseWriters.set(book, writers);
+  }
+  return writers;
+}
+
+function getNamePoseWriters(name) {
+  let writers = namePoseWriters.get(name);
+  if (!writers) {
+    writers = {
+      y: gsap.quickSetter(name, "--name-y", "cqh"),
+      proximity: gsap.quickSetter(name, "--name-proximity"),
+      opacity: gsap.quickSetter(name, "opacity"),
+    };
+    namePoseWriters.set(name, writers);
+  }
+  return writers;
+}
+
+function setOpacity(element, opacity) {
+  if (!element) return;
+  let writer = opacityWriters.get(element);
+  if (!writer) {
+    writer = gsap.quickSetter(element, "opacity");
+    opacityWriters.set(element, writer);
+  }
+  writer(opacity);
+  element.style.visibility = opacity > 0 ? "visible" : "hidden";
+}
+
+function setScrollbarPosition(scrollbar, position) {
+  if (!scrollbar) return;
+  let writer = scrollbarWriters.get(scrollbar);
+  if (!writer) {
+    writer = gsap.quickSetter(scrollbar, "y", "cqh");
+    scrollbarWriters.set(scrollbar, writer);
+  }
+  writer(position);
+}
 
 function readPageAngle(leaf) {
   if (!leaf) return 0;
@@ -102,34 +138,42 @@ function applyOpenBookPose(book, root) {
   gsap.set(coverBack, { borderRadius: `${outer}px 0px 0px ${outer}px` });
 }
 
-function placeCarousel({ position, bookRefs, nameRefs }) {
+function placeCarousel({ position, bookRefs, nameRefs, metaRefs, scrollbarRef }) {
   bookRefs.current.forEach((book, index) => {
     if (!book) return;
     const offset = index - position;
-    const slot = interpolateBookSlot(offset);
-    const restingSlot = bookSlot(Math.round(offset));
-    const variables = {
-      "--book-y": `${slot.y}cqh`,
-      "--book-scale": slot.scale,
-      "--book-rotation": `${baseRotation(index) + slot.rotationOffset}deg`,
-    };
-    book.dataset.slot = String(Math.round(offset));
-    gsap.set(book, { zIndex: restingSlot.zIndex });
-    gsap.set(book, variables);
+    const pose = carouselBookPose(offset);
+    const writers = getBookPoseWriters(book);
+    const slot = String(Math.round(offset));
+    const layer = String(pose.zIndex);
+    if (book.dataset.slot !== slot) book.dataset.slot = slot;
+    if (book.style.zIndex !== layer) book.style.zIndex = layer;
+    writers.y(pose.y);
+    writers.scale(pose.scale);
+    writers.rotation(baseRotation(index) + pose.rotationOffset);
   });
 
   nameRefs.current.forEach((name, index) => {
     if (!name) return;
     const offset = index - position;
-    const distance = Math.abs(offset);
-    const visibility = nameVisibility(offset);
-    const variables = {
-      "--name-y": `${interpolateNameSlot(offset)}cqh`,
-      "--name-proximity": gsap.utils.clamp(0, 1, 1 - distance),
-      autoAlpha: visibility,
-    };
-    gsap.set(name, variables);
+    const pose = carouselNamePose(offset);
+    const writers = getNamePoseWriters(name);
+    writers.y(pose.y);
+    writers.proximity(pose.proximity);
+    writers.opacity(pose.visibility);
+    if (name.style.visibility !== "visible") name.style.visibility = "visible";
   });
+
+  const focusDistance = Math.abs(position - Math.round(position));
+  const rawMetaVisibility = Math.max(0, 1 - focusDistance * 2);
+  const metaVisibility = rawMetaVisibility * rawMetaVisibility * (3 - 2 * rawMetaVisibility);
+  metaRefs.current.forEach((meta) => setOpacity(meta, metaVisibility));
+
+  const maxPosition = Math.max(1, bookRefs.current.filter(Boolean).length - 1);
+  setScrollbarPosition(
+    scrollbarRef.current,
+    gsap.utils.clamp(0, 1, position / maxPosition) * 59,
+  );
 }
 
 export const BookCarousel = forwardRef(function BookCarousel({
@@ -139,29 +183,36 @@ export const BookCarousel = forwardRef(function BookCarousel({
   onSelect,
   onActiveChange,
   onOpenFile,
+  onDeleteFile,
 }, ref) {
   const rootRef = useRef(null);
   const bookRefs = useRef([]);
   const nameRefs = useRef([]);
+  const metaRefs = useRef([]);
+  const scrollbarRef = useRef(null);
   const isAnimatingRef = useRef(false);
   const pageAnimatingRef = useRef(false);
   const pageTimelinesRef = useRef(new Map());
   const activeIndexRef = useRef(0);
+  const preparedIndexRef = useRef(0);
   const positionRef = useRef(0);
-  const positionTargetRef = useRef(0);
-  const positionProxyRef = useRef({ value: 0 });
-  const positionTweenRef = useRef(null);
-  const positionVelocityRef = useRef(0);
-  const positionTickerRef = useRef(null);
+  const motionRef = useRef(createCarouselMotion(0));
+  const motionTickerRef = useRef(null);
   const selectedIdRef = useRef(selectedId);
   const pageIndexesRef = useRef({});
-  const wheelSettleTimerRef = useRef(null);
-  const touchYRef = useRef(null);
+  const pointerIdRef = useRef(null);
+  const pointerStartYRef = useRef(null);
+  const pointerYRef = useRef(null);
+  const pointerTimeRef = useRef(0);
+  const pointerLastMoveTimeRef = useRef(0);
+  const pointerDraggingRef = useRef(false);
   const [activeIndex, setActiveIndex] = useState(0);
+  const [preparedIndex, setPreparedIndex] = useState(0);
   const [pageIndexes, setPageIndexes] = useState({});
   const [pageAnimating, setPageAnimating] = useState(false);
   const [bookAnimating, setBookAnimating] = useState(false);
   const activeNotebook = notebooks[activeIndex];
+  const preparedNotebook = notebooks[preparedIndex];
 
   activeIndexRef.current = activeIndex;
   selectedIdRef.current = selectedId;
@@ -176,8 +227,7 @@ export const BookCarousel = forwardRef(function BookCarousel({
 
   const { contextSafe } = useGSAP(() => {}, { scope: rootRef });
   const maxPosition = () => Math.max(0, notebooks.length - 1);
-  const clampPosition = (value) => gsap.utils.clamp(0, maxPosition(), value);
-  const limitPosition = (value) => gsap.utils.clamp(-OVERSCROLL_LIMIT, maxPosition() + OVERSCROLL_LIMIT, value);
+  const clampPosition = (value) => clampCarouselPosition(value, maxPosition());
 
   const updateNearestIndex = (position) => {
     const nearest = clampPosition(Math.round(position));
@@ -187,101 +237,88 @@ export const BookCarousel = forwardRef(function BookCarousel({
     }
   };
 
-  const commitPosition = (position, allowOverscroll = false) => {
-    const resolved = allowOverscroll ? limitPosition(position) : clampPosition(position);
+  const setMotionState = (state) => {
+    if (rootRef.current) rootRef.current.dataset.motionState = state;
+  };
+
+  const prepareRestingBook = (position) => {
+    const index = clampPosition(Math.round(position));
+    if (index === preparedIndexRef.current) return;
+    preparedIndexRef.current = index;
+    setPreparedIndex(index);
+  };
+
+  const commitPosition = (position, { allowOverscroll = false } = {}) => {
+    const resolved = allowOverscroll
+      ? gsap.utils.clamp(
+        -BOOK_CAROUSEL_MOTION.overscrollLimit,
+        maxPosition() + BOOK_CAROUSEL_MOTION.overscrollLimit,
+        position,
+      )
+      : clampPosition(position);
     positionRef.current = resolved;
+    motionRef.current.position = resolved;
+    if (rootRef.current) rootRef.current.dataset.carouselPosition = resolved.toFixed(4);
     updateNearestIndex(resolved);
-    placeCarousel({ position: resolved, bookRefs, nameRefs });
+    placeCarousel({ position: resolved, bookRefs, nameRefs, metaRefs, scrollbarRef });
   };
 
-  const stopPositionPhysics = () => {
-    if (positionTickerRef.current) {
-      gsap.ticker.remove(positionTickerRef.current);
-      positionTickerRef.current = null;
-    }
-    positionVelocityRef.current = 0;
+  const removeMotionTicker = () => {
+    if (!motionTickerRef.current) return;
+    gsap.ticker.remove(motionTickerRef.current);
+    motionTickerRef.current = null;
   };
 
-  const startPositionPhysics = contextSafe(() => {
-    positionTweenRef.current?.kill();
-    positionTweenRef.current = null;
-    if (positionTickerRef.current) return;
-    const tick = () => {
-      const frame = Math.min(2.5, gsap.ticker.deltaRatio(60));
-      const hasRestTarget = Number.isFinite(positionTargetRef.current);
-      const distance = hasRestTarget ? positionTargetRef.current - positionRef.current : 0;
-      let velocity = positionVelocityRef.current;
-      if (hasRestTarget) velocity += distance * 0.032 * frame;
-      velocity *= Math.pow(hasRestTarget ? 0.86 : 0.9, frame);
-      let next = positionRef.current + velocity * frame;
-      const limited = limitPosition(next);
-      if (limited !== next) {
-        next = limited;
-        velocity *= -0.18;
-      }
-      positionVelocityRef.current = velocity;
-      positionProxyRef.current.value = next;
-      commitPosition(next, true);
-      if (hasRestTarget && Math.abs(positionTargetRef.current - next) < 0.0005 && Math.abs(velocity) < 0.0005) {
-        const target = positionTargetRef.current;
-        stopPositionPhysics();
-        positionProxyRef.current.value = target;
-        commitPosition(target, true);
-      } else if (!hasRestTarget && Math.abs(velocity) < 0.0005) {
-        stopPositionPhysics();
-      }
-    };
-    positionTickerRef.current = tick;
-    gsap.ticker.add(tick);
-  });
-
-  const animatePosition = contextSafe((position, {
-    duration = 0.3,
-    ease = "power3.out",
-  } = {}) => {
+  const stopPositionMotion = (position = positionRef.current) => {
+    removeMotionTicker();
     const clamped = clampPosition(position);
-    positionTargetRef.current = clamped;
-    stopPositionPhysics();
-    positionTweenRef.current?.kill();
-    if (!duration) {
-      positionProxyRef.current.value = clamped;
-      commitPosition(clamped);
-      return;
-    }
-    positionTweenRef.current = gsap.to(positionProxyRef.current, {
-      value: clamped,
-      duration,
-      ease,
-      overwrite: true,
-      onUpdate: () => commitPosition(positionProxyRef.current.value),
-      onComplete: () => {
-        positionTweenRef.current = null;
-        commitPosition(clamped);
-      },
-    });
-  });
+    motionRef.current = createCarouselMotion(clamped);
+    commitPosition(clamped);
+    prepareRestingBook(clamped);
+    setMotionState("idle");
+  };
 
-  const releasePosition = contextSafe(() => {
-    const projected = positionRef.current + positionVelocityRef.current * 10;
-    positionTargetRef.current = clampPosition(Math.round(projected));
-    startPositionPhysics();
+  const startPositionMotion = contextSafe(() => {
+    if (motionTickerRef.current) return;
+    setMotionState("moving");
+    const tick = () => {
+      const next = advanceCarouselMotion(
+        motionRef.current,
+        gsap.ticker.deltaRatio(60) / 60,
+        maxPosition(),
+      );
+      motionRef.current = next;
+      commitPosition(next.position, { allowOverscroll: true });
+      if (!next.settled) return;
+      removeMotionTicker();
+      commitPosition(next.position);
+      prepareRestingBook(next.position);
+      setMotionState("idle");
+    };
+    motionTickerRef.current = tick;
+    gsap.ticker.add(tick);
   });
 
   const goTo = contextSafe((nextIndex) => {
     if (!notebooks.length || selectedIdRef.current || isAnimatingRef.current) return;
     const clamped = clampPosition(nextIndex);
-    if (clamped === positionTargetRef.current && clamped === activeIndexRef.current) return;
-    window.clearTimeout(wheelSettleTimerRef.current);
-    animatePosition(clamped, { duration: 0.72, ease: "power3.inOut" });
+    if (motionRef.current.settled && Math.abs(clamped - positionRef.current) < 0.001) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      stopPositionMotion(clamped);
+      return;
+    }
+    motionRef.current = {
+      ...motionRef.current,
+      target: clamped,
+      landingTarget: null,
+      settled: false,
+    };
+    startPositionMotion();
   });
 
   useGSAP(() => {
     const clamped = clampPosition(positionRef.current);
-    positionRef.current = clamped;
-    positionTargetRef.current = clamped;
-    positionProxyRef.current.value = clamped;
-    updateNearestIndex(clamped);
-    placeCarousel({ position: clamped, bookRefs, nameRefs });
+    stopPositionMotion(clamped);
   }, { scope: rootRef, dependencies: [notebooks.length], revertOnUpdate: false });
 
   useGSAP(() => {
@@ -294,16 +331,14 @@ export const BookCarousel = forwardRef(function BookCarousel({
       gsap.set(meta, { x: 0, autoAlpha: 1 });
       gsap.set(names, { clearProps: "transform", "--name-x": "0px" });
       gsap.set(scrollbar, { x: 0, autoAlpha: 0.85 });
-      placeCarousel({ position: positionRef.current, bookRefs, nameRefs });
+      placeCarousel({ position: positionRef.current, bookRefs, nameRefs, metaRefs, scrollbarRef });
       return;
     }
     if (isAnimatingRef.current) return;
     const selectedIndex = notebooks.findIndex((notebook) => notebook.id === selectedId);
     if (selectedIndex < 0) return;
     activeIndexRef.current = selectedIndex;
-    positionRef.current = selectedIndex;
-    positionTargetRef.current = selectedIndex;
-    positionProxyRef.current.value = selectedIndex;
+    stopPositionMotion(selectedIndex);
     setActiveIndex(selectedIndex);
     const fileIndex = notebooks[selectedIndex].files.findIndex((file) => file.id === activeFileId);
     if (fileIndex >= 0) {
@@ -312,107 +347,177 @@ export const BookCarousel = forwardRef(function BookCarousel({
     gsap.set(bookRefs.current.filter(Boolean), {
       autoAlpha: (index) => index === selectedIndex ? 1 : 0,
     });
-    placeCarousel({ position: selectedIndex, bookRefs, nameRefs });
+    placeCarousel({ position: selectedIndex, bookRefs, nameRefs, metaRefs, scrollbarRef });
     applyOpenBookPose(bookRefs.current[selectedIndex], rootRef.current);
     gsap.set(meta, { x: (index) => index === 0 ? -72 : 72, autoAlpha: 0 });
     gsap.set(names, { clearProps: "transform", "--name-x": "64px", autoAlpha: 0 });
     gsap.set(scrollbar, { x: 10, autoAlpha: 0 });
+    setMotionState("idle");
   }, { scope: rootRef, dependencies: [selectedId, activeFileId] });
 
   useEffect(() => {
     onActiveChange?.(activeNotebook?.id ?? null);
   }, [activeNotebook?.id, onActiveChange]);
 
+  useEffect(() => {
+    const nextIndexes = {};
+    let changed = false;
+    for (const notebook of notebooks) {
+      const currentIndex = pageIndexesRef.current[notebook.id] ?? 0;
+      const nextIndex = Math.min(currentIndex, Math.max(0, notebook.files.length - 1));
+      nextIndexes[notebook.id] = nextIndex;
+      if (nextIndex !== currentIndex) changed = true;
+    }
+    if (Object.keys(pageIndexesRef.current).length !== notebooks.length) changed = true;
+    if (!changed) return;
+    pageIndexesRef.current = nextIndexes;
+    setPageIndexes(nextIndexes);
+  }, [notebooks]);
+
   useEffect(() => () => {
     pageTimelinesRef.current.forEach((timeline) => timeline.kill());
     pageTimelinesRef.current.clear();
   }, []);
-
-  useGSAP(() => {
-    if (selectedIdRef.current) return;
-    gsap.fromTo(".book-carousel-meta", { y: 5, autoAlpha: 0 }, {
-      y: 0,
-      autoAlpha: 1,
-      duration: 0.32,
-      ease: EASE.fade,
-      stagger: 0.035,
-      overwrite: "auto",
-    });
-  }, { scope: rootRef, dependencies: [activeIndex] });
 
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return undefined;
     const collection = root.closest(".notebook-collection") ?? root;
 
-    const scheduleSettle = () => {
-      window.clearTimeout(wheelSettleTimerRef.current);
-      wheelSettleTimerRef.current = window.setTimeout(() => releasePosition(), WHEEL_SETTLE_DELAY);
-    };
     const wheel = (event) => {
       if (selectedIdRef.current || isAnimatingRef.current || !notebooks.length) return;
       if (event.target.closest?.('[data-slot^="dialog-"]')) return;
       event.preventDefault();
-      const rawDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
-      const controlledDelta = gsap.utils.clamp(-100, 100, rawDelta);
-      positionTweenRef.current?.kill();
-      positionTweenRef.current = null;
-      positionTargetRef.current = null;
-      const next = limitPosition(positionRef.current + controlledDelta * WHEEL_SCALE);
-      positionVelocityRef.current = controlledDelta / 1200;
-      positionProxyRef.current.value = next;
-      commitPosition(next, true);
-      startPositionPhysics();
-      scheduleSettle();
+      const delta = normalizeWheelDelta(event, collection.clientHeight || window.innerHeight);
+      if (!delta) return;
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        goTo(activeIndexRef.current + Math.sign(delta));
+        return;
+      }
+      motionRef.current = addCarouselWheelImpulse(motionRef.current, delta, maxPosition());
+      startPositionMotion();
     };
-    const touchStart = (event) => {
-      touchYRef.current = event.touches[0]?.clientY ?? null;
-      window.clearTimeout(wheelSettleTimerRef.current);
+    const clearPointer = () => {
+      pointerIdRef.current = null;
+      pointerStartYRef.current = null;
+      pointerYRef.current = null;
+      pointerDraggingRef.current = false;
     };
-    const touchMove = (event) => {
-      const currentY = event.touches[0]?.clientY;
-      if (touchYRef.current == null || currentY == null) return;
-      const delta = touchYRef.current - currentY;
+    const pointerDown = (event) => {
+      if (selectedIdRef.current || isAnimatingRef.current || !notebooks.length) return;
+      if (!event.isPrimary || event.pointerType === "mouse") return;
+      pointerIdRef.current = event.pointerId;
+      pointerStartYRef.current = event.clientY;
+      pointerYRef.current = event.clientY;
+      pointerTimeRef.current = performance.now();
+      pointerLastMoveTimeRef.current = pointerTimeRef.current;
+      pointerDraggingRef.current = false;
+      try {
+        root.setPointerCapture?.(event.pointerId);
+      } catch {
+        // Synthetic pointer events used by tests may not own a browser pointer.
+      }
+    };
+    const pointerMove = (event) => {
+      if (pointerIdRef.current !== event.pointerId || pointerYRef.current == null) return;
+      const currentY = event.clientY;
+      if (!pointerDraggingRef.current) {
+        if (Math.abs(currentY - pointerStartYRef.current) < POINTER_DRAG_THRESHOLD) return;
+        pointerDraggingRef.current = true;
+        removeMotionTicker();
+        motionRef.current = {
+          ...motionRef.current,
+          velocity: 0,
+          target: null,
+          landingTarget: null,
+          settled: false,
+        };
+        setMotionState("dragging");
+      }
+      const delta = pointerYRef.current - currentY;
       if (Math.abs(delta) < 1) return;
       event.preventDefault();
-      touchYRef.current = currentY;
-      const next = limitPosition(positionRef.current + delta / 180);
-      positionTargetRef.current = null;
-      positionProxyRef.current.value = next;
-      positionVelocityRef.current = delta / 900;
-      commitPosition(next, true);
+      pointerYRef.current = currentY;
+      const now = performance.now();
+      const elapsedSeconds = gsap.utils.clamp(1 / 120, 1 / 20, (now - pointerTimeRef.current) / 1000);
+      const deltaPosition = delta / BOOK_CAROUSEL_MOTION.dragPixelsPerBook;
+      const position = applyCarouselEdgeResistance(
+        positionRef.current + deltaPosition,
+        maxPosition(),
+      );
+      motionRef.current = {
+        position,
+        velocity: gsap.utils.interpolate(
+          motionRef.current.velocity,
+          deltaPosition / elapsedSeconds,
+          0.45,
+        ),
+        target: null,
+        landingTarget: null,
+        settled: false,
+      };
+      pointerTimeRef.current = now;
+      pointerLastMoveTimeRef.current = now;
+      commitPosition(position, { allowOverscroll: true });
     };
-    const touchEnd = () => {
-      touchYRef.current = null;
-      releasePosition();
-    };
-    const keydown = (event) => {
-      if (selectedIdRef.current || isAnimatingRef.current) return;
-      if (["ArrowDown", "ArrowRight"].includes(event.key)) {
-        event.preventDefault();
-        goTo(activeIndexRef.current + 1);
-      } else if (["ArrowUp", "ArrowLeft"].includes(event.key)) {
-        event.preventDefault();
-        goTo(activeIndexRef.current - 1);
+    const pointerEnd = (event) => {
+      if (pointerIdRef.current !== event.pointerId) return;
+      if (root.hasPointerCapture?.(event.pointerId)) root.releasePointerCapture(event.pointerId);
+      const wasDragging = pointerDraggingRef.current;
+      clearPointer();
+      if (!wasDragging) return;
+      const idleMilliseconds = performance.now() - pointerLastMoveTimeRef.current;
+      motionRef.current = {
+        ...motionRef.current,
+        velocity: resolveCarouselReleaseVelocity(motionRef.current.velocity, idleMilliseconds),
+      };
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        stopPositionMotion(Math.round(positionRef.current));
+        return;
       }
+      startPositionMotion();
+    };
+    const pointerCancel = (event) => {
+      if (pointerIdRef.current !== event.pointerId) return;
+      const wasDragging = pointerDraggingRef.current;
+      clearPointer();
+      if (wasDragging) stopPositionMotion(Math.round(positionRef.current));
+    };
+    const visibilityChange = () => {
+      if (document.visibilityState !== "hidden" || motionRef.current.settled) return;
+      clearPointer();
+      stopPositionMotion(Math.round(positionRef.current));
     };
 
     collection.addEventListener("wheel", wheel, { passive: false });
-    root.addEventListener("touchstart", touchStart, { passive: true });
-    root.addEventListener("touchmove", touchMove, { passive: false });
-    root.addEventListener("touchend", touchEnd, { passive: true });
-    window.addEventListener("keydown", keydown);
+    root.addEventListener("pointerdown", pointerDown, { passive: true });
+    root.addEventListener("pointermove", pointerMove, { passive: false });
+    root.addEventListener("pointerup", pointerEnd, { passive: true });
+    root.addEventListener("pointercancel", pointerCancel, { passive: true });
+    document.addEventListener("visibilitychange", visibilityChange);
     return () => {
       collection.removeEventListener("wheel", wheel);
-      root.removeEventListener("touchstart", touchStart);
-      root.removeEventListener("touchmove", touchMove);
-      root.removeEventListener("touchend", touchEnd);
-      window.removeEventListener("keydown", keydown);
-      window.clearTimeout(wheelSettleTimerRef.current);
-      positionTweenRef.current?.kill();
-      stopPositionPhysics();
+      root.removeEventListener("pointerdown", pointerDown);
+      root.removeEventListener("pointermove", pointerMove);
+      root.removeEventListener("pointerup", pointerEnd);
+      root.removeEventListener("pointercancel", pointerCancel);
+      document.removeEventListener("visibilitychange", visibilityChange);
+      removeMotionTicker();
     };
   }, [notebooks.length]);
+
+  const handleIndexKeyDown = (event, index) => {
+    let nextIndex = null;
+    if (["ArrowDown", "ArrowRight"].includes(event.key)) nextIndex = index + 1;
+    else if (["ArrowUp", "ArrowLeft"].includes(event.key)) nextIndex = index - 1;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = maxPosition();
+    if (nextIndex == null) return;
+    event.preventDefault();
+    const clamped = clampPosition(nextIndex);
+    nameRefs.current[clamped]?.focus({ preventScroll: true });
+    goTo(clamped);
+  };
 
   const pageRadii = () => {
     const height = rootRef.current?.clientHeight ?? 0;
@@ -433,7 +538,7 @@ export const BookCarousel = forwardRef(function BookCarousel({
         "--name-x": open ? "64px" : "0px",
         autoAlpha: open
           ? 0
-          : (index) => nameVisibility(index - positionRef.current),
+          : (index) => carouselNamePose(index - positionRef.current).visibility,
         duration,
         ease: EASE.fade,
         stagger: open ? 0.018 : { each: 0.018, from: "end" },
@@ -450,17 +555,14 @@ export const BookCarousel = forwardRef(function BookCarousel({
   const openNotebook = contextSafe((notebookId) => {
     const index = notebooks.findIndex((notebook) => notebook.id === notebookId);
     if (index < 0 || isAnimatingRef.current) return;
-    if (index !== activeIndexRef.current) {
+    if (index !== activeIndexRef.current || !motionRef.current.settled) {
       goTo(index);
       return;
     }
     if (selectedIdRef.current) return;
     const book = bookRefs.current[index];
     if (!book) return;
-    window.clearTimeout(wheelSettleTimerRef.current);
-    stopPositionPhysics();
-    positionTweenRef.current?.kill();
-    animatePosition(index, { duration: 0 });
+    stopPositionMotion(index);
     isAnimatingRef.current = true;
     setBookAnimating(true);
     const cover = book.querySelector(".book-volume-cover");
@@ -472,6 +574,10 @@ export const BookCarousel = forwardRef(function BookCarousel({
     const { outer, inner } = pageRadii();
     const openScale = Number.parseFloat(getComputedStyle(book).getPropertyValue("--book-open-scale")) || 1.32;
     const hasFiles = notebooks[index].files.length > 0;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const openDuration = reduceMotion ? 0 : OPEN_DURATION;
+    const titleDelay = reduceMotion ? 0 : OPEN_TITLE_DELAY;
+    const titleDuration = reduceMotion ? 0 : OPEN_TITLE_DURATION;
     gsap.set(book, { zIndex: 40 });
     if (hasFiles) gsap.set(titleLeaf, {
       "--leaf-angle": "0deg",
@@ -484,30 +590,30 @@ export const BookCarousel = forwardRef(function BookCarousel({
     });
     timeline
       .addLabel("coverTurn", 0)
-      .addLabel("titleTurn", OPEN_TITLE_DELAY);
+      .addLabel("titleTurn", titleDelay);
     animateChrome(timeline, true, 0);
     if (hasFiles) {
       addPageTurn(timeline, titleLeaf, {
         rotationY: -180,
-        duration: OPEN_TITLE_DURATION,
+        duration: titleDuration,
         position: "titleTurn",
       });
     }
     timeline
       .call(() => onSelect(notebookId), [], 0.23)
-      .to(cover, { "--cover-angle": "-180deg", duration: OPEN_DURATION, ease: EASE.swing }, "coverTurn")
-      .to(unit, { xPercent: 50, duration: OPEN_DURATION * 0.88, ease: EASE.drift }, 0)
-      .to(book, { "--book-scale": openScale, duration: OPEN_DURATION * 0.86, ease: EASE.settle }, 0)
-      .to(book, { "--book-shadow-alpha": 0, duration: OPEN_DURATION * 0.62, ease: EASE.fade }, 0)
-      .to(book, { "--book-rotation": "0deg", duration: OPEN_DURATION * 0.82, ease: EASE.tilt }, 0)
+      .to(cover, { "--cover-angle": "-180deg", duration: openDuration, ease: EASE.swing }, "coverTurn")
+      .to(unit, { xPercent: 50, duration: openDuration * 0.88, ease: EASE.drift }, 0)
+      .to(book, { "--book-scale": openScale, duration: openDuration * 0.86, ease: EASE.settle }, 0)
+      .to(book, { "--book-shadow-alpha": 0, duration: openDuration * 0.62, ease: EASE.fade }, 0)
+      .to(book, { "--book-rotation": "0deg", duration: openDuration * 0.82, ease: EASE.tilt }, 0)
       .fromTo(pages, { borderRadius: outer }, {
-        borderRadius: `0px ${outer}px ${outer}px 0px`, duration: OPEN_DURATION * 0.78, ease: EASE.soft,
+        borderRadius: `0px ${outer}px ${outer}px 0px`, duration: openDuration * 0.78, ease: EASE.soft,
       }, 0)
       .fromTo(page, { borderRadius: inner }, {
-        borderRadius: `0px ${inner}px ${inner}px 0px`, duration: OPEN_DURATION * 0.78, ease: EASE.soft,
+        borderRadius: `0px ${inner}px ${inner}px 0px`, duration: openDuration * 0.78, ease: EASE.soft,
       }, 0)
       .fromTo(coverBack, { borderRadius: outer }, {
-        borderRadius: `${outer}px 0px 0px ${outer}px`, duration: OPEN_DURATION * 0.78, ease: EASE.soft,
+        borderRadius: `${outer}px 0px 0px ${outer}px`, duration: openDuration * 0.78, ease: EASE.soft,
       }, 0);
   });
 
@@ -532,7 +638,7 @@ export const BookCarousel = forwardRef(function BookCarousel({
     const pages = book.querySelector(".book-volume-pages");
     const page = book.querySelector(".book-volume-leaf.is-current, .book-volume-empty-page");
     const coverBack = book.querySelector(".book-volume-cover-back");
-    const slot = bookSlot(index - activeIndexRef.current);
+    const slot = carouselBookPose(index - activeIndexRef.current);
     const restingRotation = baseRotation(index) + slot.rotationOffset;
     const { outer, inner } = pageRadii();
     const leaves = gsap.utils.toArray(".book-volume-leaf", book);
@@ -648,11 +754,34 @@ export const BookCarousel = forwardRef(function BookCarousel({
   });
 
   return (
-    <div className={`book-carousel ${selectedId ? "is-open" : ""}`} ref={rootRef}>
-      <div className="book-carousel-scrollbar" aria-hidden="true" />
+    <div
+      className={`book-carousel ${selectedId ? "is-open" : ""}`}
+      data-carousel-position="0.0000"
+      data-motion-state="idle"
+      role="region"
+      aria-label="备课本选择器"
+      aria-roledescription="备课本轮播"
+      ref={rootRef}
+    >
+      <span className="sr-only" role="status" aria-live="polite">
+        {preparedNotebook
+          ? `已选择${preparedNotebook.title}，第 ${preparedIndex + 1} 本，共 ${notebooks.length} 本`
+          : ""}
+      </span>
+      <div className="book-carousel-scrollbar" aria-hidden="true" ref={scrollbarRef} />
       {activeNotebook && <>
-        <span className="book-carousel-meta book-carousel-meta-left">{activeNotebook.subject || "备课"}</span>
-        <span className="book-carousel-meta book-carousel-meta-right">{activeNotebook.files.length} 份文件</span>
+        <span
+          className="book-carousel-meta book-carousel-meta-left"
+          ref={(element) => { metaRefs.current[0] = element; }}
+        >
+          {activeNotebook.subject || "备课"}
+        </span>
+        <span
+          className="book-carousel-meta book-carousel-meta-right"
+          ref={(element) => { metaRefs.current[1] = element; }}
+        >
+          {activeNotebook.files.length} 份文件
+        </span>
       </>}
 
       <div className="book-carousel-stage" aria-label="备课本列表">
@@ -664,8 +793,10 @@ export const BookCarousel = forwardRef(function BookCarousel({
             pageIndex={Math.min(pageIndexes[notebook.id] ?? 0, Math.max(0, notebook.files.length - 1))}
             pageAnimating={pageAnimating && notebook.id === selectedId}
             bookAnimating={bookAnimating && notebook.id === selectedId}
+            renderPages={notebook.id === selectedId || index === preparedIndex}
             onToggle={() => notebook.id === selectedId ? closeNotebook() : openNotebook(notebook.id)}
             onOpenFile={onOpenFile}
+            onDeleteFile={(file) => onDeleteFile({ ...file, notebookId: notebook.id })}
             onPageChange={(nextIndex) => changePage(notebook.id, nextIndex)}
             registerBook={(element) => { bookRefs.current[index] = element; }}
             key={notebook.id}
@@ -675,15 +806,23 @@ export const BookCarousel = forwardRef(function BookCarousel({
 
       <nav className="book-carousel-index" aria-label="切换备课本">
         {notebooks.map((notebook, index) => (
-          <button
-            className={index === activeIndex ? "is-active" : ""}
-            type="button"
-            onClick={() => goTo(index)}
-            ref={(element) => { nameRefs.current[index] = element; }}
-            key={notebook.id}
-          >
-            {notebook.title}
-          </button>
+          <Fragment key={notebook.id}>
+            <button
+              className={index === activeIndex ? "is-active" : ""}
+              type="button"
+              aria-current={index === activeIndex ? "true" : undefined}
+              aria-describedby={`book-carousel-index-description-${notebook.id}`}
+              tabIndex={index === activeIndex ? 0 : -1}
+              onClick={() => goTo(index)}
+              onKeyDown={(event) => handleIndexKeyDown(event, index)}
+              ref={(element) => { nameRefs.current[index] = element; }}
+            >
+              {notebook.title}
+            </button>
+            <span className="sr-only" id={`book-carousel-index-description-${notebook.id}`}>
+              {[notebook.subject, notebook.className, `${notebook.files.length} 份文件`].filter(Boolean).join("，")}
+            </span>
+          </Fragment>
         ))}
       </nav>
     </div>

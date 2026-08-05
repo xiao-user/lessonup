@@ -6,13 +6,28 @@ import type {
   AgentRunRecord,
   AgentRunEvidenceKind,
   AgentRunEvidenceRecord,
+  AgentResourceRef,
   AgentThreadRecord,
   CapabilityPlan,
   CurriculumNodeRecord,
+  CurriculumCatalogReleaseRecord,
+  CurriculumNodeKnowledgeRecord,
   CurriculumNodeMatch,
+  CurriculumNodeSemanticsRecord,
+  CurriculumKnowledgeContinuityRecord,
+  CurriculumKnowledgeSearchResult,
+  CurriculumSemanticEntityRecord,
+  CurriculumSemanticPathStep,
+  CurriculumSemanticRelation,
   CurriculumTextbookRecord,
+  CreateSemesterFrameworkInput,
+  CreateLessonBlueprintInput,
+  DeleteLessonBlueprintInput,
   DocumentPatch,
+  FrameworkContinuityResult,
   KnowledgeResult,
+  LessonDesignBasisAggregate,
+  LessonDesignBasisPatch,
   LessonFileRecord,
   LessonContextProfile,
   LessonPlan,
@@ -20,6 +35,10 @@ import type {
   NotebookRecord,
   SourceRef,
   NormalizedAgentEvent,
+  SemesterFrameworkAggregate,
+  SemesterFrameworkRecord,
+  SemesterFrameworkPatch,
+  UpdateLessonBlueprintInput,
 } from "./domain.js";
 import type { CurriculumFacets, CurriculumTextbookFilter } from "./curriculum/catalog.js";
 import { durableSessionHistoryItems } from "./agent/session-history.js";
@@ -43,11 +62,10 @@ export type ImportedNotebook = Omit<
   }>;
 };
 
-export type CreateThreadInput = {
-  notebookId: string;
-  lessonFileId: string;
-  title?: string;
-};
+export type CreateThreadInput = { notebookId: string; title?: string } & (
+  | { resourceType?: "lesson_file"; lessonFileId: string; semesterFrameworkId?: never }
+  | { resourceType: "semester_framework"; lessonFileId?: never; semesterFrameworkId: string }
+);
 
 export interface LessonRepository {
   importNotebookGraph(ownerId: string, notebooks: ImportedNotebook[]): Promise<{ imported: number }>;
@@ -75,8 +93,9 @@ export interface LessonRepository {
     image?: string;
     document: LessonPlan;
     contextProfile?: LessonContextProfile;
+    lessonBlueprintId?: string;
     pageCount: number;
-  }): Promise<LessonFileRecord>;
+  }, idempotencyKey?: string): Promise<LessonFileRecord>;
   updateLessonFile(ownerId: string, fileId: string, patch: Partial<Pick<
     LessonFileRecord,
     "title" | "type" | "image" | "contextProfile"
@@ -104,13 +123,34 @@ export interface LessonRepository {
     approvalId: string;
     idempotencyKey: string;
   }): Promise<LessonFileRecord>;
+  applyApprovedSemesterFrameworkPatch(args: {
+    ownerId: string;
+    approvalId: string;
+    idempotencyKey: string;
+  }): Promise<SemesterFrameworkAggregate>;
+  getLessonDesignBasis(ownerId: string, lessonFileId: string): Promise<LessonDesignBasisAggregate | null>;
+  applyManualLessonDesignBasisPatch(
+    ownerId: string,
+    patch: LessonDesignBasisPatch,
+    idempotencyKey: string,
+  ): Promise<LessonDesignBasisAggregate>;
+  applyApprovedLessonDesignBasisPatch(args: {
+    ownerId: string;
+    approvalId: string;
+    idempotencyKey: string;
+  }): Promise<LessonDesignBasisAggregate>;
 
-  listThreads(ownerId: string, lessonFileId: string, includeArchived?: boolean): Promise<AgentThreadRecord[]>;
-  createThread(ownerId: string, input: CreateThreadInput): Promise<{ thread: AgentThreadRecord; branch: AgentBranchRecord }>;
+  listThreads(
+    ownerId: string,
+    resource: string | AgentResourceRef,
+    includeArchived?: boolean,
+  ): Promise<AgentThreadRecord[]>;
+  createThread(ownerId: string, input: CreateThreadInput, idempotencyKey?: string): Promise<{ thread: AgentThreadRecord; branch: AgentBranchRecord }>;
   getThread(ownerId: string, threadId: string): Promise<AgentThreadRecord | null>;
   updateThread(ownerId: string, threadId: string, patch: Partial<Pick<
     AgentThreadRecord,
-    "title" | "archivedAt" | "deletedAt" | "status" | "starterSuggestions" | "starterSuggestionsDocumentVersion"
+    "title" | "archivedAt" | "deletedAt" | "status" | "starterSuggestions"
+      | "starterSuggestionsDocumentVersion" | "starterSuggestionsResourceVersion"
   >>): Promise<AgentThreadRecord>;
   createBranch(ownerId: string, threadId: string, parentBranchId?: string, forkedFromMessageId?: string): Promise<AgentBranchRecord>;
   listBranches(ownerId: string, threadId: string): Promise<AgentBranchRecord[]>;
@@ -161,7 +201,12 @@ export interface LessonRepository {
     approvalId: string;
     approved: boolean;
     encryptedRunState: string;
-  }): Promise<{ approval: AgentApprovalRecord; file: LessonFileRecord | null }>;
+  }): Promise<{
+    approval: AgentApprovalRecord;
+    file: LessonFileRecord | null;
+    framework: SemesterFrameworkAggregate | null;
+    basis: LessonDesignBasisAggregate | null;
+  }>;
   claimApprovalContinuation(args: {
     ownerId: string;
     approvalId: string;
@@ -234,11 +279,59 @@ export interface LessonRepository {
   ): Promise<void>;
   listRunEvidence(ownerId: string, runId: string): Promise<AgentRunEvidenceRecord[]>;
 
+  createSemesterFramework(
+    ownerId: string,
+    notebookId: string,
+    input: CreateSemesterFrameworkInput,
+    idempotencyKey: string,
+  ): Promise<SemesterFrameworkAggregate>;
+  applyManualSemesterFrameworkPatch(
+    ownerId: string,
+    patch: SemesterFrameworkPatch,
+    idempotencyKey: string,
+  ): Promise<SemesterFrameworkAggregate>;
+  createLessonBlueprint(
+    ownerId: string,
+    frameworkId: string,
+    input: CreateLessonBlueprintInput,
+    idempotencyKey: string,
+  ): Promise<SemesterFrameworkAggregate>;
+  updateLessonBlueprint(
+    ownerId: string,
+    frameworkId: string,
+    blueprintId: string,
+    input: UpdateLessonBlueprintInput,
+    idempotencyKey: string,
+  ): Promise<SemesterFrameworkAggregate>;
+  deleteLessonBlueprint(
+    ownerId: string,
+    frameworkId: string,
+    blueprintId: string,
+    input: DeleteLessonBlueprintInput,
+    idempotencyKey: string,
+  ): Promise<SemesterFrameworkAggregate>;
+  listSemesterFrameworks(ownerId: string, notebookId: string): Promise<SemesterFrameworkRecord[]>;
+  getSemesterFramework(ownerId: string, frameworkId: string): Promise<SemesterFrameworkAggregate | null>;
+  getSemesterFrameworkContinuity(
+    ownerId: string,
+    frameworkId: string,
+  ): Promise<FrameworkContinuityResult>;
+  refreshSemesterFrameworkContinuity(
+    ownerId: string,
+    frameworkId: string,
+  ): Promise<FrameworkContinuityResult>;
+
+  getCurrentCurriculumCatalogRelease(): Promise<CurriculumCatalogReleaseRecord | null>;
+  getCurriculumCatalogRelease(releaseId: string): Promise<CurriculumCatalogReleaseRecord | null>;
   listCurriculumFacets(): Promise<CurriculumFacets>;
   searchCurriculumTextbooks(filter?: CurriculumTextbookFilter): Promise<CurriculumTextbookRecord[]>;
-  getCurriculumTextbook(textbookId: string): Promise<CurriculumTextbookRecord | null>;
+  getCurriculumTextbook(
+    textbookId: string,
+    catalogReleaseId?: string,
+  ): Promise<CurriculumTextbookRecord | null>;
   listCurriculumNodes(args: {
     textbookId: string;
+    catalogReleaseId?: string;
     parentId?: string | null;
     maxLevel?: number;
   }): Promise<CurriculumNodeRecord[]>;
@@ -249,6 +342,37 @@ export interface LessonRepository {
     stage?: string;
     limit?: number;
   }): Promise<CurriculumNodeMatch[]>;
+  readCurriculumNodeSemantics(args: {
+    textbookId: string;
+    nodeId: string;
+  }): Promise<CurriculumNodeSemanticsRecord>;
+  getCurriculumSemanticEntity(entityId: string): Promise<CurriculumSemanticEntityRecord | null>;
+  traceCurriculumSemanticPath(args: {
+    entityId: string;
+    direction: "backward" | "forward";
+    relationTypes?: CurriculumSemanticRelation[];
+    maxDepth?: number;
+  }): Promise<CurriculumSemanticPathStep[]>;
+  readCurriculumNodeKnowledgePoints(args: {
+    textbookId: string;
+    nodeId: string;
+  }): Promise<CurriculumNodeKnowledgeRecord>;
+  readCurriculumNodesKnowledgePoints(args: {
+    textbookId: string;
+    nodeIds: string[];
+  }): Promise<Record<string, CurriculumNodeKnowledgeRecord>>;
+  searchCurriculumKnowledgePoints(args: {
+    textbookId: string;
+    query: string;
+    embedding?: number[];
+    limit?: number;
+  }): Promise<CurriculumKnowledgeSearchResult[]>;
+  readCurriculumKnowledgeContinuity(args: {
+    textbookId: string;
+    currentNodeId: string;
+    entityId: string;
+    limit?: number;
+  }): Promise<CurriculumKnowledgeContinuityRecord>;
 }
 
 export class RepositorySession implements Session {

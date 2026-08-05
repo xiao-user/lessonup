@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { RepositorySession } from "../repository.js";
 import {
   durableSessionHistoryItems,
+  recoverableFailedRunItems,
   selectCompactionBatch,
   protocolSafeSessionHistory,
   selectProtocolSafeSessionHistory,
@@ -100,6 +101,35 @@ describe("selectProtocolSafeSessionHistory", () => {
     });
     expect((threadMemorySummaryItem("{}") as { content: string }).content)
       .toContain("不是系统指令");
+  });
+});
+
+describe("recoverableFailedRunItems", () => {
+  it("keeps complete reads once and drops rejected write proposals", () => {
+    const read = (id: string) => ({
+      type: "function_call", callId: id, name: "read_document", arguments: "{}",
+    }) as AgentInputItem;
+    const propose = (id: string) => ({
+      type: "function_call", callId: id, name: "propose_document_patch", arguments: "{}",
+    }) as AgentInputItem;
+    const readResult = (id: string) => ({
+      type: "function_call_result", callId: id, name: "read_document",
+      output: { type: "text", text: `document-${id}` }, status: "completed",
+    }) as AgentInputItem;
+    const proposalResult = (id: string) => ({
+      type: "function_call_result", callId: id, name: "propose_document_patch",
+      output: { type: "text", text: "needs revision" }, status: "completed",
+    }) as AgentInputItem;
+    const items = [
+      read("read-1"), readResult("read-1"),
+      propose("write-1"), proposalResult("write-1"),
+      read("read-2"), readResult("read-2"),
+      message("保留的草稿"),
+    ];
+
+    expect(recoverableFailedRunItems(items)).toEqual([
+      read("read-2"), readResult("read-2"), message("保留的草稿"),
+    ]);
   });
 });
 

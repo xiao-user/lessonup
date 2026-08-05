@@ -99,11 +99,11 @@ function ActivityStatusIcon({ state }) {
   return <Circle aria-hidden="true" />;
 }
 
-function ThinkingState({ preparing = false }) {
+function ThinkingState({ preparing = false, revising = false }) {
   return (
     <div className="craft-thinking-state" role="status">
       <LoaderCircle className="animate-spin" aria-hidden="true" />
-      <span>{preparing ? "正在组织回复…" : "思考中…"}</span>
+      <span>{revising ? "正在修正修改建议…" : preparing ? "正在生成下一步…" : "思考中…"}</span>
     </div>
   );
 }
@@ -112,6 +112,10 @@ function CraftActivityGroup({ activities, phase }) {
   const [expanded, setExpanded] = useState(true);
   const visibleActivities = presentAgentActivities(activities);
   const summary = agentActivitySummary(visibleActivities, phase);
+  const revising = visibleActivities.some((activity) => (
+    activity.name?.startsWith("propose_")
+    && (activity.state === "failed" || activity.attempts > 1)
+  ));
 
   return (
     <details
@@ -132,7 +136,7 @@ function CraftActivityGroup({ activities, phase }) {
             <small>{activity.state === "completed" ? "完成" : activity.state === "failed" ? "失败" : "进行中"}</small>
           </div>
         ))}
-        {shouldShowAgentThinking(phase) ? <ThinkingState preparing /> : null}
+        {shouldShowAgentThinking(phase) ? <ThinkingState preparing revising={revising} /> : null}
       </div>
     </details>
   );
@@ -218,8 +222,10 @@ export function CraftAssistantTurn({
   activities = [],
   status,
   sources = [],
+  children,
   onCopy,
   onBranch,
+  onRetry,
 }) {
   const hasResponse = Boolean(message.content);
   const failure = message.status === "failed"
@@ -228,12 +234,20 @@ export function CraftAssistantTurn({
   return (
     <article className="craft-turn craft-turn-assistant" data-from="assistant" aria-label="备课助手回复">
       <CraftTurnProcess activities={activities} status={status} responseText={message.content} />
-      {hasResponse ? (
+      {hasResponse || failure ? (
         <div className="craft-response-card">
-          <div className="craft-response-content">
+          {hasResponse ? <div className="craft-response-content">
             <CraftMarkdown isAnimating={message.status === "streaming"}>{message.content}</CraftMarkdown>
-          </div>
-          {message.status !== "streaming" ? <CraftTurnActions onCopy={onCopy} onBranch={onBranch} /> : null}
+          </div> : null}
+          {failure ? (
+            <div className="craft-turn-failed" role="status">
+              <p>{hasResponse
+                ? `${failure.message} 已生成的内容和执行记录仍保留在本轮中；未确认的修改没有写入。`
+                : failure.message}</p>
+              {onRetry ? <Button size="sm" variant="outline" type="button" onClick={onRetry}><RotateCcw />{failure.retryLabel}</Button> : null}
+            </div>
+          ) : null}
+          {message.status !== "streaming" && hasResponse ? <CraftTurnActions onCopy={onCopy} onBranch={onBranch} /> : null}
         </div>
       ) : null}
       {message.status === "cancelled" ? (
@@ -241,11 +255,7 @@ export function CraftAssistantTurn({
           {hasResponse ? "已停止，以上是停止前生成的内容。" : "本次生成已停止。"}
         </p>
       ) : null}
-      {failure ? (
-        <p className="craft-turn-failed" role="status">
-          {hasResponse ? `本轮未能完成：${failure.message} 以上是中断前生成的内容。` : failure.message}
-        </p>
-      ) : null}
+      {children}
       <CraftSources sources={sources} />
     </article>
   );
@@ -287,23 +297,63 @@ export function CraftApproval({
   onReject,
   onContinue,
   onNavigate,
+  resolveOperationTarget,
+  resourceLabel = "教案",
   showContinuationNotice = false,
 }) {
   if (!approval) return null;
   const pending = approval.state === "pending" || approval.state === "responding";
+  const projection = approval.patch.projection;
+  const completeLessonChange = Boolean(approval.patch.designBasisPatch);
+  const quality = approval.patch.qualityPrediction;
+  const qualityIssueLabels = {
+    missing_core_content: "核心栏目仍有空缺",
+    generic_reusable_content: "存在通用模板表述",
+    process_too_thin: "教学过程偏简略",
+    learner_action_missing: "缺少明确学生任务",
+    assessment_evidence_missing: "评价证据不够可观察",
+    duration_exceeds_context: "时间安排超过当前课时",
+  };
   return (
-    <section className="craft-approval" id={`approval-${approval.id}`} aria-label="教案修改确认">
+    <section className="craft-approval" id={`approval-${approval.id}`} aria-label={`${resourceLabel}修改确认`}>
       <h3>{approval.patch.summary}</h3>
+      {quality ? (
+        <p className={`craft-approval-quality ${quality.passed ? "is-passed" : "needs-attention"}`}>
+          {quality.passed
+            ? "语义质量检查通过"
+            : `语义质量建议关注：${quality.issues.map((issue) => qualityIssueLabels[issue] ?? issue).join("；")}`}
+        </p>
+      ) : null}
+      {projection ? (
+        <div className="craft-approval-projection-context">
+          <p>
+            {completeLessonChange
+              ? `Agent 将保存本轮形成的教学判断，并同步调整下方 ${approval.patch.operations.length} 个教案栏目。你只需确认一次；任一部分发生冲突都不会写入。`
+              : `本次将根据 ${projection.entryRefs.length} 条已确认教学决定${projection.expectedLearnerContext ? "及当前学情" : ""}调整下方教案栏目，不建立自动同步。`}
+          </p>
+          {projection.entryRefs.length ? (
+            <details>
+              <summary>查看调整理由</summary>
+              <ul>
+                {projection.entryRefs.map((entry) => (
+                  <li key={entry.entryId}>{entry.expectedStatement}</li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
+        </div>
+      ) : null}
       <div className="craft-approval-diff">
         {approval.patch.operations.map((operation, index) => {
           const preview = presentPatchOperation(operation);
+          const targetLabel = resolveOperationTarget?.(operation, preview);
           return (
-            <div key={`${operation.field}-${operation.start}-${index}`}>
+            <div key={`${operation.op ?? "document"}-${operation.unitId ?? operation.field}-${operation.start ?? index}-${index}`}>
               <div className="craft-approval-diff-heading">
-                <span>{preview.fieldLabel}</span>
-                {onNavigate ? (
-                  <Button type="button" variant="ghost" size="xs" onClick={() => onNavigate(operation.field)}>
-                    在教案中定位
+                <span>{targetLabel ? `${targetLabel} · ${preview.fieldLabel}` : preview.fieldLabel}</span>
+                {onNavigate && preview.targetKind !== "framework" ? (
+                  <Button type="button" variant="ghost" size="xs" onClick={() => onNavigate(operation.field, operation)}>
+                    在{resourceLabel}中定位
                   </Button>
                 ) : null}
               </div>
@@ -333,7 +383,7 @@ export function CraftApproval({
         <>
           {showContinuationNotice ? (
             <p className="craft-approval-result">
-              修改决定已经保存，但后续回复未能恢复。教案状态不会被重复写入。
+              修改决定已经保存，但后续回复未能恢复。{resourceLabel}状态不会被重复写入。
             </p>
           ) : null}
           <div className="craft-approval-actions">
@@ -353,7 +403,17 @@ export function CraftApproval({
           <Button type="button" size="sm" onClick={onApprove} disabled={approval.state === "responding"}><Check data-icon="inline-start" />接受修改</Button>
         </div>
       ) : (
-        <p className="craft-approval-result"><Check aria-hidden="true" />{approval.state === "approved" ? "修改已写入，可通过教案撤销恢复" : "已保留原文"}</p>
+        <p className="craft-approval-result"><Check aria-hidden="true" />{
+          approval.state === "approved"
+            ? completeLessonChange
+              ? "备课调整已完成；教案正文可通过撤销恢复"
+              : projection
+              ? "已写入 A4，可通过教案撤销；原设计依据保持不变"
+              : resourceLabel === "教案" ? "修改已写入，可通过教案撤销恢复" : `修改已写入${resourceLabel}`
+            : completeLessonChange
+              ? "已取消本次备课调整"
+              : resourceLabel === "教案" ? "已保留原文" : `已保留原${resourceLabel}`
+        }</p>
       )}
     </section>
   );
@@ -374,6 +434,7 @@ export function CraftComposer({
   disabled,
   sendDisabled,
   uploadDisabled,
+  showAttachment = true,
   placeholder,
 }) {
   const running = status === "streaming";
@@ -395,25 +456,29 @@ export function CraftComposer({
       />
       <div className="craft-composer-footer">
         <div>
-          <input
-            ref={attachmentInputRef}
-            className="sr-only"
-            type="file"
-            accept=".pdf,.docx,.pptx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,text/plain,text/markdown"
-            onChange={onAttach}
-            aria-label="选择备课资料"
-          />
-          <Button
-            type="button"
-            size="icon-xs"
-            variant="ghost"
-            aria-label="上传备课资料"
-            title={uploadDisabled ? "资料库服务尚未配置" : "上传备课资料"}
-            disabled={uploadDisabled}
-            onClick={() => attachmentInputRef.current?.click()}
-          >
-            <Paperclip />
-          </Button>
+          {showAttachment ? (
+            <>
+              <input
+                ref={attachmentInputRef}
+                className="sr-only"
+                type="file"
+                accept=".pdf,.docx,.pptx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,text/plain,text/markdown"
+                onChange={onAttach}
+                aria-label="选择备课资料"
+              />
+              <Button
+                type="button"
+                size="icon-xs"
+                variant="ghost"
+                aria-label="上传备课资料"
+                title={uploadDisabled ? "资料库服务尚未配置" : "上传备课资料"}
+                disabled={uploadDisabled}
+                onClick={() => attachmentInputRef.current?.click()}
+              >
+                <Paperclip />
+              </Button>
+            </>
+          ) : null}
           <span>{statusLabel}</span>
         </div>
         <Button

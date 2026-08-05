@@ -13,12 +13,13 @@ describe("publicAgentError", () => {
   it("turns an invalid semantic patch into an actionable public error", () => {
     expect(publicAgentError(
       new DocumentPatchError("invalid_patch", "objectives 中的修改原文不唯一"),
-    )).toBe("invalid_patch_proposal");
+    )).toBe("patch_target_ambiguous");
   });
 
   it("preserves stable non-document error codes", () => {
     expect(publicAgentError(new Error("active_run_exists"))).toBe("active_run_exists");
     expect(publicAgentError(new Error("document_context_stale"))).toBe("document_context_stale");
+    expect(publicAgentError(new Error("stale_design_basis"))).toBe("stale_design_basis");
     expect(publicAgentError(new Error("knowledge_attachment_unavailable")))
       .toBe("knowledge_attachment_unavailable");
   });

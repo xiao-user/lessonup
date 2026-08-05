@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { agentApi, consumeAgentStream } from "@/lib/agent-api";
 import {
@@ -54,12 +54,26 @@ function activeApprovalFrom(records) {
 export function useAgentChat({
   notebookId,
   lessonFileId,
+  semesterFrameworkId,
   documentVersion,
+  frameworkVersion,
   activeSectionId,
+  activeUnitId,
   selection,
   onCanonicalDocument,
+  onCanonicalFramework,
   onBeforeRun,
 }) {
+  const resourceType = semesterFrameworkId ? "semester_framework" : "lesson_file";
+  const resourceId = semesterFrameworkId ?? lessonFileId;
+  const resourceVersion = resourceType === "semester_framework"
+    ? frameworkVersion
+    : documentVersion;
+  const resourceScope = useMemo(() => (
+    resourceType === "semester_framework"
+      ? { semesterFrameworkId: resourceId }
+      : { lessonFileId: resourceId }
+  ), [resourceId, resourceType]);
   const [runtime, setRuntime] = useState(null);
   const [threads, setThreads] = useState([]);
   const [activeThreadId, setActiveThreadId] = useState(null);
@@ -77,7 +91,7 @@ export function useAgentChat({
   const [uploadError, setUploadError] = useState(null);
   const [startersLoading, setStartersLoading] = useState(false);
   const [startersError, setStartersError] = useState(null);
-  const documentVersionRef = useRef(documentVersion);
+  const resourceVersionRef = useRef(resourceVersion);
   const activeThreadRef = useRef(null);
   const activeBranchRef = useRef(null);
   const threadsRef = useRef([]);
@@ -87,8 +101,10 @@ export function useAgentChat({
   const runScopesRef = useRef(new Map());
   const streamControllersRef = useRef(new Map());
   const starterRequestsRef = useRef(new Set());
+  const uploadsRef = useRef([]);
+  const threadCreationRef = useRef(null);
   const approval = activeApprovalFrom(approvals);
-  documentVersionRef.current = documentVersion;
+  resourceVersionRef.current = resourceVersion;
   statusRef.current = status;
 
   useEffect(() => { activeThreadRef.current = activeThreadId; }, [activeThreadId]);
@@ -96,6 +112,23 @@ export function useAgentChat({
   useEffect(() => { threadsRef.current = threads; }, [threads]);
   useEffect(() => { runtimeRef.current = runtime; }, [runtime]);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
+
+  const replaceUploads = useCallback((nextOrUpdater) => {
+    setUploads((current) => {
+      const next = typeof nextOrUpdater === "function" ? nextOrUpdater(current) : nextOrUpdater;
+      uploadsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const abandonDraftUploads = useCallback((draftUploads = uploadsRef.current) => {
+    if (!draftUploads.length) return Promise.resolve();
+    const abandonedIds = new Set(draftUploads.map((upload) => upload.id));
+    uploadsRef.current = uploadsRef.current.filter((upload) => !abandonedIds.has(upload.id));
+    return Promise.allSettled(
+      draftUploads.map((upload) => agentApi.deleteKnowledgeUpload(upload.id)),
+    ).then(() => undefined);
+  }, []);
 
   useEffect(() => {
     const pending = uploads.filter((upload) => upload.status === "queued" || upload.status === "processing");
@@ -109,10 +142,16 @@ export function useAgentChat({
         }
       }));
       const byId = new Map(settled.map((upload) => [upload.id, upload]));
-      setUploads((current) => current.map((upload) => byId.get(upload.id) ?? upload));
+      replaceUploads((current) => current.map((upload) => byId.get(upload.id) ?? upload));
     }, 2_000);
     return () => window.clearTimeout(timer);
-  }, [uploads]);
+  }, [replaceUploads, uploads]);
+
+  useEffect(() => () => {
+    const abandoned = uploadsRef.current;
+    uploadsRef.current = [];
+    void abandonDraftUploads(abandoned);
+  }, [abandonDraftUploads, resourceId]);
 
   useEffect(() => {
     if (
@@ -154,14 +193,22 @@ export function useAgentChat({
     const presentedApprovals = approvalRecords.map(presentApproval);
     setApprovals(presentedApprovals);
     if (presentedApprovals.some((item) => item.state === "approved")) {
-      const file = await agentApi.getLessonFile(lessonFileId);
-      if (file.documentVersion > documentVersionRef.current) {
-        documentVersionRef.current = file.documentVersion;
-        onCanonicalDocument(file);
+      if (resourceType === "semester_framework") {
+        const framework = await agentApi.getSemesterFramework(resourceId);
+        if (framework.framework.version > resourceVersionRef.current) {
+          resourceVersionRef.current = framework.framework.version;
+          onCanonicalFramework?.(framework);
+        }
+      } else {
+        const file = await agentApi.getLessonFile(resourceId);
+        if (file.documentVersion > resourceVersionRef.current) {
+          resourceVersionRef.current = file.documentVersion;
+          onCanonicalDocument?.(file);
+        }
       }
     }
     return { records, approvals: presentedApprovals, presentation };
-  }, [lessonFileId, onCanonicalDocument]);
+  }, [onCanonicalDocument, onCanonicalFramework, resourceId, resourceType]);
 
   const ensureThreadStarters = useCallback(async (thread, hasMessages, { force = false } = {}) => {
     if (
@@ -169,7 +216,9 @@ export function useAgentChat({
       || hasMessages
       || (!force && (
         thread.starterSuggestions?.length
-        && thread.starterSuggestionsDocumentVersion === documentVersionRef.current
+        && (resourceType === "semester_framework"
+          ? thread.starterSuggestionsResourceVersion === resourceVersionRef.current
+          : thread.starterSuggestionsDocumentVersion === resourceVersionRef.current)
       ))
       || starterRequestsRef.current.has(thread.id)
     ) return thread;
@@ -193,7 +242,7 @@ export function useAgentChat({
       starterRequestsRef.current.delete(thread.id);
       if (activeThreadRef.current === thread.id) setStartersLoading(false);
     }
-  }, []);
+  }, [resourceType]);
 
   const applyBranchPresentation = useCallback((threadId, branchId, loaded) => {
     if (
@@ -222,10 +271,13 @@ export function useAgentChat({
   }, []);
 
   const selectThread = useCallback(async (threadId) => {
+    const abandoned = uploadsRef.current;
+    uploadsRef.current = [];
+    replaceUploads([]);
+    void abandonDraftUploads(abandoned);
     activeThreadRef.current = threadId;
     setActiveThreadId(threadId);
     setApprovals([]);
-    setUploads([]);
     setUploadError(null);
     setStartersLoading(false);
     setStartersError(null);
@@ -262,7 +314,7 @@ export function useAgentChat({
     const loaded = branchId ? await loadMessages(threadId, branchId) : null;
     void ensureThreadStarters(selected, Boolean(loaded?.records.length));
     applyBranchPresentation(threadId, branchId, loaded);
-  }, [applyBranchPresentation, ensureThreadStarters, loadMessages]);
+  }, [abandonDraftUploads, applyBranchPresentation, ensureThreadStarters, loadMessages, replaceUploads]);
 
   const createThread = useCallback(async (force = false) => {
     if (
@@ -273,16 +325,32 @@ export function useAgentChat({
     ) {
       return { created: false, reason: "current_thread_empty" };
     }
+    const abandoned = uploadsRef.current;
+    uploadsRef.current = [];
+    replaceUploads([]);
+    void abandonDraftUploads(abandoned);
     setStatus("loading");
     setError(null);
+    const creationInput = {
+      notebookId,
+      ...resourceScope,
+      currentThreadId: force === true ? undefined : activeThreadRef.current ?? undefined,
+      currentBranchId: force === true ? undefined : activeBranchRef.current ?? undefined,
+    };
+    const creationSignature = JSON.stringify(creationInput);
+    if (threadCreationRef.current?.signature !== creationSignature) {
+      threadCreationRef.current = {
+        signature: creationSignature,
+        idempotencyKey: crypto.randomUUID(),
+      };
+    }
     let result;
     try {
-      result = await agentApi.createThread({
-        notebookId,
-        lessonFileId,
-        currentThreadId: force === true ? undefined : activeThreadRef.current ?? undefined,
-        currentBranchId: force === true ? undefined : activeBranchRef.current ?? undefined,
-      });
+      result = await agentApi.createThread(
+        creationInput,
+        threadCreationRef.current.idempotencyKey,
+      );
+      threadCreationRef.current = null;
     } catch (threadError) {
       setError(threadError.message);
       setStatus("error");
@@ -300,7 +368,6 @@ export function useAgentChat({
     setActivities([]);
     setSources([]);
     setDraftState("");
-    setUploads([]);
     setUploadError(null);
     setStartersError(null);
     resetAgentConversationState({
@@ -312,7 +379,7 @@ export function useAgentChat({
     });
     void ensureThreadStarters(result.thread, false);
     return { ...result, created: true };
-  }, [ensureThreadStarters, lessonFileId, notebookId]);
+  }, [abandonDraftUploads, ensureThreadStarters, notebookId, replaceUploads, resourceScope]);
 
   const updateActiveThread = useCallback(async (patch) => {
     if (!activeThreadId) return null;
@@ -325,11 +392,11 @@ export function useAgentChat({
     if (!activeThreadId) return;
     if (kind === "archive") await agentApi.updateThread(activeThreadId, { archived: true });
     else await agentApi.deleteThread(activeThreadId);
-    const records = await agentApi.listThreads(lessonFileId);
+    const records = await agentApi.listThreads(resourceScope);
     setThreads(records);
     if (records[0]) await selectThread(records[0].id);
     else await createThread(true);
-  }, [activeThreadId, createThread, lessonFileId, selectThread]);
+  }, [activeThreadId, createThread, resourceScope, selectThread]);
 
   useEffect(() => {
     let cancelled = false;
@@ -341,7 +408,7 @@ export function useAgentChat({
         if (cancelled) return;
         runtimeRef.current = nextRuntime;
         setRuntime(nextRuntime);
-        const records = await agentApi.listThreads(lessonFileId);
+        const records = await agentApi.listThreads(resourceScope);
         if (cancelled) return;
         threadsRef.current = records;
         setThreads(records);
@@ -360,7 +427,7 @@ export function useAgentChat({
       for (const controller of streamControllersRef.current.values()) controller.abort();
       streamControllersRef.current.clear();
     };
-  }, [createThread, lessonFileId, selectThread]);
+  }, [createThread, resourceScope, selectThread]);
 
   const handleEvent = useCallback((event, explicitScope = null) => {
     if (event.type === "run.started") {
@@ -391,12 +458,23 @@ export function useAgentChat({
     );
     if (event.type === "document.updated") {
       if (
-        event.file.id === lessonFileId
-        && event.file.documentVersion > documentVersionRef.current
+        resourceType === "lesson_file"
+        && event.file.id === resourceId
+        && event.file.documentVersion > resourceVersionRef.current
       ) {
-        documentVersionRef.current = event.file.documentVersion;
-        onCanonicalDocument(event.file);
+        resourceVersionRef.current = event.file.documentVersion;
+        onCanonicalDocument?.(event.file);
       }
+    }
+    if (
+      event.type === "resource.updated"
+      && resourceType === "semester_framework"
+      && event.resourceType === "semester_framework"
+      && event.framework.framework.id === resourceId
+      && event.framework.framework.version > resourceVersionRef.current
+    ) {
+      resourceVersionRef.current = event.framework.framework.version;
+      onCanonicalFramework?.(event.framework);
     }
     if (event.type === "message.delta") {
       if (!isActive) return;
@@ -472,6 +550,17 @@ export function useAgentChat({
           setActivities((current) => current.map((activity) => (
             activity.state === "running" ? { ...activity, state: "completed" } : activity
           )));
+          // The server settles the approval transaction before emitting the
+          // terminal run event. Reflect that durable decision immediately;
+          // waiting for the fetch body to close can otherwise leave a valid
+          // approval visually stuck in "applying" after the answer is done.
+          setApprovals((current) => current.map((item) => (
+            item.runId === event.runId
+              && item.state === "responding"
+              && (item.decision === "approved" || item.decision === "rejected")
+              ? { ...item, state: item.decision }
+              : item
+          )));
         }
         setStatus("ready");
         setRunId(null);
@@ -485,6 +574,14 @@ export function useAgentChat({
           activity.state === "running" ? { ...activity, state: "failed" } : activity
         )));
         setMessages((current) => {
+          if (event.message) {
+            const withoutStream = current.filter((message) => message.status !== "streaming");
+            return withoutStream.some((message) => message.id === event.message.id)
+              ? withoutStream.map((message) => (
+                  message.id === event.message.id ? event.message : message
+                ))
+              : [...withoutStream, event.message];
+          }
           const index = current.findLastIndex((message) => (
             message.role === "assistant" && message.status === "streaming"
           ));
@@ -499,7 +596,7 @@ export function useAgentChat({
       }
       runScopesRef.current.delete(event.runId);
     }
-  }, [lessonFileId, onCanonicalDocument]);
+  }, [onCanonicalDocument, onCanonicalFramework, resourceId, resourceType]);
 
   useEffect(() => {
     if (
@@ -527,7 +624,7 @@ export function useAgentChat({
         }
         const loaded = await loadMessages(activeThreadId, activeBranchId);
         if (cancelled) return;
-        const threadRecords = await agentApi.listThreads(lessonFileId);
+        const threadRecords = await agentApi.listThreads(resourceScope);
         if (cancelled) return;
         threadsRef.current = threadRecords;
         setThreads(threadRecords);
@@ -552,7 +649,7 @@ export function useAgentChat({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [activeBranchId, activeThreadId, lessonFileId, loadMessages, runId, status]);
+  }, [activeBranchId, activeThreadId, loadMessages, resourceScope, runId, status]);
 
   const send = useCallback(async (message = draft) => {
     const attachmentSnapshot = readyUploadSources(uploads);
@@ -576,7 +673,8 @@ export function useAgentChat({
     const controller = new AbortController();
     streamControllersRef.current.set(requestScope.threadId, controller);
     setDraft("");
-    setUploads([]);
+    uploadsRef.current = [];
+    replaceUploads([]);
     setError(null);
     setActivities([]);
     setSources([]);
@@ -598,17 +696,19 @@ export function useAgentChat({
         status: "streaming",
       },
     ]);
-    let requestDocumentVersion;
+    let requestResourceVersion;
     try {
       const flushed = await onBeforeRun?.();
-      requestDocumentVersion = flushed?.documentVersion ?? documentVersionRef.current;
-      documentVersionRef.current = requestDocumentVersion;
+      requestResourceVersion = resourceType === "semester_framework"
+        ? flushed?.framework?.version ?? flushed?.frameworkVersion ?? resourceVersionRef.current
+        : flushed?.documentVersion ?? resourceVersionRef.current;
+      resourceVersionRef.current = requestResourceVersion;
     } catch {
       setMessages((current) => current.filter((item) => (
         item.id !== optimisticUserId && item.id !== optimisticAssistantId
       )));
       setDraft(message);
-      setUploads(uploadDraftSnapshot);
+      replaceUploads(uploadDraftSnapshot);
       streamControllersRef.current.delete(requestScope.threadId);
       setError("document_save_failed");
       setStatus("error");
@@ -619,8 +719,9 @@ export function useAgentChat({
         branchId: requestScope.branchId,
         message: prompt,
         activeSectionId: requestSectionId,
-        documentVersion: requestDocumentVersion,
-        selection: requestSelection || undefined,
+        activeUnitId: resourceType === "semester_framework" ? activeUnitId || undefined : undefined,
+        documentVersion: requestResourceVersion,
+        selection: resourceType === "lesson_file" ? requestSelection || undefined : undefined,
         attachmentIds: attachmentSnapshot.map((attachment) => attachment.id),
       }, (event) => handleEvent(event, requestScope), { signal: controller.signal });
       const records = await synchronizeCompletedAgentTurn({
@@ -631,7 +732,7 @@ export function useAgentChat({
           branchId,
           { preservePresentation: true },
         ),
-        listThreads: () => agentApi.listThreads(lessonFileId),
+        listThreads: () => agentApi.listThreads(resourceScope),
       });
       setThreads(records);
     } catch (streamError) {
@@ -665,7 +766,7 @@ export function useAgentChat({
         streamControllersRef.current.delete(requestScope.threadId);
       }
     }
-  }, [activeBranchId, activeSectionId, activeThreadId, draft, handleEvent, lessonFileId, loadMessages, onBeforeRun, runtime?.agent, selection, setDraft, uploads]);
+  }, [activeBranchId, activeSectionId, activeThreadId, activeUnitId, draft, handleEvent, loadMessages, onBeforeRun, replaceUploads, resourceScope, resourceType, runtime?.agent, selection, setDraft, uploads]);
 
   const stop = useCallback(async () => {
     const stoppedRunId = runId;
@@ -691,17 +792,20 @@ export function useAgentChat({
       setError(null);
       setStatus(runtimeRef.current?.agent ? "ready" : "unconfigured");
     }
-    const persistedThreads = await agentApi.listThreads(lessonFileId);
+    const persistedThreads = await agentApi.listThreads(resourceScope);
     threadsRef.current = persistedThreads;
     setThreads(persistedThreads);
-  }, [activeBranchId, activeThreadId, loadMessages, runId, runtime?.agent]);
+  }, [activeBranchId, activeThreadId, loadMessages, resourceScope, runId, runtime?.agent]);
 
   const respondApproval = useCallback(async (approved) => {
     if (!approval) return;
     try {
       const flushed = await onBeforeRun?.();
-      if (flushed?.documentVersion !== undefined) {
-        documentVersionRef.current = flushed.documentVersion;
+      const flushedVersion = resourceType === "semester_framework"
+        ? flushed?.framework?.version ?? flushed?.frameworkVersion
+        : flushed?.documentVersion;
+      if (flushedVersion !== undefined) {
+        resourceVersionRef.current = flushedVersion;
       }
     } catch {
       setError("document_save_failed");
@@ -710,7 +814,9 @@ export function useAgentChat({
     }
     setError(null);
     setApprovals((current) => current.map((item) => (
-      item.id === approval.id ? { ...item, state: "responding" } : item
+      item.id === approval.id
+        ? { ...item, state: "responding", decision: approved ? "approved" : "rejected" }
+        : item
     )));
     setStatus("streaming");
     const idempotencyKey = crypto.randomUUID();
@@ -766,7 +872,7 @@ export function useAgentChat({
         };
       }));
     }
-  }, [approval, handleEvent, onBeforeRun]);
+  }, [approval, handleEvent, onBeforeRun, resourceType]);
 
   const switchBranch = useCallback(async (branchId) => {
     if (!activeThreadId) return;
@@ -819,26 +925,29 @@ export function useAgentChat({
   const uploadKnowledge = useCallback(async (file) => {
     setUploadError(null);
     try {
-      const source = await agentApi.uploadKnowledge(file, { notebookId, lessonFileId });
-      setUploads((current) => [...current, source]);
+      if (resourceType !== "lesson_file") {
+        throw new Error("knowledge_upload_not_supported_for_resource");
+      }
+      const source = await agentApi.uploadKnowledge(file, { notebookId, lessonFileId: resourceId });
+      replaceUploads((current) => [...current, source]);
       return source;
     } catch (uploadError) {
       setUploadError(uploadError.message);
       throw uploadError;
     }
-  }, [lessonFileId, notebookId]);
+  }, [notebookId, replaceUploads, resourceId, resourceType]);
 
   const dismissUpload = useCallback(async (sourceId) => {
     await agentApi.deleteKnowledgeUpload(sourceId);
-    setUploads((current) => current.filter((upload) => upload.id !== sourceId));
+    replaceUploads((current) => current.filter((upload) => upload.id !== sourceId));
     setUploadError(null);
-  }, []);
+  }, [replaceUploads]);
 
   const retryUpload = useCallback(async (sourceId) => {
     const source = await agentApi.retryKnowledgeUpload(sourceId);
-    setUploads((current) => current.map((upload) => upload.id === sourceId ? source : upload));
+    replaceUploads((current) => current.map((upload) => upload.id === sourceId ? source : upload));
     setUploadError(null);
-  }, []);
+  }, [replaceUploads]);
 
   return {
     runtime, threads, activeThreadId, branches, activeBranchId, messages,

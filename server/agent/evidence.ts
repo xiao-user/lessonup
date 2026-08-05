@@ -18,6 +18,8 @@ const eligibleEvidenceKinds = new Set<AgentRunEvidenceRecord["kind"]>([
   "web_open",
   "curriculum_textbook",
   "curriculum_outline",
+  "curriculum_semantics",
+  "curriculum_knowledge",
 ]);
 
 const evidenceKey = (source: SourceRef) => source.url ?? source.id;

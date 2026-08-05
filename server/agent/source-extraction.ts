@@ -1,4 +1,5 @@
 import type { SourceRef } from "../domain.js";
+import { presentableSource } from "./source-policy.js";
 
 const sourceKind = (value: Record<string, unknown>): SourceRef["kind"] => {
   if (value.kind === "public" || value.kind === "private" || value.kind === "web") return value.kind;
@@ -40,7 +41,7 @@ export function extractSources(value: unknown): SourceRef[] {
   return unpackSourcePayload(value).flatMap((source): SourceRef[] => {
     const id = source.id ?? source.chunkId ?? source.url;
     if (typeof source.title !== "string" || typeof id !== "string") return [];
-    return [{
+    return [presentableSource({
       id,
       title: source.title,
       url: typeof source.url === "string" ? source.url : undefined,
@@ -49,6 +50,6 @@ export function extractSources(value: unknown): SourceRef[] {
         ? source.page
         : undefined,
       chunkId: typeof source.chunkId === "string" ? source.chunkId : undefined,
-    }];
+    })];
   });
 }

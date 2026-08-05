@@ -1,15 +1,19 @@
 import { expect, test } from "./fixtures.js";
-import { initialDocument, lessonFileId, notebookId } from "./test-data.js";
+import { adminClient, initialDocument, lessonFileId, notebookId } from "./test-data.js";
 
 const temporaryTitle = "端到端临时备课本";
 
 test("creates once, scrolls across the full collection and targets the active notebook", async ({ collectionPage: page }) => {
   let temporaryNotebookId: string | null = null;
   try {
+    const specialQuery = await page.request.get(
+      `/api/curriculum/textbooks?query=${encodeURIComponent("语文,(特殊)")}`,
+    );
+    expect(specialQuery.ok()).toBeTruthy();
     const closedActionOrder = await page.locator(".create-actions").evaluate((actions) =>
       [...actions.children].map((button) => button.getAttribute("aria-label") || button.textContent?.trim()),
     );
-    expect(closedActionOrder).toEqual(["退出登录", "新增备课本", "新增备课文件"]);
+    expect(closedActionOrder).toEqual(["个人信息", "新增备课本", "新增备课文件"]);
     await expect(page.getByRole("button", { name: "新增备课文件", exact: true })).toHaveCSS(
       "border-radius",
       "9999px",
@@ -41,10 +45,16 @@ test("creates once, scrolls across the full collection and targets the active no
     await expect(page.locator(".book-carousel-index button.is-active")).toHaveText(temporaryTitle);
     await page.mouse.move(640, 360);
     await page.mouse.wheel(0, 220);
+    await expect(page.locator(".book-carousel")).toHaveAttribute("data-motion-state", "moving");
+    expect(Number(await page.locator(".book-carousel").getAttribute("data-carousel-position"))).toBeLessThan(1);
     await expect(page.locator(".book-carousel-index button.is-active")).toHaveText("语文备课本");
-    await page.waitForTimeout(620);
+    await expect(page.locator(".book-carousel")).toHaveAttribute("data-motion-state", "idle");
     await page.mouse.wheel(0, 900);
     await expect(page.locator(".book-carousel-index button.is-active")).toHaveText("语文备课本");
+    await expect(page.locator(".book-carousel")).toHaveAttribute("data-motion-state", "idle", { timeout: 800 });
+    const bottomPosition = await page.locator(".book-carousel").getAttribute("data-carousel-position");
+    await page.waitForTimeout(700);
+    await expect(page.locator(".book-carousel")).toHaveAttribute("data-carousel-position", bottomPosition!);
 
     await page.getByRole("button", { name: "新增备课文件", exact: true }).click();
     await expect(page.getByRole("combobox", { name: "所属备课本", exact: true })).toContainText("语文备课本");
@@ -53,12 +63,15 @@ test("creates once, scrolls across the full collection and targets the active no
 
     await page.mouse.wheel(0, -220);
     await expect(page.locator(".book-carousel-index button.is-active")).toHaveText(temporaryTitle);
-    await page.waitForTimeout(620);
+    await expect(page.locator(".book-carousel")).toHaveAttribute("data-motion-state", "idle");
     await page.mouse.wheel(0, -900);
     await expect(page.locator(".book-carousel-index button.is-active")).toHaveText(temporaryTitle);
+    await expect(page.locator(".book-carousel")).toHaveAttribute("data-motion-state", "idle", { timeout: 800 });
+    await expect(page.locator(".book-carousel")).toHaveAttribute("data-carousel-position", "0.0000");
 
     await page.getByRole("button", { name: "语文备课本", exact: true }).click();
     await expect(page.locator(".book-carousel-index button.is-active")).toHaveText("语文备课本");
+    await expect(page.locator(".book-carousel")).toHaveAttribute("data-motion-state", "idle");
     const activeNameBox = await page.locator(".book-carousel-index button.is-active").boundingBox();
     const activeBookBox = await page.locator('.book-volume[data-slot="0"]').boundingBox();
     expect(activeNameBox).not.toBeNull();
@@ -68,8 +81,59 @@ test("creates once, scrolls across the full collection and targets the active no
       - (activeBookBox!.y + activeBookBox!.height / 2),
     )).toBeLessThan(32);
 
+    const activeIndexButton = page.locator(".book-carousel-index button.is-active");
+    await expect(activeIndexButton).toHaveAttribute("aria-current", "true");
+    await expect(activeIndexButton).toHaveAttribute("tabindex", "0");
+    await expect(page.locator('.book-carousel-index button[tabindex="0"]')).toHaveCount(1);
+    await activeIndexButton.press("Home");
+    await expect(page.locator(".book-carousel-index button.is-active")).toHaveText(temporaryTitle);
+    await expect(page.locator(".book-carousel")).toHaveAttribute("data-motion-state", "idle");
+    await expect(page.locator(".book-carousel-index button.is-active")).toBeFocused();
+    await expect(page.locator(".book-carousel-index button.is-active")).toHaveCSS("box-shadow", "none");
+    await page.locator(".book-carousel-index button.is-active").press("End");
+    await expect(page.locator(".book-carousel-index button.is-active")).toHaveText("语文备课本");
+    await expect(page.locator(".book-carousel")).toHaveAttribute("data-motion-state", "idle");
+
+    const carouselBox = await page.locator(".book-carousel").boundingBox();
+    expect(carouselBox).not.toBeNull();
+    const pointerX = carouselBox!.x + carouselBox!.width / 2;
+    const pointerY = carouselBox!.y + carouselBox!.height / 2;
+    await page.locator(".book-carousel").dispatchEvent("pointerdown", {
+      pointerId: 41,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: pointerX,
+      clientY: pointerY,
+    });
+    await page.locator(".book-carousel").dispatchEvent("pointermove", {
+      pointerId: 41,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: pointerX,
+      clientY: pointerY - 120,
+    });
+    await expect(page.locator(".book-carousel")).toHaveAttribute("data-motion-state", "dragging");
+    await page.locator(".book-carousel").dispatchEvent("pointerup", {
+      pointerId: 41,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: pointerX,
+      clientY: pointerY - 120,
+    });
+    await expect(page.locator(".book-carousel")).toHaveAttribute("data-motion-state", "idle");
+    await page.getByRole("button", { name: "语文备课本", exact: true }).click();
+    await expect(page.locator(".book-carousel")).toHaveAttribute("data-motion-state", "idle");
+
     await page.getByRole("button", { name: "打开语文备课本", exact: true }).click();
     await expect(page.getByRole("button", { name: "合上语文备课本", exact: true })).toBeVisible();
+    await expect(page.locator(".book-volume.is-open .book-volume-cover")).toHaveCSS(
+      "--cover-angle",
+      "-180deg",
+    );
+    await expect(page.locator('.book-volume.is-open [data-page-kind="title"]')).toHaveCSS(
+      "--leaf-angle",
+      "-180deg",
+    );
     await expect(page.locator(".create-actions").getByRole("button", { name: "新增备课文件", exact: true }))
       .toBeVisible();
     await expect(page.locator(".collection-context-action").first()).toBeHidden();
@@ -82,20 +146,258 @@ test("creates once, scrolls across the full collection and targets the active no
   }
 });
 
-test("turns real lesson-file pages and restores an independently routed detail", async ({ collectionPage: page }) => {
-  let temporaryFileId: string | null = null;
+test("echoes persisted uploads in personal info and deletes Storage with database records", async ({ collectionPage: page }) => {
+  const userId = process.env.LESSONUP_E2E_USER_ID!;
+  const client = adminClient();
+  const title = "个人资料回显验收.txt";
+  let sourceId = "";
+  let storageKey = "";
   try {
-    const createResponse = await page.request.post("/api/lesson-files", {
+    const upload = await page.request.post("/api/knowledge/uploads", {
+      multipart: {
+        file: {
+          name: title,
+          mimeType: "text/plain",
+          buffer: Buffer.from("这是用于验证个人文件回显与同步删除的非敏感资料。"),
+        },
+        notebookId,
+        lessonFileId,
+      },
+    });
+    expect(upload.ok()).toBeTruthy();
+    const source = await upload.json();
+    sourceId = source.id;
+    storageKey = source.storage_key;
+
+    const threadResponse = await page.request.post("/api/agent/threads", {
+      data: { notebookId, lessonFileId, title: "个人资料回显验收" },
+    });
+    expect(threadResponse.ok()).toBeTruthy();
+    const aggregate = await threadResponse.json();
+    const messageId = crypto.randomUUID();
+    const insertedMessage = await client.from("agent_messages").insert({
+      id: messageId,
+      owner_id: userId,
+      thread_id: aggregate.thread.id,
+      branch_id: aggregate.branch.id,
+      role: "user",
+      content: "使用上传资料",
+      status: "completed",
+    });
+    expect(insertedMessage.error).toBeNull();
+    const attached = await client.from("knowledge_sources")
+      .update({ attached_message_id: messageId })
+      .eq("owner_id", userId)
+      .eq("id", sourceId);
+    expect(attached.error).toBeNull();
+
+    const draftList = await page.request.get(
+      `/api/knowledge/uploads?lessonFileId=${encodeURIComponent(lessonFileId)}`,
+    );
+    expect((await draftList.json()).some((file: { id: string }) => file.id === sourceId)).toBe(false);
+    const completeList = await page.request.get("/api/knowledge/uploads?view=all");
+    expect((await completeList.json()).some((file: { id: string }) => file.id === sourceId)).toBe(true);
+
+    await page.getByRole("button", { name: "个人信息", exact: true }).click();
+    await page.getByRole("menuitem", { name: "个人信息", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "个人信息", exact: true })).toBeVisible();
+    await expect(page.getByText(title, { exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: `删除文件${title}`, exact: true }).click();
+    await expect(page.getByRole("heading", { name: "删除这个文件？", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "确认删除", exact: true }).click();
+    await expect(page.getByText(title, { exact: true })).toHaveCount(0);
+
+    const sourceRecord = await client.from("knowledge_sources").select("id").eq("id", sourceId).maybeSingle();
+    expect(sourceRecord.error).toBeNull();
+    expect(sourceRecord.data).toBeNull();
+    const storedObject = await client.storage.from("knowledge-private").download(storageKey);
+    expect(storedObject.error).not.toBeNull();
+    sourceId = "";
+  } finally {
+    if (sourceId) await page.request.delete(`/api/knowledge/uploads/${sourceId}`);
+  }
+});
+
+test("deletes a lesson file and its associated uploaded sources from the open book", async ({ collectionPage: page }) => {
+  const userId = process.env.LESSONUP_E2E_USER_ID!;
+  const client = adminClient();
+  const title = "删除备课文件验收";
+  let temporaryFileId = "";
+  let sourceId = "";
+  let storageKey = "";
+  try {
+    const created = await page.request.post("/api/lesson-files", {
       data: {
         notebookId,
-        title: "翻页交互测试",
+        title,
         type: "新教案",
-        document: { ...initialDocument, topic: "翻页交互测试" },
+        document: { ...initialDocument, topic: title },
         pageCount: 1,
       },
     });
+    expect(created.ok()).toBeTruthy();
+    temporaryFileId = (await created.json()).id;
+
+    const upload = await page.request.post("/api/knowledge/uploads", {
+      multipart: {
+        file: {
+          name: "随备课文件删除.txt",
+          mimeType: "text/plain",
+          buffer: Buffer.from("删除备课文件时应同时清理这份资料。"),
+        },
+        notebookId,
+        lessonFileId: temporaryFileId,
+      },
+    });
+    expect(upload.ok()).toBeTruthy();
+    const source = await upload.json();
+    sourceId = source.id;
+    storageKey = source.storage_key;
+
+    await page.reload();
+    await page.getByRole("button", { name: "打开语文备课本", exact: true }).click();
+    const deleteButton = page.getByRole("button", { name: `删除备课文件${title}`, exact: true });
+    await expect(deleteButton).toBeEnabled();
+    await deleteButton.click();
+    await expect(page.getByRole("heading", { name: "删除这份备课文件？", exact: true })).toBeVisible();
+    const deleteResponsePromise = page.waitForResponse((response) => (
+      response.request().method() === "DELETE"
+      && new URL(response.url()).pathname === `/api/lesson-files/${temporaryFileId}`
+    ));
+    await page.getByRole("button", { name: "确认删除", exact: true }).click();
+    expect((await deleteResponsePromise).status()).toBe(204);
+    await expect(page.getByRole("button", { name: `打开备课文件${title}`, exact: true })).toHaveCount(0);
+    expect((await page.request.get(`/api/lesson-files/${temporaryFileId}`)).status()).toBe(404);
+
+    const [fileRecord, sourceRecord] = await Promise.all([
+      client.from("lesson_files").select("id").eq("owner_id", userId).eq("id", temporaryFileId).maybeSingle(),
+      client.from("knowledge_sources").select("id").eq("owner_id", userId).eq("id", sourceId).maybeSingle(),
+    ]);
+    expect(fileRecord.error).toBeNull();
+    expect(fileRecord.data).toBeNull();
+    expect(sourceRecord.error).toBeNull();
+    expect(sourceRecord.data).toBeNull();
+    const storedObject = await client.storage.from("knowledge-private").download(storageKey);
+    expect(storedObject.error).not.toBeNull();
+    temporaryFileId = "";
+    sourceId = "";
+  } finally {
+    if (temporaryFileId) await page.request.delete(`/api/lesson-files/${temporaryFileId}`);
+    else if (sourceId) await page.request.delete(`/api/knowledge/uploads/${sourceId}`);
+  }
+});
+
+test("deletes an entire notebook with its files and Storage sources", async ({ collectionPage: page }) => {
+  const userId = process.env.LESSONUP_E2E_USER_ID!;
+  const client = adminClient();
+  const title = "整本删除验收";
+  let temporaryNotebookId = "";
+  let temporaryFileId = "";
+  let sourceId = "";
+  let storageKey = "";
+  try {
+    const createdNotebook = await page.request.post("/api/notebooks", {
+      data: {
+        title,
+        className: "七年级（1）班",
+        year: "2026—2027 学年",
+        subject: "语文",
+        stage: "初中",
+        grade: "七年级",
+        edition: "",
+        tone: "teal",
+      },
+    });
+    expect(createdNotebook.ok()).toBeTruthy();
+    temporaryNotebookId = (await createdNotebook.json()).id;
+
+    const createdFile = await page.request.post("/api/lesson-files", {
+      data: {
+        notebookId: temporaryNotebookId,
+        title: "整本删除中的教案",
+        type: "新教案",
+        document: { ...initialDocument, objectives: "整本删除应清理所有关联记录。" },
+        pageCount: 1,
+      },
+    });
+    expect(createdFile.ok()).toBeTruthy();
+    temporaryFileId = (await createdFile.json()).id;
+
+    const upload = await page.request.post("/api/knowledge/uploads", {
+      multipart: {
+        file: {
+          name: "随备课本删除.txt",
+          mimeType: "text/plain",
+          buffer: Buffer.from("删除整个备课本时应同步清理 Storage 对象。"),
+        },
+        notebookId: temporaryNotebookId,
+        lessonFileId: temporaryFileId,
+      },
+    });
+    expect(upload.ok()).toBeTruthy();
+    const source = await upload.json();
+    sourceId = source.id;
+    storageKey = source.storage_key;
+
+    await page.reload();
+    await page.getByRole("button", { name: `打开${title}`, exact: true }).click();
+    const deleteButton = page.getByRole("button", { name: `删除备课本${title}`, exact: true });
+    await expect(deleteButton).toBeVisible();
+    await deleteButton.click();
+    await expect(page.getByRole("heading", { name: "删除整个备课本？", exact: true })).toBeVisible();
+    const deleteResponsePromise = page.waitForResponse((response) => (
+      response.request().method() === "DELETE"
+      && new URL(response.url()).pathname === `/api/notebooks/${temporaryNotebookId}`
+    ));
+    await page.getByRole("button", { name: "确认删除备课本", exact: true }).click();
+    expect((await deleteResponsePromise).status()).toBe(204);
+    await expect(page.getByRole("button", { name: `打开${title}`, exact: true })).toHaveCount(0);
+
+    const [notebookRecord, fileRecord, sourceRecord] = await Promise.all([
+      client.from("notebooks").select("id").eq("owner_id", userId).eq("id", temporaryNotebookId).maybeSingle(),
+      client.from("lesson_files").select("id").eq("owner_id", userId).eq("id", temporaryFileId).maybeSingle(),
+      client.from("knowledge_sources").select("id").eq("owner_id", userId).eq("id", sourceId).maybeSingle(),
+    ]);
+    expect(notebookRecord.data).toBeNull();
+    expect(fileRecord.data).toBeNull();
+    expect(sourceRecord.data).toBeNull();
+    const storedObject = await client.storage.from("knowledge-private").download(storageKey);
+    expect(storedObject.error).not.toBeNull();
+    temporaryNotebookId = "";
+    temporaryFileId = "";
+    sourceId = "";
+  } finally {
+    if (temporaryNotebookId) await page.request.delete(`/api/notebooks/${temporaryNotebookId}`);
+    else if (sourceId) await page.request.delete(`/api/knowledge/uploads/${sourceId}`);
+  }
+});
+
+test("turns real lesson-file pages and restores an independently routed detail", async ({ collectionPage: page }) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  let temporaryFileId: string | null = null;
+  try {
+    const createIdempotencyKey = crypto.randomUUID();
+    const createPayload = {
+      notebookId,
+      title: "翻页交互测试",
+      type: "新教案",
+      document: { ...initialDocument, topic: "翻页交互测试" },
+      contextProfile: { lessonDurationMinutes: 45 },
+      pageCount: 1,
+    };
+    const createResponse = await page.request.post("/api/lesson-files", {
+      headers: { "idempotency-key": createIdempotencyKey },
+      data: createPayload,
+    });
     expect(createResponse.ok()).toBeTruthy();
     temporaryFileId = (await createResponse.json()).id;
+    const replayResponse = await page.request.post("/api/lesson-files", {
+      headers: { "idempotency-key": createIdempotencyKey },
+      data: createPayload,
+    });
+    expect(replayResponse.ok()).toBeTruthy();
+    expect((await replayResponse.json()).id).toBe(temporaryFileId);
 
     await page.reload();
     await page.getByRole("button", { name: "打开语文备课本", exact: true }).click();

@@ -61,7 +61,11 @@ export function chunkPlainText(text: string, chunkSize = 1_500, overlap = 160): 
   return chunks;
 }
 
-export async function parseKnowledgeBytes(mediaType: string, bytes: ArrayBuffer) {
+export async function parseKnowledgeBytes(
+  mediaType: string,
+  bytes: ArrayBuffer,
+  signal?: AbortSignal,
+) {
   if (mediaType === "text/plain" || mediaType === "text/markdown") {
     return { chunks: chunkPlainText(new TextDecoder().decode(bytes)), warnings: [] as string[] };
   }
@@ -69,7 +73,14 @@ export async function parseKnowledgeBytes(mediaType: string, bytes: ArrayBuffer)
   if (!fileType) throw new Error("unsupported_knowledge_file");
   const warnings: string[] = [];
   const converted = await OfficeConverter.convert(Buffer.from(bytes), "chunks", {
-    parseConfig: { fileType },
+    parseConfig: {
+      fileType,
+      abortSignal: signal,
+      decompressionLimits: {
+        maxUncompressedBytes: 80 * 1024 * 1024,
+        maxZipEntries: 2_500,
+      },
+    },
     generatorConfig: {
       chunksConfig: {
         strategy: "document-structure",
@@ -97,15 +108,18 @@ const pause = (milliseconds: number) => new Promise((resolve) => setTimeout(reso
 const parseTimeoutMs = 45_000;
 const maxChunksPerSource = 2_000;
 
-async function withTimeout<T>(operation: Promise<T>, milliseconds: number) {
+export async function withAbortTimeout<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  milliseconds: number,
+) {
+  const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await Promise.race([
-      operation,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("knowledge_parse_timeout")), milliseconds);
-      }),
-    ]);
+    timer = setTimeout(() => controller.abort(), milliseconds);
+    return await operation(controller.signal);
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("knowledge_parse_timeout");
+    throw error;
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -173,8 +187,9 @@ export class KnowledgeIndexWorker {
     if (!this.client || !source.storage_key) throw new Error("knowledge_source_file_missing");
     const download = await this.client.storage.from("knowledge-private").download(source.storage_key);
     if (download.error) throw new Error(`knowledge_download_failed:${download.error.message}`);
-    const parsed = await withTimeout(
-      parseKnowledgeBytes(source.media_type, await download.data.arrayBuffer()),
+    const bytes = await download.data.arrayBuffer();
+    const parsed = await withAbortTimeout(
+      (signal) => parseKnowledgeBytes(source.media_type, bytes, signal),
       parseTimeoutMs,
     );
     if (parsed.chunks.length === 0) throw new Error("knowledge_source_empty");

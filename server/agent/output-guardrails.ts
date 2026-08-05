@@ -4,7 +4,7 @@ import type {
   AgentRunEvidenceKind,
   AgentRunEvidenceRecord,
   CapabilityPlan,
-  LessonAgentContext,
+  PreparationAgentContext,
 } from "../domain.js";
 import type { LessonRepository } from "../repository.js";
 
@@ -15,6 +15,8 @@ const directlyObservedKinds = new Set<AgentRunEvidenceKind>([
   "web_open",
   "curriculum_textbook",
   "curriculum_outline",
+  "curriculum_semantics",
+  "curriculum_knowledge",
 ]);
 
 export function validateObservedEvidence(args: {
@@ -46,7 +48,7 @@ export function validateObservedEvidence(args: {
 export function createLessonOutputGuardrails(
   repository: LessonRepository,
   plan: CapabilityPlan,
-): OutputGuardrail<TextOutput, LessonAgentContext>[] {
+): OutputGuardrail<TextOutput, PreparationAgentContext>[] {
   return [{
     name: "observed-evidence-required",
     execute: async ({ context }) => validateObservedEvidence({

@@ -4,6 +4,9 @@ import type {
   NormalizedAgentEvent,
   SourceRef,
 } from "../domain.js";
+import { isSemesterFrameworkPatch } from "../domain.js";
+import { materializeDesignBasisProjection } from "../design-basis-projection.js";
+import { materializeLessonDesignChange } from "../lesson-design-change.js";
 import type { LessonRepository } from "../repository.js";
 
 type Emit = (event: NormalizedAgentEvent) => void | Promise<void>;
@@ -41,6 +44,7 @@ export class DeterministicAgentHarness {
     const thread = await this.repository.getThread(input.userId, input.threadId);
     const branch = await this.repository.getBranch(input.userId, input.threadId, input.branchId);
     if (!thread || !branch) throw new Error("thread_scope_invalid");
+    if (thread.resourceType !== "lesson_file") throw new Error("agent_resource_not_supported");
     if (thread.status === "running" || thread.status === "awaiting_approval") {
       throw new Error("active_run_exists");
     }
@@ -96,11 +100,25 @@ export class DeterministicAgentHarness {
     try {
       if (input.message.includes("制造失败") && !this.failedMessages.has(`${thread.id}:${input.message}`)) {
         this.failedMessages.add(`${thread.id}:${input.message}`);
-        await this.fail(input.userId, runId, thread.id, assistant.id, emit, "agent_run_failed");
+        const interruptedDraft = "已完成问题定位，但后续校验未通过。";
+        await emit({ type: "message.delta", runId, delta: interruptedDraft });
+        await this.fail(
+          input.userId,
+          runId,
+          thread.id,
+          assistant.id,
+          interruptedDraft,
+          emit,
+          "agent_run_failed",
+        );
         return;
       }
 
-      if (input.message.includes("提交修改")) {
+      if (
+        input.message.includes("提交修改")
+        || input.message.includes("完整备课调整")
+        || input.message.includes("设计依据投影")
+      ) {
         await this.createApproval({ input, runId, assistantId: assistant.id, file, emit });
         return;
       }
@@ -170,6 +188,10 @@ export class DeterministicAgentHarness {
     let approval = await this.repository.getApproval(args.userId, args.approvalId);
     if (!approval) throw new Error("approval_not_found");
     if (approval.runId !== args.runId) throw new Error("run_scope_invalid");
+    if (isSemesterFrameworkPatch(approval.patch)) {
+      throw new Error("agent_resource_not_supported");
+    }
+    const approvalPatch = approval.patch;
     const desiredState = args.approved ? "approved" : "rejected";
     if (approval.state !== "pending" && approval.state !== desiredState) {
       throw new Error("approval_already_resolved");
@@ -199,6 +221,13 @@ export class DeterministicAgentHarness {
             file: decision.file,
           });
         }
+        if (decision.basis) {
+          await args.emit({
+            type: "design_basis.updated",
+            runId: approval.runId,
+            basis: decision.basis,
+          });
+        }
       } else {
         await args.emit({
           type: "approval.decided",
@@ -215,7 +244,7 @@ export class DeterministicAgentHarness {
       });
       if (approval.continuationStatus === "completed") {
         const file = args.approved
-          ? await this.repository.getLessonFile(args.userId, approval.patch.fileId)
+          ? await this.repository.getLessonFile(args.userId, approvalPatch.fileId)
           : null;
         await args.emit({
           type: "run.started", runId: approval.runId,
@@ -280,7 +309,7 @@ export class DeterministicAgentHarness {
       await args.emit({ type: "message.completed", runId: approval.runId, message });
       await args.emit({ type: "run.completed", runId: approval.runId });
       return args.approved
-        ? this.repository.getLessonFile(args.userId, approval.patch.fileId)
+        ? this.repository.getLessonFile(args.userId, approvalPatch.fileId)
         : null;
     } catch (error) {
       const current = await this.repository.getApproval(args.userId, approval.id);
@@ -311,6 +340,66 @@ export class DeterministicAgentHarness {
     file: NonNullable<Awaited<ReturnType<LessonRepository["getLessonFile"]>>>;
     emit: Emit;
   }) {
+    if (args.input.message.includes("完整备课调整")) {
+      const basis = await this.repository.getLessonDesignBasis(
+        args.input.userId,
+        args.file.id,
+      );
+      if (!basis) throw new Error("lesson_design_basis_not_found");
+      const expectedText = args.file.document.assessment;
+      const patch = materializeLessonDesignChange({
+        aggregate: basis,
+        file: args.file,
+        proposal: {
+          summary: "补充学生困难并落实到评价练习",
+          designBasisOperations: [{
+            op: "create_design_basis_entry",
+            referenceKey: "student-evidence-gap",
+            kind: "student_difficulty",
+            semanticEntityId: null,
+            relatedSemanticEntityId: null,
+            relatedCurriculumNodeId: null,
+            statement: "学生可能只给出结论，不能说明判断依据。",
+            rationale: "评价任务需要观察学生能否用证据解释。",
+            evidenceSourceIds: [],
+            decision: "accepted",
+          }],
+          documentOperations: [{
+            field: "assessment",
+            replacement: `${expectedText}\n要求学生说明判断所依据的文本证据。`,
+            basisEntryIds: [],
+            createdBasisEntryRefs: ["student-evidence-gap"],
+            usesLearnerContext: false,
+          }],
+        },
+      });
+      return this.persistApproval({ ...args, patch });
+    }
+    if (args.input.message.includes("设计依据投影")) {
+      const basis = await this.repository.getLessonDesignBasis(
+        args.input.userId,
+        args.file.id,
+      );
+      const entry = basis?.entries.find((candidate) => (
+        candidate.decision === "accepted" && candidate.teacherConfirmed
+      ));
+      if (!basis || !entry) throw new Error("lesson_design_basis_not_found");
+      const expectedText = args.file.document.assessment;
+      const patch = materializeDesignBasisProjection({
+        aggregate: basis,
+        file: args.file,
+        proposal: {
+          summary: "把已确认的学生困难落实到评价练习",
+          operations: [{
+            field: "assessment",
+            replacement: `${expectedText}\n要求学生说明判断所依据的文本证据。`,
+            basisEntryIds: [entry.id],
+            usesLearnerContext: false,
+          }],
+        },
+      });
+      return this.persistApproval({ ...args, patch });
+    }
     const expectedText = args.file.document.objectives.split("\n")[0];
     const replacement = "1. 能从文本证据中解释春日意象的形成。";
     const patch: DocumentPatch = {
@@ -328,6 +417,16 @@ export class DeterministicAgentHarness {
         replacement,
       }],
     };
+    return this.persistApproval({ ...args, patch });
+  }
+
+  private async persistApproval(args: {
+    input: StartInput;
+    runId: string;
+    assistantId: string;
+    patch: DocumentPatch;
+    emit: Emit;
+  }) {
     const approval: AgentApprovalRecord = {
       id: crypto.randomUUID(),
       ownerId: args.input.userId,
@@ -336,10 +435,14 @@ export class DeterministicAgentHarness {
       branchId: args.input.branchId,
       assistantMessageId: args.assistantId,
       state: "pending",
-      patch,
+      patch: args.patch,
       encryptedRunState: "deterministic-e2e-state",
       agentDefinitionVersion: "deterministic-agent-e2e@1",
-      documentVersion: args.file.documentVersion,
+      resourceType: "lesson_file",
+      patchKind: "document",
+      lessonFileId: args.patch.fileId,
+      baseResourceVersion: args.patch.baseDocumentVersion,
+      documentVersion: args.patch.baseDocumentVersion,
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
       createdAt: new Date().toISOString(),
     };
@@ -355,7 +458,7 @@ export class DeterministicAgentHarness {
       runId: args.runId,
       approvalId: approval.id,
       assistantMessageId: args.assistantId,
-      patch,
+      patch: args.patch,
     });
   }
 
@@ -364,6 +467,7 @@ export class DeterministicAgentHarness {
     runId: string,
     threadId: string,
     assistantId: string,
+    content: string,
     emit: Emit,
     error: string,
   ) {
@@ -371,12 +475,12 @@ export class DeterministicAgentHarness {
       status: "failed", error, completedAt: new Date().toISOString(),
     });
     await this.repository.updateThread(userId, threadId, { status: "failed" });
-    await this.repository.updateMessage(userId, assistantId, {
-      content: "",
+    const message = await this.repository.updateMessage(userId, assistantId, {
+      content,
       status: "failed",
       error,
     });
-    await emit({ type: "run.failed", runId, error });
+    await emit({ type: "run.failed", runId, error, message });
   }
 
   private async cancelled(

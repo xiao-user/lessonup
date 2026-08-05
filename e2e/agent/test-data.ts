@@ -45,9 +45,22 @@ export async function findE2EUserId() {
 
 export async function resetE2EState(userId: string) {
   const client = adminClient();
+  const { data: designBasis, error: designBasisError } = await client
+    .from("lesson_design_bases")
+    .select("id")
+    .eq("owner_id", userId)
+    .eq("lesson_file_id", lessonFileId)
+    .maybeSingle();
+  if (designBasisError) throw designBasisError;
   const queries = [
     client.from("agent_threads").delete().eq("owner_id", userId),
     client.from("lesson_file_versions").delete().eq("owner_id", userId).eq("lesson_file_id", lessonFileId),
+    ...(designBasis ? [
+      client.from("lesson_design_basis_versions").delete()
+        .eq("owner_id", userId).eq("basis_id", designBasis.id),
+      client.from("lesson_design_basis_entries").delete()
+        .eq("owner_id", userId).eq("basis_id", designBasis.id),
+    ] : []),
   ];
   for (const query of queries) {
     const { error } = await query;
@@ -60,6 +73,15 @@ export async function resetE2EState(userId: string) {
     page_count: 1,
   }).eq("owner_id", userId).eq("id", lessonFileId);
   if (updateError) throw updateError;
+  if (designBasis) {
+    const { error: basisResetError } = await client.from("lesson_design_bases").update({
+      learner_context: {},
+      teacher_notes: "",
+      status: "draft",
+      version: 0,
+    }).eq("owner_id", userId).eq("id", designBasis.id);
+    if (basisResetError) throw basisResetError;
+  }
   const { error: versionError } = await client.from("lesson_file_versions").insert({
     owner_id: userId,
     lesson_file_id: lessonFileId,

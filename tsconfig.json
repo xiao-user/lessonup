@@ -10,6 +10,7 @@
     "moduleResolution": "NodeNext",
     "noEmit": true,
     "resolveJsonModule": true,
+    "paths": { "@/*": ["./src/*"] },
     "skipLibCheck": true,
     "strict": true,
     "target": "ES2023",

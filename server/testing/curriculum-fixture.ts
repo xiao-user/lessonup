@@ -1,4 +1,13 @@
-import type { CurriculumNodeRecord, CurriculumTextbookRecord } from "../domain.js";
+import type {
+  CurriculumKnowledgeContinuityRecord,
+  CurriculumKnowledgeSearchResult,
+  CurriculumNodeRecord,
+  CurriculumNodeKnowledgeRecord,
+  CurriculumNodeSemanticsRecord,
+  CurriculumSemanticEntityRecord,
+  CurriculumSemanticPathStep,
+  CurriculumTextbookRecord,
+} from "../domain.js";
 
 export const curriculumFixtureTextbooks: CurriculumTextbookRecord[] = [
   {
@@ -102,3 +111,197 @@ export const curriculumFixtureNodes: CurriculumNodeRecord[] = [
     pageNumber: 40,
   },
 ];
+
+const periodicChangeSource = {
+  id: "curriculum-semantic-source:periodic-change",
+  title: "测试课程依据：周期变化",
+  url: "https://example.com/curriculum/periodic-change",
+  kind: "public" as const,
+  authority: "LessonUp 测试数据",
+  locator: "测试章节 1",
+};
+
+const trigonometricFunctionSource = {
+  id: "curriculum-semantic-source:trigonometric-function",
+  title: "测试课程依据：三角函数",
+  url: "https://example.com/curriculum/trigonometric-function",
+  kind: "public" as const,
+  authority: "LessonUp 测试数据",
+  locator: "测试章节 2",
+};
+
+export const curriculumFixtureSemanticEntities: CurriculumSemanticEntityRecord[] = [
+  {
+    id: "00000000-0000-4000-8000-000000000401",
+    externalId: "TEST-KP-001",
+    kind: "knowledge_point",
+    canonicalName: "周期变化",
+    definition: "识别现象随时间重复出现的变化规律。",
+    payload: {},
+    confidence: 1,
+    sources: [periodicChangeSource],
+  },
+  {
+    id: "00000000-0000-4000-8000-000000000402",
+    externalId: "TEST-KP-002",
+    kind: "knowledge_point",
+    canonicalName: "三角函数",
+    definition: "使用三角函数描述具有周期性的数量关系。",
+    payload: {},
+    confidence: 1,
+    sources: [trigonometricFunctionSource],
+  },
+];
+
+const semanticRelease = {
+  id: "00000000-0000-4000-8000-000000000101",
+  scopeKey: "test:高中:数学:北师大版:必修第二册",
+  catalogGenerationId: "test-generation",
+  subject: "数学",
+  stage: "高中",
+  edition: "北师大版",
+  grade: "高中年级",
+  volume: "必修 第二册",
+  schemaVersion: 1,
+  publishedAt: "2026-08-01T00:00:00.000Z",
+};
+
+export const curriculumFixtureNodeSemantics: Array<
+  CurriculumNodeSemanticsRecord & { textbookId: string; nodeId: string }
+> = [
+  {
+    textbookId: "textbook-math-bnu",
+    nodeId: "ch1-1",
+    release: semanticRelease,
+    mappings: [{
+      id: "00000000-0000-4000-8000-000000000201",
+      instructionalRole: "introduces",
+      expectedDepth: 1,
+      priority: 1,
+      confidence: 1,
+      rationale: "为后续使用函数刻画周期现象建立直观基础。",
+      entity: curriculumFixtureSemanticEntities[0]!,
+      sources: [periodicChangeSource],
+    }],
+  },
+  {
+    textbookId: "textbook-math-bnu",
+    nodeId: "ch1",
+    release: semanticRelease,
+    mappings: [{
+      id: "00000000-0000-4000-8000-000000000202",
+      instructionalRole: "develops",
+      expectedDepth: 2,
+      priority: 1,
+      confidence: 1,
+      rationale: "从周期变化的直观认识发展到三角函数表达。",
+      entity: curriculumFixtureSemanticEntities[1]!,
+      sources: [trigonometricFunctionSource],
+    }],
+  },
+];
+
+export const curriculumFixtureSemanticPaths: CurriculumSemanticPathStep[] = [{
+  relationId: "00000000-0000-4000-8000-000000000301",
+  relationType: "prerequisite",
+  depth: 1,
+  strength: 1,
+  confidence: 1,
+  rationale: "先识别周期变化，再学习用三角函数表达这种变化。",
+  fromEntity: curriculumFixtureSemanticEntities[0]!,
+  toEntity: curriculumFixtureSemanticEntities[1]!,
+  reachedEntity: curriculumFixtureSemanticEntities[1]!,
+  locations: [{
+    textbook: curriculumFixtureTextbooks[1]!,
+    node: curriculumFixtureNodes.find((node) => node.nodeId === "ch1")!,
+    instructionalRole: "develops",
+    expectedDepth: 2,
+  }],
+  sources: [periodicChangeSource, trigonometricFunctionSource],
+}];
+
+export const curriculumFixtureNodeKnowledge: Array<
+  CurriculumNodeKnowledgeRecord & { textbookId: string; nodeId: string }
+> = [
+  {
+    textbookId: "textbook-math-bnu",
+    nodeId: "ch1-1",
+    release: semanticRelease,
+    points: [{
+      mappingId: "00000000-0000-4000-8000-000000000501",
+      sequenceNo: 1,
+      printedPages: "3—7",
+      recommendedPeriod: 1,
+      mappingPayload: {},
+      point: curriculumFixtureSemanticEntities[0]!,
+    }],
+    periodRecommendations: [{
+      id: "00000000-0000-4000-8000-000000000601",
+      periodNo: 1,
+      title: "第1课时",
+      mappingType: "测试建议",
+      isOfficial: false,
+      note: "根据学情调整。",
+      pointIds: [curriculumFixtureSemanticEntities[0]!.id],
+    }],
+  },
+  {
+    textbookId: "textbook-math-bnu",
+    nodeId: "ch1",
+    release: semanticRelease,
+    points: [{
+      mappingId: "00000000-0000-4000-8000-000000000502",
+      sequenceNo: 2,
+      printedPages: "2—39",
+      recommendedPeriod: 2,
+      mappingPayload: {},
+      point: curriculumFixtureSemanticEntities[1]!,
+    }],
+    periodRecommendations: [],
+  },
+];
+
+export const curriculumFixtureKnowledgeSearch: CurriculumKnowledgeSearchResult[] = [
+  {
+    point: curriculumFixtureSemanticEntities[0]!,
+    score: 1,
+    retrievalMethod: "lexical",
+    occurrences: [{
+      mappingId: "00000000-0000-4000-8000-000000000501",
+      nodeId: "ch1-1",
+      nodeTitle: "1 周期变化",
+      pageNumber: 3,
+      sequenceNo: 1,
+      printedPages: "3—7",
+      recommendedPeriod: 1,
+    }],
+  },
+  {
+    point: curriculumFixtureSemanticEntities[1]!,
+    score: 0.5,
+    retrievalMethod: "lexical",
+    occurrences: [{
+      mappingId: "00000000-0000-4000-8000-000000000502",
+      nodeId: "ch1",
+      nodeTitle: "第一章 三角函数",
+      pageNumber: 2,
+      sequenceNo: 2,
+      printedPages: "2—39",
+      recommendedPeriod: 2,
+    }],
+  },
+];
+
+export const curriculumFixtureKnowledgeContinuity: CurriculumKnowledgeContinuityRecord = {
+  status: "available",
+  currentSequenceNo: 2,
+  target: curriculumFixtureSemanticEntities[1]!,
+  candidates: [{
+    ...curriculumFixtureKnowledgeSearch[0]!,
+    score: 0.72,
+    occurrences: curriculumFixtureKnowledgeSearch[0]!.occurrences.map((occurrence) => ({
+      ...occurrence,
+      position: "before" as const,
+    })),
+  }],
+};

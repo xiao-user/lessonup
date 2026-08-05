@@ -92,18 +92,24 @@ export function materializeDocumentPatchProposal(args: {
   documentVersion: number;
   plan: LessonPlan;
 }): DocumentPatch {
-  const operations = args.proposal.operations.map((operation) => {
+  const operations = args.proposal.operations.flatMap((operation) => {
     const source = args.plan[operation.field];
+    const expectedText = operation.expectedText ?? source;
+    // A complete lesson rewrite often repeats stable metadata (unit, period,
+    // topic) while changing the instructional fields. Those harmless no-op
+    // fields must not invalidate every useful operation in the same proposal.
+    // The resulting approval still contains only real document changes.
+    if (operation.replacement === expectedText) return [];
     let start = 0;
-    if (operation.expectedText) {
-      start = source.indexOf(operation.expectedText);
+    if (expectedText) {
+      start = source.indexOf(expectedText);
       if (start < 0) {
         throw new DocumentPatchError(
           "text_mismatch",
           `${operation.field} 中找不到修改所依据的原文`,
         );
       }
-      if (source.indexOf(operation.expectedText, start + 1) >= 0) {
+      if (source.indexOf(expectedText, start + 1) >= 0) {
         throw new DocumentPatchError(
           "invalid_patch",
           `${operation.field} 中的修改原文不唯一`,
@@ -115,18 +121,21 @@ export function materializeDocumentPatchProposal(args: {
         `${operation.field} 不是空栏目，不能使用无锚点插入`,
       );
     }
-    const end = start + operation.expectedText.length;
-    return {
+    const end = start + expectedText.length;
+    return [{
       op: "replace_text" as const,
       field: operation.field,
       start,
       end,
-      expectedText: operation.expectedText,
+      expectedText,
       replacement: operation.replacement,
       contextBefore: source.slice(Math.max(0, start - REBASE_CONTEXT_LENGTH), start),
       contextAfter: source.slice(end, end + REBASE_CONTEXT_LENGTH),
-    };
+    }];
   });
+  if (!operations.length) {
+    throw new DocumentPatchError("invalid_patch", "修改未产生任何实际变化");
+  }
   return validateDocumentPatch({
     fileId: args.fileId,
     baseDocumentVersion: args.documentVersion,

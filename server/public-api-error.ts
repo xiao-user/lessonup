@@ -1,25 +1,39 @@
 import { ZodError } from "zod";
+import { DesignBasisProjectionError } from "./design-basis-projection.js";
 
 const notFound = new Set([
   "notebook_not_found",
   "lesson_file_not_found",
+  "semester_framework_not_found",
+  "semester_unit_not_found",
+  "lesson_blueprint_not_found",
   "thread_not_found",
   "parent_branch_not_found",
   "message_not_found",
   "run_not_found",
   "approval_not_found",
   "knowledge_source_not_found",
+  "curriculum_node_not_found",
+  "curriculum_semantic_entity_not_found",
 ]);
 
 const conflicts = new Set([
   "stale_document",
+  "stale_design_basis",
+  "stale_resource",
   "text_mismatch",
   "active_run_exists",
   "active_run_not_found",
   "approval_already_resolved",
   "approval_not_approvable",
+  "curriculum_catalog_snapshot_unavailable",
+  "idempotency_conflict",
   "knowledge_source_not_processing",
   "knowledge_source_not_retryable",
+  "duplicate_lesson_blueprint_id",
+  "duplicate_lesson_blueprint_position",
+  "duplicate_lesson_blueprint_identity",
+  "lesson_blueprint_lesson_exists",
 ]);
 
 const forbidden = new Set([
@@ -27,6 +41,7 @@ const forbidden = new Set([
   "worker_scope_denied",
   "thread_scope_invalid",
   "lesson_scope_invalid",
+  "semester_framework_scope_invalid",
   "notebook_scope_invalid",
   "fork_message_scope_invalid",
 ]);
@@ -48,11 +63,20 @@ const badRequest = new Set([
   "curriculum_edition_mismatch",
   "curriculum_unit_requires_textbook",
   "curriculum_unit_not_in_textbook",
+  "curriculum_node_outside_semester_unit",
+  "invalid_blueprint_difficulties",
+  "invalid_design_basis_projection",
 ]);
 
 export function publicApiError(error: unknown) {
   if (error instanceof ZodError) {
     return { code: "invalid_request", status: 400 as const };
+  }
+  if (error instanceof DesignBasisProjectionError) {
+    return {
+      code: error.code,
+      status: error.code === "stale_design_basis" ? 409 as const : 400 as const,
+    };
   }
   const message = error instanceof Error ? error.message : "";
   const code = message.split(":")[0];

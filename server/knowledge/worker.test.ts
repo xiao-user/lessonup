@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chunkPlainText, parseKnowledgeBytes } from "./worker.js";
+import { chunkPlainText, parseKnowledgeBytes, withAbortTimeout } from "./worker.js";
 
 describe("knowledge chunking", () => {
   it("keeps short source text in one normalized chunk", () => {
@@ -33,5 +33,16 @@ describe("knowledge chunking", () => {
 
     expect(parsed.chunks.map((chunk) => chunk.passage).join("\n"))
       .toContain("验收代号：LUP-FIRST-TURN-0730。");
+  });
+
+  it("actively aborts parsing work when its deadline expires", async () => {
+    let observedAbort = false;
+    await expect(withAbortTimeout((signal) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => {
+        observedAbort = true;
+        reject(new DOMException("aborted", "AbortError"));
+      }, { once: true });
+    }), 5)).rejects.toThrow("knowledge_parse_timeout");
+    expect(observedAbort).toBe(true);
   });
 });

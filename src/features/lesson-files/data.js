@@ -1,6 +1,8 @@
 export const lessonPlanSections = [
   { id: "basics", label: "基本信息", tone: "teal" },
   { id: "objectives", label: "教学目标", tone: "olive" },
+  { id: "knowledgePoints", label: "重点知识", tone: "highlight" },
+  { id: "continuity", label: "前后知识关联", tone: "teal" },
   { id: "focus", label: "重点难点", tone: "sand" },
   { id: "preparation", label: "教学准备", tone: "rose" },
   { id: "process", label: "教学过程", tone: "teal" },
@@ -13,6 +15,8 @@ export const lessonPlanSections = [
 export const assistantSuggestions = {
   basics: ["梳理课时信息", "补充课程标准依据", "检查课题表述"],
   objectives: ["检查目标是否可评价", "补充核心素养目标", "改写为学生视角"],
+  knowledgePoints: ["核对本课重点知识", "区分复习与新授", "检查后续铺垫"],
+  continuity: ["判断需要复习的旧知", "明确为后续课程做什么铺垫", "把衔接落实到课堂活动"],
   focus: ["识别学生常见误区", "拆分重点与难点", "给出突破难点的方法"],
   preparation: ["生成材料清单", "补充数字化资源", "检查课堂准备遗漏"],
   process: ["设计课堂提问链", "补充学生活动", "优化各环节时间分配"],
@@ -24,17 +28,19 @@ export const assistantSuggestions = {
 
 export function createLessonPlanDraft(notebook, file, options = {}) {
   return {
-    unit: options.unitTitle?.trim() || `${notebook.subject}课程单元`,
-    period: "第 1 课时",
-    totalPeriods: "2 课时",
+    unit: options.unitTitle?.trim() || "",
+    period: options.period?.trim() || "第 1 课时",
+    totalPeriods: options.totalPeriods?.trim() || "",
     topic: options.lessonTitle?.trim() || file.title,
-    objectives: "1. 理解本课核心概念，并能够用自己的语言进行解释。\n2. 在观察、比较与讨论中形成解决问题的方法。\n3. 能够将所学内容迁移到新的学习情境中。",
-    focus: "教学重点：理解核心概念之间的关系，并能够准确表达。\n教学难点：从具体情境中抽象方法，并完成迁移应用。",
-    preparation: "教师：课件、示例材料与课堂任务单。\n学生：预习教材，准备学习用品并记录已有问题。",
-    process: "一、情境导入（5 分钟）\n从学生熟悉的现象切入，提出本课核心问题。\n\n二、探究新知（20 分钟）\n学生观察材料、独立思考并在小组内交流；教师通过递进问题帮助学生建立概念联系。\n\n三、巩固应用（12 分钟）\n完成基础任务与迁移任务，结合典型错误进行即时反馈。\n\n四、课堂小结（3 分钟）\n学生回顾学习路径，归纳本课的关键方法。",
-    assessment: "通过课堂表达、任务完成情况和迁移练习观察学习目标的达成度；针对不同表现给予即时反馈。",
-    homework: "基础任务：完成教材对应练习。\n拓展任务：选择一个真实情境，说明本课方法如何应用其中。",
-    board: `${file.title}\n核心概念 → 关键关系 → 解决方法 → 迁移应用`,
-    reflection: "课后记录目标达成情况、学生生成的问题，以及下一课时需要调整的教学环节。",
+    objectives: options.objectives?.trim() || "",
+    knowledgePoints: options.knowledgePoints?.trim() || "",
+    continuity: options.continuity?.trim() || "",
+    focus: options.focus?.trim() || "",
+    preparation: options.preparation?.trim() || "",
+    process: options.mainActivity?.trim() || "",
+    assessment: options.assessmentEvidence?.trim() || "",
+    homework: options.homework?.trim() || "",
+    board: options.board?.trim() || "",
+    reflection: options.reflection?.trim() || "",
   };
 }

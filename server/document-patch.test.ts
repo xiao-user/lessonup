@@ -11,7 +11,7 @@ import { documentPatchToolSchema, type LessonPlan } from "./domain.js";
 
 const plan: LessonPlan = {
   unit: "第一单元", period: "1", totalPeriods: "2", topic: "轴对称",
-  objectives: "理解轴对称。能够判断轴对称图形。", focus: "重点", preparation: "直尺",
+  objectives: "理解轴对称。能够判断轴对称图形。", knowledgePoints: "轴对称的概念与判定", continuity: "", focus: "重点", preparation: "直尺",
   process: "观察。讨论。练习。", assessment: "口头说明", homework: "练习一",
   board: "轴对称", reflection: "待填写",
 };
@@ -45,6 +45,51 @@ describe("document patch", () => {
         replacement: "解释",
       }],
     });
+  });
+
+  it("binds a whole-field rewrite to the canonical current field", () => {
+    const proposal = documentPatchToolSchema.parse({
+      summary: "重写教学过程",
+      operations: [{
+        field: "process",
+        expectedText: null,
+        replacement: "教师出示图形，学生独立分类并说明判断依据。",
+      }],
+    });
+    const patch = materializeDocumentPatchProposal({
+      proposal,
+      fileId: "m1",
+      documentVersion: 7,
+      plan,
+    });
+
+    expect(patch.operations[0]).toMatchObject({
+      field: "process",
+      start: 0,
+      end: plan.process.length,
+      expectedText: plan.process,
+    });
+    expect(applyDocumentPatch(plan, patch).process)
+      .toBe("教师出示图形，学生独立分类并说明判断依据。");
+  });
+
+  it("drops unchanged metadata without blocking the useful parts of a full rewrite", () => {
+    const patch = materializeDocumentPatchProposal({
+      proposal: documentPatchToolSchema.parse({
+        summary: "完整编写教案",
+        operations: [
+          { field: "unit", expectedText: null, replacement: plan.unit },
+          { field: "period", expectedText: null, replacement: plan.period },
+          { field: "process", expectedText: null, replacement: "学生比较两组图形并说明判定依据。" },
+        ],
+      }),
+      fileId: "m1",
+      documentVersion: 7,
+      plan,
+    });
+
+    expect(patch.operations).toHaveLength(1);
+    expect(patch.operations[0]).toMatchObject({ field: "process" });
   });
 
   it("rejects semantic proposals whose source text is not unique", () => {

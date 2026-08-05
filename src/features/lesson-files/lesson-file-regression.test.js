@@ -20,7 +20,7 @@ test("content-driven rows keep the default lesson on one A4 page", () => {
 
 test("overflowing content creates a continuation page", () => {
   const plan = createLessonPlanDraft({ subject: "数学" }, { title: "轴对称" });
-  const pages = paginateLessonPlan({ ...plan, process: `${plan.process}\n`.repeat(4) });
+  const pages = paginateLessonPlan({ ...plan, process: "观察、比较、解释并形成证据记录。\n".repeat(100) });
   assert.ok(pages.length > 1);
   assert.ok(pages.flat().some((entry) => entry.continued));
 });
@@ -139,7 +139,7 @@ test("the final section is active when the document reaches its scroll boundary"
 
 test("lesson rows and editable cells do not impose section heights", async () => {
   const styles = await readFile(new URL("../../styles.css", import.meta.url), "utf8");
-  assert.doesNotMatch(styles, /\.lesson-row-(?:basics|topic|objectives|focus|preparation|process|assessment|homework|board|reflection)\s*\{[^}]*height:/s);
+  assert.doesNotMatch(styles, /\.lesson-row-(?:basics|topic|objectives|knowledgePoints|continuity|focus|preparation|process|assessment|homework|board|reflection)\s*\{[^}]*height:/s);
   assert.match(styles, /\.lesson-editable\s*\{[^}]*height:\s*auto;[^}]*min-height:\s*0;/s);
   assert.match(styles, /\.lesson-sheet-content\s*\{[^}]*visibility:\s*visible;[^}]*opacity:\s*1;/s);
 });

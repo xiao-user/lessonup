@@ -75,6 +75,10 @@ export class KnowledgeUploadService {
     return Boolean(this.client && config.BGE_M3_BASE_URL);
   }
 
+  get storageConfigured() {
+    return Boolean(this.client);
+  }
+
   async enqueue(ownerId: string, input: {
     file: File;
     notebookId?: string;
@@ -88,6 +92,8 @@ export class KnowledgeUploadService {
     if (input.file.size > maxUploadBytes) throw new Error("knowledge_file_too_large");
     if (!await hasMeaningfulKnowledgeContent(input.file, mediaType)) throw new Error("knowledge_source_empty");
     if (!await hasExpectedSignature(input.file, mediaType)) throw new Error("unsupported_knowledge_file");
+
+    await this.deleteExpiredDrafts(ownerId);
 
     const existing = await this.client.from("knowledge_sources").select("*")
       .eq("owner_id", ownerId)
@@ -134,14 +140,18 @@ export class KnowledgeUploadService {
     return source.data;
   }
 
-  async list(ownerId: string, scope: { notebookId?: string; lessonFileId?: string }) {
+  async list(ownerId: string, scope: {
+    notebookId?: string;
+    lessonFileId?: string;
+    includeAttached?: boolean;
+  }) {
     if (!this.client) throw new Error("knowledge_storage_not_configured");
     let query = this.client.from("knowledge_sources")
       .select("id,title,scope,status,media_type,notebook_id,lesson_file_id,index_version,metadata,attempt_count,max_attempts,last_error,created_at,updated_at")
       .eq("owner_id", ownerId)
       .neq("status", "deleted")
-      .is("attached_message_id", null)
       .order("updated_at", { ascending: false });
+    if (!scope.includeAttached) query = query.is("attached_message_id", null);
     if (scope.lessonFileId) query = query.eq("lesson_file_id", scope.lessonFileId);
     else if (scope.notebookId) query = query.eq("notebook_id", scope.notebookId);
     const result = await query;
@@ -202,11 +212,49 @@ export class KnowledgeUploadService {
     if (deleted.error) throw new Error(deleted.error.message);
   }
 
+  async deleteForLessonFile(ownerId: string, lessonFileId: string) {
+    if (!this.client) return;
+    const sources = await this.client.from("knowledge_sources")
+      .select("id")
+      .eq("owner_id", ownerId)
+      .eq("lesson_file_id", lessonFileId);
+    if (sources.error) throw new Error(sources.error.message);
+    for (const source of sources.data ?? []) {
+      await this.delete(ownerId, source.id);
+    }
+  }
+
+  async deleteForNotebook(ownerId: string, notebookId: string) {
+    if (!this.client) return;
+    const sources = await this.client.from("knowledge_sources")
+      .select("id")
+      .eq("owner_id", ownerId)
+      .eq("notebook_id", notebookId);
+    if (sources.error) throw new Error(sources.error.message);
+    for (const source of sources.data ?? []) {
+      await this.delete(ownerId, source.id);
+    }
+  }
+
   private async audit(ownerId: string, sourceId: string, action: string, details: unknown) {
     if (!this.client) return;
     const result = await this.client.from("knowledge_audit_events").insert({
       owner_id: ownerId, source_id: sourceId, action, details,
     });
     if (result.error) throw new Error(result.error.message);
+  }
+
+  private async deleteExpiredDrafts(ownerId: string) {
+    if (!this.client) return;
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString();
+    const stale = await this.client.from("knowledge_sources")
+      .select("id")
+      .eq("owner_id", ownerId)
+      .is("attached_message_id", null)
+      .neq("status", "deleted")
+      .lt("updated_at", cutoff)
+      .limit(32);
+    if (stale.error) throw new Error(stale.error.message);
+    await Promise.allSettled((stale.data ?? []).map((source) => this.delete(ownerId, source.id)));
   }
 }

@@ -27,4 +27,17 @@ describe("assistant source presentation", () => {
       { role: "assistant", sources: [] },
     ])).toEqual([]);
   });
+
+  it("keeps curriculum provenance but removes inaccessible object links", () => {
+    expect(dedupeAgentSources([{
+      id: "curriculum-1",
+      title: "语文七年级上册：济南的冬天",
+      url: "https://r1-ndr.ykt.cbern.com.cn/assets/textbook.pdf",
+      kind: "public",
+    }])).toEqual([{
+      id: "curriculum-1",
+      title: "语文七年级上册：济南的冬天",
+      kind: "public",
+    }]);
+  });
 });

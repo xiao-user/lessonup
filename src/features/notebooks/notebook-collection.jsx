@@ -1,7 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, FilePlus2, FolderPlus, LoaderCircle, LogOut, Search } from "lucide-react";
+import { ArrowLeft, FilePlus2, FolderPlus, LoaderCircle, LogOut, Milestone, Search, Trash2, UserRound } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Empty,
   EmptyContent,
@@ -20,8 +28,12 @@ export function NotebookCollection({
   inert,
   onSelect,
   onOpenFile,
+  onDeleteFile,
+  onDeleteNotebook,
   onCreateNotebook,
   onCreateFile,
+  onOpenFramework,
+  onOpenProfile,
   onSignOut,
 }) {
   const carouselRef = useRef(null);
@@ -59,18 +71,32 @@ export function NotebookCollection({
           </Button>
         </div>
         <div className="create-actions">
-          <Button
-            className="collection-context-action collection-signout-action"
-            variant="ghost"
-            size="icon"
-            type="button"
-            tabIndex={focusedNotebook ? -1 : 0}
-            aria-hidden={focusedNotebook ? "true" : undefined}
-            onClick={onSignOut}
-            aria-label="退出登录"
-          >
-            <LogOut />
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  className="collection-context-action collection-account-action"
+                  variant="ghost"
+                  size="icon"
+                  type="button"
+                  tabIndex={focusedNotebook ? -1 : 0}
+                  aria-hidden={focusedNotebook ? "true" : undefined}
+                  aria-label="个人信息"
+                />
+              }
+            >
+              <UserRound />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" side="bottom" sideOffset={8}>
+              <DropdownMenuGroup>
+                <DropdownMenuItem onClick={onOpenProfile}><UserRound />个人信息</DropdownMenuItem>
+              </DropdownMenuGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuGroup>
+                <DropdownMenuItem variant="destructive" onClick={onSignOut}><LogOut />退出</DropdownMenuItem>
+              </DropdownMenuGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Button
             className="collection-context-action"
             variant="outline"
@@ -81,6 +107,25 @@ export function NotebookCollection({
           >
             <FolderPlus data-icon="inline-start" /> 新增备课本
           </Button>
+          {focusedNotebook && (
+            <Button
+              variant="outline"
+              type="button"
+              onClick={() => onOpenFramework(focusedNotebook.id)}
+            >
+              <Milestone data-icon="inline-start" /> 学期框架
+            </Button>
+          )}
+          {focusedNotebook && (
+            <Button
+              variant="outline"
+              type="button"
+              aria-label={`删除备课本${focusedNotebook.title}`}
+              onClick={() => onDeleteNotebook(focusedNotebook)}
+            >
+              <Trash2 data-icon="inline-start" /> 删除备课本
+            </Button>
+          )}
           <Button
             type="button"
             onClick={() => onCreateFile(focusedNotebook?.id ?? activeNotebookId ?? notebooks[0]?.id)}
@@ -98,6 +143,7 @@ export function NotebookCollection({
           onSelect={onSelect}
           onActiveChange={setActiveNotebookId}
           onOpenFile={onOpenFile}
+          onDeleteFile={onDeleteFile}
           ref={carouselRef}
         />
       ) : (

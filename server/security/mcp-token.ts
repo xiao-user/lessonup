@@ -3,22 +3,34 @@ import { jwtVerify, SignJWT } from "jose";
 import { z } from "zod";
 import { config } from "../config.js";
 
-export type McpScope = {
+type McpScopeBase = {
   userId: string;
   runId: string;
   notebookId: string;
-  lessonFileId: string;
   allowedKnowledgeScopes: string[];
   attachmentSourceIds: string[];
 };
+
+export type McpScope = McpScopeBase & (
+  | { resourceType?: "lesson_file"; lessonFileId: string; semesterFrameworkId?: never }
+  | { resourceType: "semester_framework"; lessonFileId?: never; semesterFrameworkId: string }
+);
 
 const mcpScopeSchema = z.object({
   userId: z.uuid(),
   runId: z.uuid(),
   notebookId: z.string().min(1),
-  lessonFileId: z.string().min(1),
+  resourceType: z.enum(["lesson_file", "semester_framework"]).optional(),
+  lessonFileId: z.string().min(1).optional(),
+  semesterFrameworkId: z.uuid().optional(),
   allowedKnowledgeScopes: z.array(z.string().min(1)).max(16),
   attachmentSourceIds: z.array(z.uuid()).max(8),
+}).superRefine((value, context) => {
+  const resourceType = value.resourceType ?? "lesson_file";
+  const valid = resourceType === "lesson_file"
+    ? Boolean(value.lessonFileId) && !value.semesterFrameworkId
+    : Boolean(value.semesterFrameworkId) && !value.lessonFileId;
+  if (!valid) context.addIssue({ code: "custom", message: "mcp_resource_scope_invalid" });
 });
 
 const secret = () => new TextEncoder().encode(
@@ -42,5 +54,5 @@ export async function verifyMcpScopeToken(token: string): Promise<McpScope> {
     audience: "lessonup-mcp",
     issuer: "lessonup-api",
   });
-  return mcpScopeSchema.parse(payload);
+  return mcpScopeSchema.parse(payload) as McpScope;
 }

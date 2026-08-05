@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { MemoryLessonRepository } from "./memory-repository.js";
 import type { LessonPlan } from "../domain.js";
+import { materializeLessonDesignChange } from "../lesson-design-change.js";
 
 const document: LessonPlan = {
   unit: "单元", period: "1", totalPeriods: "1", topic: "课题", objectives: "目标",
+  knowledgePoints: "知识点",
+  continuity: "",
   focus: "重点", preparation: "准备", process: "过程", assessment: "评价",
   homework: "作业", board: "板书", reflection: "反思",
 };
@@ -14,10 +17,166 @@ const importFor = (repository: MemoryLessonRepository, ownerId: string) => repos
 }]);
 
 describe("memory repository isolation", () => {
+  it("returns a bounded preview derived from canonical lesson content", async () => {
+    const repository = new MemoryLessonRepository();
+    await importFor(repository, "user-a");
+    const [notebook] = await repository.listNotebooks("user-a");
+    expect(notebook.files[0]?.preview).toEqual(["目标", "知识点", "重点", "过程"]);
+    expect(notebook.files[0]).not.toHaveProperty("document");
+    expect(notebook.files[0]).not.toHaveProperty("contextProfile");
+  });
+
   it("never returns another owner's file even when client ids collide", async () => {
     const repository = new MemoryLessonRepository();
     await importFor(repository, "user-a");
     expect(await repository.getLessonFile("user-b", "f1")).toBeNull();
+  });
+
+  it("creates an isolated design-basis aggregate for every lesson file", async () => {
+    const repository = new MemoryLessonRepository();
+    await importFor(repository, "user-a");
+    const aggregate = await repository.getLessonDesignBasis("user-a", "f1");
+    expect(aggregate).toMatchObject({
+      basis: {
+        ownerId: "user-a",
+        notebookId: "n1",
+        lessonFileId: "f1",
+        version: 0,
+      },
+      entries: [],
+    });
+    expect(await repository.getLessonDesignBasis("user-b", "f1")).toBeNull();
+  });
+
+  it("applies a complete lesson-design change atomically", async () => {
+    const repository = new MemoryLessonRepository();
+    await importFor(repository, "user-a");
+    const file = await repository.getLessonFile("user-a", "f1");
+    const basis = await repository.getLessonDesignBasis("user-a", "f1");
+    if (!file || !basis) throw new Error("fixture_missing");
+    const patch = materializeLessonDesignChange({
+      file,
+      aggregate: basis,
+      proposal: {
+        summary: "记录困难并完善评价",
+        designBasisOperations: [{
+          op: "create_design_basis_entry",
+          referenceKey: "explain-reason",
+          kind: "student_difficulty",
+          semanticEntityId: null,
+          relatedSemanticEntityId: null,
+          relatedCurriculumNodeId: null,
+          statement: "学生可能只写结论。",
+          rationale: "需要说明理由。",
+          evidenceSourceIds: [],
+          decision: "accepted",
+        }],
+        documentOperations: [{
+          field: "assessment",
+          replacement: "评价：说明判断理由。",
+          basisEntryIds: [],
+          createdBasisEntryRefs: ["explain-reason"],
+          usesLearnerContext: false,
+        }],
+      },
+    });
+    await repository.saveApproval({
+      id: "approval-change",
+      ownerId: "user-a",
+      runId: "run-change",
+      threadId: "thread-change",
+      branchId: "branch-change",
+      state: "pending",
+      patch,
+      encryptedRunState: "state",
+      agentDefinitionVersion: "test",
+      resourceType: "lesson_file",
+      patchKind: "document",
+      lessonFileId: "f1",
+      baseResourceVersion: 0,
+      documentVersion: 0,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      createdAt: "2026-08-02T00:00:00.000Z",
+    });
+    await repository.applyApprovedPatch({
+      ownerId: "user-a",
+      approvalId: "approval-change",
+      idempotencyKey: "approval:change",
+    });
+    expect((await repository.getLessonFile("user-a", "f1"))?.document.assessment)
+      .toBe("评价：说明判断理由。");
+    expect(await repository.getLessonDesignBasis("user-a", "f1")).toMatchObject({
+      basis: { version: 1 },
+      entries: [{ statement: "学生可能只写结论。", teacherConfirmed: true }],
+    });
+  });
+
+  it("does not save design decisions when the A4 target conflicts", async () => {
+    const repository = new MemoryLessonRepository();
+    await importFor(repository, "user-a");
+    const file = await repository.getLessonFile("user-a", "f1");
+    const basis = await repository.getLessonDesignBasis("user-a", "f1");
+    if (!file || !basis) throw new Error("fixture_missing");
+    const patch = materializeLessonDesignChange({
+      file,
+      aggregate: basis,
+      proposal: {
+        summary: "冲突调整",
+        designBasisOperations: [{
+          op: "create_design_basis_entry",
+          referenceKey: "conflict",
+          kind: "student_difficulty",
+          semanticEntityId: null,
+          relatedSemanticEntityId: null,
+          relatedCurriculumNodeId: null,
+          statement: "学生可能只写结论。",
+          rationale: "",
+          evidenceSourceIds: [],
+          decision: "accepted",
+        }],
+        documentOperations: [{
+          field: "assessment",
+          replacement: "新的评价。",
+          basisEntryIds: [],
+          createdBasisEntryRefs: ["conflict"],
+          usesLearnerContext: false,
+        }],
+      },
+    });
+    await repository.saveApproval({
+      id: "approval-conflict",
+      ownerId: "user-a",
+      runId: "run-conflict",
+      threadId: "thread-conflict",
+      branchId: "branch-conflict",
+      state: "pending",
+      patch,
+      encryptedRunState: "state",
+      agentDefinitionVersion: "test",
+      resourceType: "lesson_file",
+      patchKind: "document",
+      lessonFileId: "f1",
+      baseResourceVersion: 0,
+      documentVersion: 0,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      createdAt: "2026-08-02T00:00:00.000Z",
+    });
+    await repository.saveLessonDocument({
+      ownerId: "user-a",
+      fileId: "f1",
+      baseVersion: 0,
+      document: { ...document, assessment: "教师已经调整测评内容。" },
+      pageCount: 1,
+      source: "manual",
+      idempotencyKey: "manual-conflict",
+    });
+    await expect(repository.applyApprovedPatch({
+      ownerId: "user-a",
+      approvalId: "approval-conflict",
+      idempotencyKey: "approval:conflict",
+    })).rejects.toThrow("目标内容已变化");
+    expect((await repository.getLessonDesignBasis("user-a", "f1"))?.basis.version).toBe(0);
+    expect((await repository.getLessonDesignBasis("user-a", "f1"))?.entries).toEqual([]);
   });
 
   it("keeps thread branches independent and preserves the original branch", async () => {
@@ -142,6 +301,33 @@ describe("memory repository isolation", () => {
       ownerId: "user-a", fileId: "f1", baseVersion: 0,
       document, pageCount: 1, source: "manual", idempotencyKey: "write-2",
     })).rejects.toThrow(/最新版本/);
+  });
+
+  it("replays aggregate creation after a lost response without duplicating records", async () => {
+    const repository = new MemoryLessonRepository();
+    await importFor(repository, "user-a");
+    const fileInput = {
+      notebookId: "n1",
+      title: "新增教案",
+      type: "新教案",
+      document,
+      contextProfile: { lessonDurationMinutes: 45 },
+      pageCount: 1,
+    };
+    const firstFile = await repository.createLessonFile("user-a", fileInput, "file-create-1");
+    const replayedFile = await repository.createLessonFile("user-a", fileInput, "file-create-1");
+    expect(replayedFile.id).toBe(firstFile.id);
+    await expect(repository.createLessonFile("user-a", {
+      ...fileInput,
+      title: "不同教案",
+    }, "file-create-1")).rejects.toThrow("idempotency_conflict");
+
+    const threadInput = { notebookId: "n1", lessonFileId: "f1", title: "检查教案" };
+    const firstThread = await repository.createThread("user-a", threadInput, "thread-create-1");
+    const replayedThread = await repository.createThread("user-a", threadInput, "thread-create-1");
+    expect(replayedThread).toEqual(firstThread);
+    expect(await repository.listThreads("user-a", "f1")).toHaveLength(1);
+    expect(await repository.listBranches("user-a", firstThread.thread.id)).toHaveLength(1);
   });
 
   it("rehydrates an ephemeral repository at the browser's confirmed document version", async () => {

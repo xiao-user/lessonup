@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Archive, Check, GitBranch, History, MoreHorizontal, Pencil, Plus, Settings2, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 
@@ -20,6 +20,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { branchDisplayLabel, presentAgentError } from "@/features/assistant/agent-run-control";
+import { presentConversationMessages } from "@/features/assistant/agent-turn-presentation";
 import { canSendAgentMessage } from "@/features/assistant/attachment-state";
 import { useAgentChat } from "@/features/assistant/use-agent-chat";
 import {
@@ -51,6 +52,9 @@ export function LessonAgentPanel({
   onCanonicalDocument,
   onBeforeRun,
   onNavigateToSection,
+  initialPrompt = null,
+  onInitialPromptConsumed,
+  onAgentPresentationChange,
 }) {
   const chat = useAgentChat({
     notebookId: notebook.id,
@@ -65,8 +69,11 @@ export function LessonAgentPanel({
   const starterSuggestions = activeThread?.starterSuggestions ?? [];
   const hasPendingThreads = chat.threads.some((thread) => thread.status === "awaiting_approval");
   const errorPresentation = chat.error ? presentAgentError(chat.error) : null;
-  const latestAssistantIndex = chat.messages.findLastIndex((message) => message.role === "assistant");
-  const latestAssistant = latestAssistantIndex >= 0 ? chat.messages[latestAssistantIndex] : null;
+  const presentedMessages = useMemo(() => (
+    presentConversationMessages(chat.messages, chat.approvals)
+  ), [chat.approvals, chat.messages]);
+  const latestAssistantIndex = presentedMessages.findLastIndex((message) => message.role === "assistant");
+  const latestAssistant = latestAssistantIndex >= 0 ? presentedMessages[latestAssistantIndex] : null;
   const latestTurnOwnsError = latestAssistant?.status === "failed"
     && (latestAssistant.error ?? "agent_run_failed") === chat.error;
   const hasContinuationFailureTurn = chat.messages.some((message) => (
@@ -85,6 +92,41 @@ export function LessonAgentPanel({
   const [contextLessonNodes, setContextLessonNodes] = useState([]);
   const [loadingContextCatalog, setLoadingContextCatalog] = useState(false);
   const attachmentInputRef = useRef(null);
+  const initialPromptSentRef = useRef(false);
+
+  useEffect(() => {
+    onAgentPresentationChange?.({
+      approval: chat.approval,
+      status: chat.status,
+      activities: chat.activities,
+      approve: () => chat.respondApproval(true),
+      reject: () => chat.respondApproval(false),
+    });
+  }, [chat.activities, chat.approval, chat.respondApproval, chat.status, onAgentPresentationChange]);
+
+  useEffect(() => () => onAgentPresentationChange?.(null), [onAgentPresentationChange]);
+
+  useEffect(() => {
+    if (
+      !initialPrompt
+      || initialPromptSentRef.current
+      || chat.status !== "ready"
+      || chat.messages.length > 0
+      || !chat.activeThreadId
+      || !chat.activeBranchId
+    ) return;
+    initialPromptSentRef.current = true;
+    onInitialPromptConsumed?.();
+    void chat.send(initialPrompt);
+  }, [
+    chat.activeBranchId,
+    chat.activeThreadId,
+    chat.messages.length,
+    chat.send,
+    chat.status,
+    initialPrompt,
+    onInitialPromptConsumed,
+  ]);
 
   useEffect(() => {
     if (!renaming) setThreadTitle(activeThread?.title ?? "");
@@ -305,7 +347,7 @@ export function LessonAgentPanel({
             />
           )}
 
-          {chat.messages.map((message, index) => {
+          {presentedMessages.map((message, index) => {
             const isLatestAssistant = message.role === "assistant" && index === latestAssistantIndex;
             const sources = message.sources?.length
               ? message.sources
@@ -317,20 +359,22 @@ export function LessonAgentPanel({
               || (!approval.assistantMessageId && isLatestAssistant)
             ));
             return message.role === "assistant" ? (
-              <Fragment key={message.id}>
                 <CraftAssistantTurn
+                  key={message.id}
                   message={message}
-                  activities={isLatestAssistant ? chat.activities : []}
+                  activities={message.activities ?? (isLatestAssistant ? chat.activities : [])}
                   status={isLatestAssistant ? chat.status : "ready"}
                   sources={sources}
                   onCopy={() => navigator.clipboard.writeText(message.content)}
-                  onBranch={message.status === "completed"
+                  onRetry={message.status === "failed" ? chat.retry : undefined}
+                  onBranch={["completed", "failed", "cancelled"].includes(message.status)
+                    && Boolean(message.content)
                     && chat.status !== "streaming"
                     && chat.status !== "awaiting_approval"
                     && chat.status !== "loading"
                     ? () => chat.branchFromMessage(message)
                     : undefined}
-                />
+                >
                 {linkedApprovals.map((approval) => (
                   <CraftApproval
                     approval={approval}
@@ -342,7 +386,7 @@ export function LessonAgentPanel({
                     key={approval.id}
                   />
                 ))}
-              </Fragment>
+                </CraftAssistantTurn>
             ) : (
               <CraftUserTurn
                 key={message.id}
@@ -357,7 +401,7 @@ export function LessonAgentPanel({
               {!latestTurnOwnsError ? (
                 <p className="lesson-agent-error" role="alert">{errorPresentation.message}</p>
               ) : null}
-              {chat.status !== "awaiting_approval" && chat.error !== "document_context_stale" && (
+              {!latestTurnOwnsError && chat.status !== "awaiting_approval" && chat.error !== "document_context_stale" && (
                 <Button size="sm" variant="outline" type="button" onClick={chat.retry}>{errorPresentation.retryLabel}</Button>
               )}
             </>
@@ -388,7 +432,13 @@ export function LessonAgentPanel({
       {chat.approval ? (
         <div className="lesson-approval-dock" role="status">
           <div>
-            <strong>{chat.approval.state === "continuation" ? "修改已确认" : "教案修改等待确认"}</strong>
+            <strong>{chat.approval.state === "continuation"
+              ? "修改已确认"
+              : chat.approval.patch.designBasisPatch
+                ? "完整备课调整等待确认"
+              : chat.approval.patch.projection
+                ? "设计依据投影等待确认"
+                : "教案修改等待确认"}</strong>
             <span>{chat.approval.patch.summary}</span>
           </div>
           {chat.approval.state === "continuation" ? (

@@ -17,6 +17,7 @@ import {
 } from "@/features/lesson-files/history";
 import { paginateLessonPlan } from "@/features/lesson-files/pagination";
 import { pickActiveLessonSection } from "@/features/lesson-files/scroll-state";
+import { applyClientDocumentPatch } from "@/features/assistant/document-patch";
 
 gsap.registerPlugin(useGSAP);
 
@@ -306,6 +307,7 @@ function EditableCell({
   end,
   syncVersion,
   onHistoryAction,
+  proposed = false,
 }) {
   const editorRef = useRef(null);
   const composingRef = useRef(false);
@@ -361,7 +363,7 @@ function EditableCell({
 
   return (
     <textarea
-      className="lesson-editable"
+      className={`lesson-editable ${proposed ? "is-agent-proposed" : ""}`}
       ref={editorRef}
       aria-label={label}
       aria-multiline={multiline}
@@ -406,7 +408,7 @@ function EditableCell({
   );
 }
 
-function BasicsRow({ plan, onChange, onFocus, syncVersion, onHistoryAction }) {
+function BasicsRow({ plan, onChange, onFocus, syncVersion, onHistoryAction, proposedFields }) {
   return (
     <tr
       id="lesson-section-basics"
@@ -423,6 +425,7 @@ function BasicsRow({ plan, onChange, onFocus, syncVersion, onHistoryAction }) {
           syncVersion={syncVersion}
           onHistoryAction={onHistoryAction}
           label="单元"
+          proposed={proposedFields?.has("unit")}
         />
       </td>
       <th scope="row">课时</th>
@@ -435,6 +438,7 @@ function BasicsRow({ plan, onChange, onFocus, syncVersion, onHistoryAction }) {
           syncVersion={syncVersion}
           onHistoryAction={onHistoryAction}
           label="课时"
+          proposed={proposedFields?.has("period")}
         />
       </td>
       <th scope="row">总课时</th>
@@ -447,13 +451,14 @@ function BasicsRow({ plan, onChange, onFocus, syncVersion, onHistoryAction }) {
           syncVersion={syncVersion}
           onHistoryAction={onHistoryAction}
           label="总课时"
+          proposed={proposedFields?.has("totalPeriods")}
         />
       </td>
     </tr>
   );
 }
 
-function SectionRow({ entry, onChange, onFocus, syncVersion, onHistoryAction }) {
+function SectionRow({ entry, onChange, onFocus, syncVersion, onHistoryAction, proposed }) {
   const sectionId = entry.sectionId;
   return (
     <tr
@@ -478,13 +483,14 @@ function SectionRow({ entry, onChange, onFocus, syncVersion, onHistoryAction }) 
           onHistoryAction={onHistoryAction}
           multiline
           label={`${entry.label}${entry.continued ? "续页" : ""}`}
+          proposed={proposed}
         />
       </td>
     </tr>
   );
 }
 
-export function LessonFileWorkspace({ notebook, file, sourceElement, originRect, closeSignal = 0, onSave, onAgentVersionCommitted, onClose }) {
+export function LessonFileWorkspace({ notebook, file, sourceElement, originRect, closeSignal = 0, onSave, onAgentVersionCommitted, onClose, initialAgentPrompt = null, onInitialAgentPromptConsumed }) {
   const rootRef = useRef(null);
   const scrollRef = useRef(null);
   const documentPagesRef = useRef(null);
@@ -502,6 +508,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
   const dirtyPlanRef = useRef(null);
   const pendingSaveSourceRef = useRef("manual");
   const pendingSaveDataRef = useRef(null);
+  const failedSaveDataRef = useRef(null);
   const pendingAgentCommitRef = useRef(null);
   const saveInFlightRef = useRef(Promise.resolve());
   const persistPendingSaveRef = useRef(() => Promise.resolve());
@@ -527,10 +534,32 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
   const documentVersionRef = useRef(file.documentVersion ?? 0);
   const [mobileRail, setMobileRail] = useState(null);
   const [pages, setPages] = useState(() => paginateLessonPlan(initialPlan));
+  const [agentPresentation, setAgentPresentation] = useState(null);
   onSaveRef.current = onSave;
   onAgentVersionCommittedRef.current = onAgentVersionCommitted;
   planRef.current = plan;
   documentVersionRef.current = documentVersion;
+
+  const approvalPreview = useMemo(() => {
+    const approval = agentPresentation?.approval;
+    if (
+      !approval
+      || !["pending", "responding"].includes(approval.state)
+      || !Array.isArray(approval.patch?.operations)
+    ) return null;
+    try {
+      return applyClientDocumentPatch(plan, approval.patch);
+    } catch {
+      return null;
+    }
+  }, [agentPresentation?.approval, plan]);
+  const renderedPlan = approvalPreview ?? plan;
+  const renderedPages = useMemo(() => (
+    approvalPreview ? paginateLessonPlan(approvalPreview) : pages
+  ), [approvalPreview, pages]);
+  const proposedFields = useMemo(() => new Set(
+    agentPresentation?.approval?.patch?.operations?.map((operation) => operation.field) ?? [],
+  ), [agentPresentation?.approval]);
 
   useLayoutEffect(() => {
     rootRef.current?.focus({ preventScroll: true });
@@ -544,33 +573,46 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
   );
 
   const persistPendingSave = useCallback(() => {
-    const pendingSave = pendingSaveDataRef.current;
-    if (!pendingSave) return saveInFlightRef.current;
-    pendingSaveDataRef.current = null;
-    dirtyPlanRef.current = null;
-
     const save = saveInFlightRef.current.catch(() => null).then(async () => {
-      if (pendingSave.source === "agent-local") {
-        setSaveStatus("已自动保存");
-        return null;
-      }
-      try {
-        const saved = await onSaveRef.current(
-          pendingSave.plan,
-          pendingSave.pageCount,
-          pendingSave.source,
-          documentVersionRef.current,
-        );
-        if (saved?.documentVersion !== undefined) {
-          documentVersionRef.current = saved.documentVersion;
-          setDocumentVersion(saved.documentVersion);
+      let lastSaved = null;
+      while (failedSaveDataRef.current || pendingSaveDataRef.current) {
+        const candidate = failedSaveDataRef.current ?? pendingSaveDataRef.current;
+        const pendingSave = candidate.idempotencyKey
+          ? candidate
+          : {
+              ...candidate,
+              baseDocumentVersion: documentVersionRef.current,
+              idempotencyKey: crypto.randomUUID(),
+            };
+        if (failedSaveDataRef.current === candidate) failedSaveDataRef.current = null;
+        if (pendingSaveDataRef.current === candidate) pendingSaveDataRef.current = null;
+        if (dirtyPlanRef.current === pendingSave.plan) dirtyPlanRef.current = null;
+
+        if (pendingSave.source === "agent-local") {
+          setSaveStatus("已自动保存");
+          continue;
         }
-        setSaveStatus("已自动保存");
-        return saved;
-      } catch (error) {
-        setSaveStatus("保存失败");
-        throw error;
+        try {
+          const saved = await onSaveRef.current(
+            pendingSave.plan,
+            pendingSave.pageCount,
+            pendingSave.source,
+            pendingSave.baseDocumentVersion,
+            pendingSave.idempotencyKey,
+          );
+          if (saved?.documentVersion !== undefined) {
+            documentVersionRef.current = saved.documentVersion;
+            setDocumentVersion(saved.documentVersion);
+          }
+          setSaveStatus("已自动保存");
+          lastSaved = saved;
+        } catch (error) {
+          failedSaveDataRef.current = pendingSave;
+          setSaveStatus("保存失败");
+          throw error;
+        }
       }
+      return lastSaved;
     });
     saveInFlightRef.current = save;
     return save;
@@ -1250,15 +1292,30 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
       </aside>
 
       <main
-        className="lesson-document-scroll"
+        className={`lesson-document-scroll ${approvalPreview ? "is-agent-preview" : ""}`}
         ref={scrollRef}
         aria-label="A4教案编辑区"
         onPointerUp={captureSelection}
         onKeyUp={captureSelection}
       >
         <p className="lesson-mobile-document-hint">上下滚动查看完整教案</p>
+        {agentPresentation?.status === "streaming" && !agentPresentation.approval ? (
+          <div className="lesson-document-agent-state" role="status">
+            <Sparkles aria-hidden="true" />
+            <div><strong>{agentPresentation.activities?.find((activity) => activity.state === "running")?.label ?? "正在形成教案修改"}</strong><span>完成读取与校验后，修改会直接在 A4 中预览。</span></div>
+          </div>
+        ) : null}
+        {approvalPreview ? (
+          <div className="lesson-document-approval-bar" role="status">
+            <div><strong>正在预览助手修改</strong><span>{agentPresentation.approval.patch.summary} · 尚未写入</span></div>
+            <div>
+              <Button type="button" size="sm" variant="outline" disabled={agentPresentation.approval.state === "responding"} onClick={agentPresentation.reject}>保留原文</Button>
+              <Button type="button" size="sm" disabled={agentPresentation.approval.state === "responding"} onClick={agentPresentation.approve}>{agentPresentation.approval.state === "responding" ? "正在应用…" : "接受修改"}</Button>
+            </div>
+          </div>
+        ) : null}
         <div className="lesson-document-pages" ref={documentPagesRef}>
-          {pages.map((pageEntries, pageIndex) => (
+          {renderedPages.map((pageEntries, pageIndex) => (
             <div
               className="lesson-sheet-frame"
               ref={pageIndex === 0 ? firstSheetRef : undefined}
@@ -1273,11 +1330,12 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
                         if (entry.kind === "basics") {
                           return (
                             <BasicsRow
-                              plan={plan}
+                              plan={renderedPlan}
                               onChange={commitField}
                               onFocus={() => setActiveSection("basics")}
                               syncVersion={editorSyncVersion}
                               onHistoryAction={handleHistoryAction}
+                              proposedFields={proposedFields}
                               key={entry.key}
                             />
                           );
@@ -1289,13 +1347,14 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
                               <th scope="row">课题</th>
                               <td colSpan={5}>
                                 <EditableCell
-                                  value={plan.topic}
+                                  value={renderedPlan.topic}
                                   onChange={(...change) => commitField("topic", ...change)}
                                   onFocus={() => setActiveSection("basics")}
                                   field="topic"
                                   syncVersion={editorSyncVersion}
                                   onHistoryAction={handleHistoryAction}
                                   label="课题"
+                                  proposed={proposedFields.has("topic")}
                                 />
                               </td>
                             </tr>
@@ -1309,6 +1368,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
                             onFocus={setActiveSection}
                             syncVersion={editorSyncVersion}
                             onHistoryAction={handleHistoryAction}
+                            proposed={proposedFields.has(entry.field)}
                             key={entry.key}
                           />
                         );
@@ -1316,8 +1376,8 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
                     </tbody>
                   </table>
                 </div>
-                <span className="lesson-page-number" aria-label={`第${pageIndex + 1}页，共${pages.length}页`}>
-                  {pageIndex + 1} / {pages.length}
+                <span className="lesson-page-number" aria-label={`第${pageIndex + 1}页，共${renderedPages.length}页`}>
+                  {pageIndex + 1} / {renderedPages.length}
                 </span>
               </article>
             </div>
@@ -1337,6 +1397,9 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
             onCanonicalDocument={applyCanonicalAgentDocument}
             onBeforeRun={flushDocumentBeforeAgentRun}
             onNavigateToSection={scrollToSection}
+            initialPrompt={initialAgentPrompt}
+            onInitialPromptConsumed={onInitialAgentPromptConsumed}
+            onAgentPresentationChange={setAgentPresentation}
           />
         </Suspense>
       </aside>

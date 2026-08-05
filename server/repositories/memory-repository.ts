@@ -4,20 +4,41 @@ import {
   DocumentPatchError,
   rebaseDocumentPatch,
 } from "../document-patch.js";
+import { assertDesignBasisProjectionCurrent } from "../design-basis-projection.js";
 import type {
   AgentApprovalRecord,
   AgentBranchRecord,
   AgentMessageRecord,
   AgentRunRecord,
+  AgentResourceRef,
   AgentRunEvidenceRecord,
   AgentThreadRecord,
+  CurriculumCatalogReleaseRecord,
   CurriculumNodeRecord,
+  CurriculumNodeSemanticsRecord,
+  CurriculumSemanticEntityRecord,
+  CurriculumSemanticPathStep,
   CurriculumTextbookRecord,
+  CreateSemesterFrameworkInput,
+  CreateLessonBlueprintInput,
+  DeleteLessonBlueprintInput,
+  FrameworkContinuityCandidateRecord,
   KnowledgeResult,
+  LessonDesignBasisAggregate,
+  LessonDesignBasisPatch,
   LessonFileRecord,
   NotebookRecord,
   SourceRef,
   NormalizedAgentEvent,
+  SemesterFrameworkAggregate,
+  SemesterFrameworkRecord,
+  SemesterFrameworkPatch,
+  UpdateLessonBlueprintInput,
+} from "../domain.js";
+import {
+  isLessonDesignBasisPatch,
+  isLessonDesignChangePatch,
+  isSemesterFrameworkPatch,
 } from "../domain.js";
 import {
   buildCurriculumFacets,
@@ -26,11 +47,25 @@ import {
   searchCurriculumNodeRecords,
   type CurriculumTextbookFilter,
 } from "../curriculum/catalog.js";
+import { persistedActivitiesFromEvents } from "../agent-activity-presentation.js";
 import {
   curriculumFixtureNodes,
+  curriculumFixtureKnowledgeContinuity,
+  curriculumFixtureKnowledgeSearch,
+  curriculumFixtureNodeKnowledge,
+  curriculumFixtureNodeSemantics,
+  curriculumFixtureSemanticEntities,
+  curriculumFixtureSemanticPaths,
   curriculumFixtureTextbooks,
 } from "../testing/curriculum-fixture.js";
 import type { CreateThreadInput, ImportedNotebook, LessonRepository } from "../repository.js";
+import { createLessonPlanPreview } from "../../src/lib/lesson-preview.js";
+import { applySemesterFrameworkPatch } from "../semester-framework-patch.js";
+import {
+  deriveFrameworkContinuity,
+  type ReviewedProgressionRelation,
+} from "../curriculum/framework-continuity.js";
+import { applyLessonDesignBasisPatch } from "../lesson-design-basis-patch.js";
 
 let lastTimestamp = 0;
 const now = () => {
@@ -42,6 +77,7 @@ const key = (...parts: string[]) => parts.join(":");
 export class MemoryLessonRepository implements LessonRepository {
   private notebooks = new Map<string, NotebookRecord>();
   private files = new Map<string, LessonFileRecord>();
+  private designBases = new Map<string, LessonDesignBasisAggregate>();
   private threads = new Map<string, AgentThreadRecord>();
   private branches = new Map<string, AgentBranchRecord>();
   private messages = new Map<string, AgentMessageRecord>();
@@ -54,12 +90,169 @@ export class MemoryLessonRepository implements LessonRepository {
     signature: string;
     file: LessonFileRecord;
   }>();
+  private semesterApprovalIdempotency = new Map<string, {
+    approvalId: string;
+    aggregate: SemesterFrameworkAggregate;
+  }>();
+  private designBasisApprovalIdempotency = new Map<string, {
+    approvalId: string;
+    aggregate: LessonDesignBasisAggregate;
+  }>();
+  private designBasisManualRequests = new Map<string, {
+    signature: string;
+    aggregate: LessonDesignBasisAggregate;
+  }>();
   private sessionAppendBatches = new Map<string, string>();
+  private createLessonFileRequests = new Map<string, { signature: string; file: LessonFileRecord }>();
+  private createThreadRequests = new Map<string, {
+    signature: string;
+    thread: AgentThreadRecord;
+    branch: AgentBranchRecord;
+  }>();
+  private semesterFrameworks = new Map<string, SemesterFrameworkAggregate>();
+  private frameworkContinuity = new Map<
+    string,
+    Map<string, FrameworkContinuityCandidateRecord>
+  >();
+  private semesterFrameworkCreateRequests = new Map<string, {
+    signature: string;
+    frameworkId: string;
+  }>();
+  private semesterFrameworkManualRequests = new Map<string, {
+    signature: string;
+    aggregate: SemesterFrameworkAggregate;
+  }>();
   private runEvents: Array<{ ownerId: string; runId: string; type: string; data: NormalizedAgentEvent }> = [];
   private runEvidence: AgentRunEvidenceRecord[] = [];
   private curriculumTextbooks = curriculumFixtureTextbooks.map((book) => structuredClone(book));
   private curriculumNodes = curriculumFixtureNodes.map((node) => structuredClone(node));
+  private curriculumSemanticEntities = curriculumFixtureSemanticEntities.map((entity) => structuredClone(entity));
+  private curriculumNodeSemantics = curriculumFixtureNodeSemantics.map((record) => structuredClone(record));
+  private curriculumSemanticPaths = curriculumFixtureSemanticPaths.map((step) => structuredClone(step));
+  private curriculumNodeKnowledge = curriculumFixtureNodeKnowledge.map((record) => structuredClone(record));
+  private curriculumKnowledgeSearch = curriculumFixtureKnowledgeSearch.map((record) => structuredClone(record));
   private lastMessageTimestamp = 0;
+  private readonly curriculumCatalogRelease: CurriculumCatalogReleaseRecord = {
+    id: "00000000-0000-4000-8000-00000000c001",
+    generationId: "test-generation",
+    status: "published",
+    snapshotComplete: true,
+    manifest: { source: "memory-fixture" },
+    textbookCount: curriculumFixtureTextbooks.length,
+    nodeCount: curriculumFixtureNodes.length,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    publishedAt: "2026-01-01T00:00:00.000Z",
+    retiredAt: null,
+  };
+
+  private createInitialDesignBasis(
+    ownerId: string,
+    file: LessonFileRecord,
+    lessonBlueprintId?: string,
+  ) {
+    const timestamp = file.updatedAt;
+    const frameworkAggregate = lessonBlueprintId
+      ? [...this.semesterFrameworks.values()].find((aggregate) => (
+          aggregate.framework.ownerId === ownerId
+          && aggregate.blueprints.some((blueprint) => blueprint.id === lessonBlueprintId)
+        ))
+      : undefined;
+    const blueprint = frameworkAggregate?.blueprints.find((item) => item.id === lessonBlueprintId);
+    const unit = blueprint
+      ? frameworkAggregate?.units.find((item) => item.id === blueprint.semesterUnitId)
+      : undefined;
+    const textbookId = frameworkAggregate?.framework.textbookId
+      ?? file.contextProfile.textbookId
+      ?? null;
+    const curriculumNodeId = blueprint?.curriculumNodeId
+      ?? file.contextProfile.lessonNodeId
+      ?? file.contextProfile.unitNodeId
+      ?? null;
+    const catalogReleaseId = textbookId && this.curriculumTextbooks.some((book) => book.id === textbookId)
+      ? frameworkAggregate?.framework.catalogReleaseId ?? this.curriculumCatalogRelease.id
+      : null;
+    const semanticReleaseId = frameworkAggregate?.framework.semanticReleaseId
+      ?? (textbookId
+        ? this.curriculumNodeSemantics.find((record) => record.textbookId === textbookId)?.release?.id ?? null
+        : null);
+    const basisId = crypto.randomUUID();
+    const selections = blueprint
+      ? frameworkAggregate?.outcomeSelections.filter((selection) => (
+          selection.lessonBlueprintId === blueprint.id
+        )) ?? []
+      : [];
+    const aggregate: LessonDesignBasisAggregate = {
+      basis: {
+        id: basisId,
+        ownerId,
+        notebookId: file.notebookId,
+        lessonFileId: file.id,
+        frameworkId: frameworkAggregate?.framework.id ?? null,
+        semesterUnitId: unit?.id ?? null,
+        lessonBlueprintId: blueprint?.id ?? null,
+        catalogReleaseId,
+        textbookId,
+        curriculumNodeId,
+        semanticReleaseId,
+        sourceFrameworkVersion: frameworkAggregate?.framework.version ?? null,
+        sourceBlueprintVersion: blueprint?.version ?? null,
+        learnerContext: structuredClone(file.contextProfile),
+        teacherNotes: "",
+        status: "draft",
+        version: 0,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+      entries: selections.map((selection, index) => {
+        const entity = this.curriculumSemanticEntities.find((item) => (
+          item.id === selection.semanticEntityId
+        ));
+        return {
+          id: crypto.randomUUID(),
+          basisId,
+          kind: "knowledge_point" as const,
+          semanticEntityId: selection.semanticEntityId,
+          semanticEntityName: entity?.canonicalName ?? null,
+          relatedSemanticEntityId: null,
+          relatedSemanticEntityName: null,
+          relatedCurriculumNodeId: null,
+          relatedCurriculumNodeTitle: null,
+          statement: entity
+            ? `将“${entity.canonicalName}”作为本课需要落实的学习内容。`
+            : "落实课时蓝图中已选择的学习内容。",
+          rationale: selection.adjustmentReason,
+          evidence: entity?.sources ?? [],
+          decision: "accepted" as const,
+          teacherConfirmed: selection.teacherConfirmed,
+          origin: "platform" as const,
+          sortNo: index + 1,
+          version: 0,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+      }),
+    };
+    this.designBases.set(key(ownerId, file.id), aggregate);
+    return aggregate;
+  }
+
+  private hydrateDesignBasisNames(aggregate: LessonDesignBasisAggregate) {
+    for (const entry of aggregate.entries) {
+      entry.semanticEntityName = entry.semanticEntityId
+        ? this.curriculumSemanticEntities.find((entity) => entity.id === entry.semanticEntityId)?.canonicalName ?? null
+        : null;
+      entry.relatedSemanticEntityName = entry.relatedSemanticEntityId
+        ? this.curriculumSemanticEntities.find((entity) => entity.id === entry.relatedSemanticEntityId)?.canonicalName ?? null
+        : null;
+      entry.relatedCurriculumNodeTitle = entry.relatedCurriculumNodeId
+        ? this.curriculumNodes.find((node) => (
+            node.textbookId === aggregate.basis.textbookId
+            && node.nodeId === entry.relatedCurriculumNodeId
+          ))?.title ?? null
+        : null;
+    }
+    return aggregate;
+  }
 
   seedCurriculumCatalog(textbooks: CurriculumTextbookRecord[], nodes: CurriculumNodeRecord[]) {
     this.curriculumTextbooks = textbooks.map((book) => structuredClone(book));
@@ -90,7 +283,7 @@ export class MemoryLessonRepository implements LessonRepository {
       for (const file of notebook.files) {
         const fileKey = key(ownerId, file.id);
         if (!this.files.has(fileKey)) imported += 1;
-        this.files.set(fileKey, {
+        const record: LessonFileRecord = {
           id: file.id,
           ownerId,
           notebookId: notebook.id,
@@ -102,7 +295,9 @@ export class MemoryLessonRepository implements LessonRepository {
           documentVersion: this.files.get(fileKey)?.documentVersion ?? file.documentVersion ?? 0,
           pageCount: file.pages ?? 1,
           updatedAt: now(),
-        });
+        };
+        this.files.set(fileKey, record);
+        if (!this.designBases.has(fileKey)) this.createInitialDesignBasis(ownerId, record);
       }
     }
     return { imported };
@@ -117,7 +312,10 @@ export class MemoryLessonRepository implements LessonRepository {
         files: [...this.files.values()]
           .filter((file) => file.ownerId === ownerId && file.notebookId === notebook.id)
           .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-          .map(({ document: _document, ...file }) => structuredClone(file)),
+          .map(({ document, contextProfile: _contextProfile, ...file }) => ({
+            ...structuredClone(file),
+            preview: createLessonPlanPreview(document),
+          })),
       }));
   }
 
@@ -155,6 +353,7 @@ export class MemoryLessonRepository implements LessonRepository {
     for (const file of [...this.files.values()]) {
       if (file.ownerId === ownerId && file.notebookId === notebookId) {
         this.files.delete(key(ownerId, file.id));
+        this.designBases.delete(key(ownerId, file.id));
       }
     }
   }
@@ -163,7 +362,18 @@ export class MemoryLessonRepository implements LessonRepository {
     return this.notebooks.get(key(ownerId, notebookId)) ?? null;
   }
 
-  async createLessonFile(ownerId: string, input: Parameters<LessonRepository["createLessonFile"]>[1]) {
+  async createLessonFile(
+    ownerId: string,
+    input: Parameters<LessonRepository["createLessonFile"]>[1],
+    idempotencyKey: string = crypto.randomUUID(),
+  ) {
+    const requestKey = key(ownerId, idempotencyKey);
+    const signature = JSON.stringify(input);
+    const replay = this.createLessonFileRequests.get(requestKey);
+    if (replay) {
+      if (replay.signature !== signature) throw new Error("idempotency_conflict");
+      return structuredClone(replay.file);
+    }
     const notebook = await this.getNotebook(ownerId, input.notebookId);
     if (!notebook) throw new Error("notebook_not_found");
     const timestamp = now();
@@ -171,6 +381,7 @@ export class MemoryLessonRepository implements LessonRepository {
       id: crypto.randomUUID(),
       ownerId,
       notebookId: input.notebookId,
+      lessonBlueprintId: input.lessonBlueprintId,
       title: input.title,
       type: input.type,
       image: input.image,
@@ -181,7 +392,9 @@ export class MemoryLessonRepository implements LessonRepository {
       updatedAt: timestamp,
     };
     this.files.set(key(ownerId, file.id), file);
+    this.createInitialDesignBasis(ownerId, file, input.lessonBlueprintId);
     await this.updateNotebook(ownerId, input.notebookId, {});
+    this.createLessonFileRequests.set(requestKey, { signature, file: structuredClone(file) });
     return structuredClone(file);
   }
 
@@ -202,11 +415,71 @@ export class MemoryLessonRepository implements LessonRepository {
     const current = await this.getLessonFile(ownerId, fileId);
     if (!current) throw new Error("lesson_file_not_found");
     this.files.delete(key(ownerId, fileId));
+    this.designBases.delete(key(ownerId, fileId));
     await this.updateNotebook(ownerId, current.notebookId, {});
   }
 
   async getLessonFile(ownerId: string, fileId: string) {
     return this.files.get(key(ownerId, fileId)) ?? null;
+  }
+
+  async getLessonDesignBasis(ownerId: string, lessonFileId: string) {
+    const aggregate = this.designBases.get(key(ownerId, lessonFileId));
+    return aggregate
+      ? structuredClone(this.hydrateDesignBasisNames(structuredClone(aggregate)))
+      : null;
+  }
+
+  async applyManualLessonDesignBasisPatch(
+    ownerId: string,
+    patch: LessonDesignBasisPatch,
+    idempotencyKey: string,
+  ) {
+    const requestKey = key(ownerId, idempotencyKey);
+    const signature = JSON.stringify(patch);
+    const replay = this.designBasisManualRequests.get(requestKey);
+    if (replay) {
+      if (replay.signature !== signature) throw new Error("idempotency_conflict");
+      return structuredClone(replay.aggregate);
+    }
+    const aggregate = await this.getLessonDesignBasis(ownerId, patch.fileId);
+    if (!aggregate) throw new Error("lesson_design_basis_not_found");
+    const updated = this.hydrateDesignBasisNames(
+      applyLessonDesignBasisPatch(aggregate, patch, now()),
+    );
+    this.designBases.set(key(ownerId, patch.fileId), structuredClone(updated));
+    this.designBasisManualRequests.set(requestKey, {
+      signature,
+      aggregate: structuredClone(updated),
+    });
+    return structuredClone(updated);
+  }
+
+  async applyApprovedLessonDesignBasisPatch(args: {
+    ownerId: string;
+    approvalId: string;
+    idempotencyKey: string;
+  }) {
+    const replay = this.designBasisApprovalIdempotency.get(key(args.ownerId, args.idempotencyKey));
+    if (replay) {
+      if (replay.approvalId !== args.approvalId) throw new Error("idempotency_conflict");
+      return structuredClone(replay.aggregate);
+    }
+    const approval = await this.getApproval(args.ownerId, args.approvalId);
+    if (!approval) throw new Error("approval_not_found");
+    if (!isLessonDesignBasisPatch(approval.patch)) throw new Error("approval_resource_scope_invalid");
+    if (approval.state !== "pending") throw new Error("approval_not_approvable");
+    const updated = await this.applyManualLessonDesignBasisPatch(
+      args.ownerId,
+      approval.patch,
+      `approved:${args.idempotencyKey}`,
+    );
+    await this.resolveApproval(args.ownerId, args.approvalId, "approved");
+    this.designBasisApprovalIdempotency.set(key(args.ownerId, args.idempotencyKey), {
+      approvalId: args.approvalId,
+      aggregate: structuredClone(updated),
+    });
+    return structuredClone(updated);
   }
 
   async saveLessonDocument(args: Parameters<LessonRepository["saveLessonDocument"]>[0]) {
@@ -276,8 +549,28 @@ export class MemoryLessonRepository implements LessonRepository {
     const approval = await this.getApproval(args.ownerId, args.approvalId);
     if (!approval) throw new Error("approval_not_found");
     if (approval.state !== "pending" && approval.state !== "approved") throw new Error("approval_not_approvable");
+    if (isSemesterFrameworkPatch(approval.patch) || isLessonDesignBasisPatch(approval.patch)) {
+      throw new Error("approval_resource_scope_invalid");
+    }
     const current = await this.getLessonFile(args.ownerId, approval.patch.fileId);
     if (!current) throw new Error("lesson_file_not_found");
+    let updatedBasis: LessonDesignBasisAggregate | null = null;
+    if (isLessonDesignChangePatch(approval.patch)) {
+      const currentBasis = await this.getLessonDesignBasis(args.ownerId, current.id);
+      if (!currentBasis) throw new Error("lesson_design_basis_not_found");
+      updatedBasis = applyLessonDesignBasisPatch(
+        currentBasis,
+        approval.patch.designBasisPatch,
+        now(),
+      );
+      assertDesignBasisProjectionCurrent(approval.patch, updatedBasis);
+    }
+    if (approval.patch.projection) {
+      const basis = updatedBasis
+        ?? await this.getLessonDesignBasis(args.ownerId, current.id);
+      if (!basis) throw new Error("lesson_design_basis_not_found");
+      assertDesignBasisProjectionCurrent(approval.patch, basis);
+    }
     const patch = rebaseDocumentPatch(
       approval.patch,
       current.document,
@@ -289,6 +582,9 @@ export class MemoryLessonRepository implements LessonRepository {
       documentVersion: current.documentVersion + 1,
       updatedAt: now(),
     };
+    if (updatedBasis) {
+      this.designBases.set(key(args.ownerId, current.id), structuredClone(updatedBasis));
+    }
     this.files.set(key(args.ownerId, current.id), updated);
     this.idempotency.set(idempotencyKey, {
       operation: "apply_approval",
@@ -299,20 +595,83 @@ export class MemoryLessonRepository implements LessonRepository {
     return updated;
   }
 
-  async listThreads(ownerId: string, lessonFileId: string, includeArchived = false) {
+  async applyApprovedSemesterFrameworkPatch(
+    args: Parameters<LessonRepository["applyApprovedSemesterFrameworkPatch"]>[0],
+  ) {
+    const idempotencyKey = key(args.ownerId, args.idempotencyKey);
+    const replay = this.semesterApprovalIdempotency.get(idempotencyKey);
+    if (replay) {
+      if (replay.approvalId !== args.approvalId) throw new Error("idempotency_conflict");
+      return structuredClone(replay.aggregate);
+    }
+    const approval = await this.getApproval(args.ownerId, args.approvalId);
+    if (!approval) throw new Error("approval_not_found");
+    if (approval.state !== "pending" && approval.state !== "approved") {
+      throw new Error("approval_not_approvable");
+    }
+    if (!isSemesterFrameworkPatch(approval.patch)) {
+      throw new Error("approval_resource_scope_invalid");
+    }
+    const current = await this.getSemesterFramework(args.ownerId, approval.patch.frameworkId);
+    if (!current) throw new Error("semester_framework_not_found");
+    const updated = applySemesterFrameworkPatch(current, approval.patch, now());
+    this.semesterFrameworks.set(
+      key(args.ownerId, updated.framework.id),
+      structuredClone(updated),
+    );
+    this.semesterApprovalIdempotency.set(idempotencyKey, {
+      approvalId: args.approvalId,
+      aggregate: structuredClone(updated),
+    });
+    await this.resolveApproval(args.ownerId, args.approvalId, "approved");
+    return structuredClone(updated);
+  }
+
+  async listThreads(
+    ownerId: string,
+    resource: string | AgentResourceRef,
+    includeArchived = false,
+  ) {
+    const scope = typeof resource === "string"
+      ? { resourceType: "lesson_file" as const, lessonFileId: resource }
+      : resource;
     return [...this.threads.values()]
-      .filter((thread) => thread.ownerId === ownerId && thread.lessonFileId === lessonFileId)
+      .filter((thread) => {
+        if (thread.ownerId !== ownerId || thread.resourceType !== scope.resourceType) return false;
+        return scope.resourceType === "lesson_file"
+          ? thread.resourceType === "lesson_file" && thread.lessonFileId === scope.lessonFileId
+          : thread.resourceType === "semester_framework"
+            && thread.semesterFrameworkId === scope.semesterFrameworkId;
+      })
       .filter((thread) => !thread.deletedAt && (includeArchived || !thread.archivedAt))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
-  async createThread(ownerId: string, input: CreateThreadInput) {
-    const file = await this.getLessonFile(ownerId, input.lessonFileId);
-    if (!file || file.notebookId !== input.notebookId) throw new Error("lesson_file_not_found");
+  async createThread(ownerId: string, input: CreateThreadInput, idempotencyKey: string = crypto.randomUUID()) {
+    const requestKey = key(ownerId, idempotencyKey);
+    const signature = JSON.stringify(input);
+    const replay = this.createThreadRequests.get(requestKey);
+    if (replay) {
+      if (replay.signature !== signature) throw new Error("idempotency_conflict");
+      return structuredClone({ thread: replay.thread, branch: replay.branch });
+    }
+    const resource: AgentResourceRef = input.resourceType === "semester_framework"
+      ? { resourceType: "semester_framework", semesterFrameworkId: input.semesterFrameworkId }
+      : { resourceType: "lesson_file", lessonFileId: input.lessonFileId };
+    if (resource.resourceType === "lesson_file") {
+      const file = await this.getLessonFile(ownerId, resource.lessonFileId);
+      if (!file || file.notebookId !== input.notebookId) throw new Error("lesson_file_not_found");
+    } else {
+      const framework = await this.getSemesterFramework(ownerId, resource.semesterFrameworkId);
+      if (!framework || framework.framework.notebookId !== input.notebookId) {
+        throw new Error("semester_framework_not_found");
+      }
+    }
     const timestamp = now();
     const thread: AgentThreadRecord = {
       id: crypto.randomUUID(), ownerId, notebookId: input.notebookId,
-      lessonFileId: input.lessonFileId, title: input.title ?? "新会话", status: "idle",
+      ...resource,
+      title: input.title ?? "新会话", status: "idle",
       starterSuggestions: [],
       createdAt: timestamp, updatedAt: timestamp,
     };
@@ -321,6 +680,11 @@ export class MemoryLessonRepository implements LessonRepository {
     };
     this.threads.set(thread.id, thread);
     this.branches.set(branch.id, branch);
+    this.createThreadRequests.set(requestKey, {
+      signature,
+      thread: structuredClone(thread),
+      branch: structuredClone(branch),
+    });
     return { thread, branch };
   }
 
@@ -329,10 +693,24 @@ export class MemoryLessonRepository implements LessonRepository {
     return thread?.ownerId === ownerId && !thread.deletedAt ? thread : null;
   }
 
-  async updateThread(ownerId: string, threadId: string, patch: Partial<AgentThreadRecord>) {
+  async updateThread(
+    ownerId: string,
+    threadId: string,
+    patch: Partial<Pick<
+      AgentThreadRecord,
+      "title" | "archivedAt" | "deletedAt" | "status" | "starterSuggestions"
+        | "starterSuggestionsDocumentVersion" | "starterSuggestionsResourceVersion"
+    >>,
+  ): Promise<AgentThreadRecord> {
     const thread = await this.getThread(ownerId, threadId);
     if (!thread) throw new Error("thread_not_found");
-    const updated = { ...thread, ...patch, id: thread.id, ownerId, updatedAt: now() };
+    const updated = {
+      ...thread,
+      ...patch,
+      id: thread.id,
+      ownerId,
+      updatedAt: now(),
+    } as AgentThreadRecord;
     this.threads.set(threadId, updated);
     return updated;
   }
@@ -419,7 +797,19 @@ export class MemoryLessonRepository implements LessonRepository {
         || message.createdAt < cursorTime
         || (message.createdAt === cursorTime && cursorId !== undefined && message.id < cursorId))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
-    return values.slice(-limit);
+    return values.slice(-limit).map((message) => {
+      const run = [...this.runs.values()]
+        .filter((candidate) => candidate.assistantMessageId === message.id)
+        .sort((left, right) => right.startedAt.localeCompare(left.startedAt))[0];
+      if (!run) return structuredClone(message);
+      const events = this.runEvents
+        .filter((event) => event.ownerId === ownerId && event.runId === run.id)
+        .map((event) => event.data);
+      return {
+        ...structuredClone(message),
+        activities: persistedActivitiesFromEvents(events, run.status),
+      };
+    });
   }
 
   async getMessage(ownerId: string, messageId: string) {
@@ -701,18 +1091,46 @@ export class MemoryLessonRepository implements LessonRepository {
     }
 
     let file: LessonFileRecord | null = null;
+    let framework: SemesterFrameworkAggregate | null = null;
+    let basis: LessonDesignBasisAggregate | null = null;
     if (approval.state === "pending") {
       if (args.approved) {
-        file = await this.applyApprovedPatch({
-          ownerId: args.ownerId,
-          approvalId: args.approvalId,
-          idempotencyKey: `approval:${args.approvalId}`,
-        });
+        if (isSemesterFrameworkPatch(approval.patch)) {
+          framework = await this.applyApprovedSemesterFrameworkPatch({
+            ownerId: args.ownerId,
+            approvalId: args.approvalId,
+            idempotencyKey: `approval:${args.approvalId}`,
+          });
+        } else if (isLessonDesignBasisPatch(approval.patch)) {
+          basis = await this.applyApprovedLessonDesignBasisPatch({
+            ownerId: args.ownerId,
+            approvalId: args.approvalId,
+            idempotencyKey: `approval:${args.approvalId}`,
+          });
+        } else {
+          file = await this.applyApprovedPatch({
+            ownerId: args.ownerId,
+            approvalId: args.approvalId,
+            idempotencyKey: `approval:${args.approvalId}`,
+          });
+          if (isLessonDesignChangePatch(approval.patch)) {
+            basis = await this.getLessonDesignBasis(args.ownerId, approval.patch.fileId);
+          }
+        }
       } else {
         approval = await this.resolveApproval(args.ownerId, args.approvalId, "rejected");
       }
     } else if (args.approved) {
-      file = await this.getLessonFile(args.ownerId, approval.patch.fileId);
+      if (isSemesterFrameworkPatch(approval.patch)) {
+        framework = await this.getSemesterFramework(args.ownerId, approval.patch.frameworkId);
+      } else if (isLessonDesignBasisPatch(approval.patch)) {
+        basis = await this.getLessonDesignBasis(args.ownerId, approval.patch.fileId);
+      } else {
+        file = await this.getLessonFile(args.ownerId, approval.patch.fileId);
+        if (isLessonDesignChangePatch(approval.patch)) {
+          basis = await this.getLessonDesignBasis(args.ownerId, approval.patch.fileId);
+        }
+      }
     }
 
     approval = await this.getApproval(args.ownerId, args.approvalId);
@@ -727,7 +1145,12 @@ export class MemoryLessonRepository implements LessonRepository {
       continuationError: undefined,
     };
     this.approvals.set(args.approvalId, updated);
-    return { approval: structuredClone(updated), file: file ? structuredClone(file) : null };
+    return {
+      approval: structuredClone(updated),
+      file: file ? structuredClone(file) : null,
+      framework: framework ? structuredClone(framework) : null,
+      basis: basis ? structuredClone(basis) : null,
+    };
   }
 
   async claimApprovalContinuation(args: {
@@ -978,6 +1401,363 @@ export class MemoryLessonRepository implements LessonRepository {
       .map((item) => structuredClone(item));
   }
 
+  async createSemesterFramework(
+    ownerId: string,
+    notebookId: string,
+    input: CreateSemesterFrameworkInput,
+    idempotencyKey: string,
+  ) {
+    const requestKey = key(ownerId, idempotencyKey);
+    const signature = JSON.stringify({ notebookId, input });
+    const existingRequest = this.semesterFrameworkCreateRequests.get(requestKey);
+    if (existingRequest) {
+      if (existingRequest.signature !== signature) throw new Error("idempotency_conflict");
+      return structuredClone(this.semesterFrameworks.get(key(ownerId, existingRequest.frameworkId))!);
+    }
+
+    const notebook = this.notebooks.get(key(ownerId, notebookId));
+    if (!notebook) throw new Error("notebook_not_found");
+    const textbook = this.curriculumTextbooks.find((book) => book.id === input.textbookId);
+    if (!textbook) throw new Error("curriculum_textbook_not_found");
+    if (notebook.subject !== textbook.subject) throw new Error("curriculum_subject_mismatch");
+    const rootNodes = this.curriculumNodes
+      .filter((node) => node.textbookId === textbook.id && node.parentId === null)
+      .sort((left, right) => left.sortNo - right.sortNo || left.nodeId.localeCompare(right.nodeId));
+    if (!rootNodes.length) throw new Error("curriculum_textbook_has_no_root_nodes");
+
+    const timestamp = now();
+    const frameworkId = crypto.randomUUID();
+    const semanticReleaseId = this.curriculumNodeSemantics.find((record) => (
+      record.textbookId === textbook.id && record.release
+    ))?.release?.id ?? null;
+    const framework: SemesterFrameworkRecord = {
+      id: frameworkId,
+      ownerId,
+      notebookId,
+      textbookId: textbook.id,
+      catalogReleaseId: this.curriculumCatalogRelease.id,
+      semanticReleaseId,
+      title: input.title,
+      term: input.term,
+      startDate: input.startDate ?? null,
+      totalWeeks: input.totalWeeks,
+      weeklyPeriods: input.weeklyPeriods,
+      lessonDurationMinutes: input.lessonDurationMinutes,
+      capacityRatio: input.capacityRatio,
+      planningHorizonWeeks: input.planningHorizonWeeks,
+      contextProfile: structuredClone(input.contextProfile),
+      version: 0,
+      status: "draft",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    const aggregate: SemesterFrameworkAggregate = {
+      framework,
+      units: rootNodes.map((node, index) => ({
+        id: crypto.randomUUID(),
+        frameworkId,
+        curriculumNodeId: node.nodeId,
+        sortNo: index + 1,
+        plannedStartWeek: null,
+        plannedEndWeek: null,
+        plannedPeriods: 0,
+        learningGoals: "",
+        teacherNotes: "",
+        status: "unplanned",
+        version: 0,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      })),
+      blueprints: [],
+      outcomeSelections: [],
+    };
+    this.semesterFrameworks.set(key(ownerId, frameworkId), structuredClone(aggregate));
+    this.semesterFrameworkCreateRequests.set(requestKey, { signature, frameworkId });
+    return structuredClone(aggregate);
+  }
+
+  async listSemesterFrameworks(ownerId: string, notebookId: string) {
+    return [...this.semesterFrameworks.values()]
+      .map((aggregate) => aggregate.framework)
+      .filter((framework) => (
+        framework.ownerId === ownerId && framework.notebookId === notebookId
+      ))
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .map((framework) => structuredClone(framework));
+  }
+
+  async applyManualSemesterFrameworkPatch(
+    ownerId: string,
+    patch: SemesterFrameworkPatch,
+    idempotencyKey: string,
+  ) {
+    const requestKey = key(ownerId, idempotencyKey);
+    const signature = JSON.stringify(patch);
+    const existingRequest = this.semesterFrameworkManualRequests.get(requestKey);
+    if (existingRequest) {
+      if (existingRequest.signature !== signature) throw new Error("idempotency_conflict");
+      return structuredClone(existingRequest.aggregate);
+    }
+    const aggregate = await this.getSemesterFramework(ownerId, patch.frameworkId);
+    if (!aggregate) throw new Error("semester_framework_not_found");
+    const updated = applySemesterFrameworkPatch(aggregate, patch, now());
+    this.semesterFrameworks.set(key(ownerId, patch.frameworkId), structuredClone(updated));
+    this.semesterFrameworkManualRequests.set(requestKey, {
+      signature,
+      aggregate: structuredClone(updated),
+    });
+    return structuredClone(updated);
+  }
+
+  async createLessonBlueprint(
+    ownerId: string,
+    frameworkId: string,
+    input: CreateLessonBlueprintInput,
+    idempotencyKey: string,
+  ) {
+    const requestKey = key(ownerId, idempotencyKey);
+    const signature = JSON.stringify({ frameworkId, input });
+    const existingRequest = this.semesterFrameworkManualRequests.get(requestKey);
+    if (existingRequest) {
+      if (existingRequest.signature !== signature) throw new Error("idempotency_conflict");
+      return structuredClone(existingRequest.aggregate);
+    }
+    const aggregate = await this.getSemesterFramework(ownerId, frameworkId);
+    if (!aggregate) throw new Error("semester_framework_not_found");
+    const unit = aggregate.units.find((candidate) => candidate.id === input.semesterUnitId);
+    if (!unit) throw new Error("semester_unit_not_found");
+    const timestamp = now();
+    const unitBlueprints = aggregate.blueprints.filter((item) => item.semesterUnitId === unit.id);
+    const chapterBlueprints = unitBlueprints.filter((item) => (
+      item.curriculumNodeId === input.curriculumNodeId
+    ));
+    const chapterPeriodNo = input.chapterPeriodNo
+      ?? Math.max(0, ...chapterBlueprints.map((item) => item.chapterPeriodNo)) + 1;
+    if (chapterBlueprints.some((item) => item.chapterPeriodNo === chapterPeriodNo)) {
+      throw new Error("duplicate_lesson_blueprint_identity");
+    }
+    const updated: SemesterFrameworkAggregate = {
+      ...aggregate,
+      framework: {
+        ...aggregate.framework,
+        version: aggregate.framework.version + 1,
+        updatedAt: timestamp,
+      },
+      blueprints: [...aggregate.blueprints, {
+        id: crypto.randomUUID(),
+        frameworkId,
+        semesterUnitId: unit.id,
+        curriculumNodeId: input.curriculumNodeId,
+        chapterPeriodNo,
+        plannedPeriod: Math.max(0, ...unitBlueprints.map((item) => item.plannedPeriod)) + 1,
+        sortNo: Math.max(0, ...aggregate.blueprints.map((item) => item.sortNo)) + 1,
+        title: input.title,
+        mainActivity: input.mainActivity,
+        observableProduct: input.observableProduct,
+        assessmentEvidence: input.assessmentEvidence,
+        anticipatedDifficulties: structuredClone(input.anticipatedDifficulties),
+        plannedMinutes: input.plannedMinutes ?? aggregate.framework.lessonDurationMinutes,
+        teacherNotes: input.teacherNotes,
+        status: "draft",
+        version: 0,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }],
+    };
+    this.semesterFrameworks.set(key(ownerId, frameworkId), structuredClone(updated));
+    this.semesterFrameworkManualRequests.set(requestKey, {
+      signature,
+      aggregate: structuredClone(updated),
+    });
+    return structuredClone(updated);
+  }
+
+  async updateLessonBlueprint(
+    ownerId: string,
+    frameworkId: string,
+    blueprintId: string,
+    input: UpdateLessonBlueprintInput,
+    idempotencyKey: string,
+  ) {
+    const requestKey = key(ownerId, idempotencyKey);
+    const signature = JSON.stringify({ frameworkId, blueprintId, input });
+    const existingRequest = this.semesterFrameworkManualRequests.get(requestKey);
+    if (existingRequest) {
+      if (existingRequest.signature !== signature) throw new Error("idempotency_conflict");
+      return structuredClone(existingRequest.aggregate);
+    }
+    const aggregate = await this.getSemesterFramework(ownerId, frameworkId);
+    if (!aggregate) throw new Error("semester_framework_not_found");
+    const blueprint = aggregate.blueprints.find((candidate) => candidate.id === blueprintId);
+    if (!blueprint) throw new Error("lesson_blueprint_not_found");
+    if (blueprint.version !== input.expectedVersion) throw new Error("stale_resource");
+    const timestamp = now();
+    const { expectedVersion: _expectedVersion, ...updates } = input;
+    const updated: SemesterFrameworkAggregate = {
+      ...aggregate,
+      framework: {
+        ...aggregate.framework,
+        version: aggregate.framework.version + 1,
+        updatedAt: timestamp,
+      },
+      blueprints: aggregate.blueprints.map((candidate) => candidate.id === blueprintId
+        ? { ...candidate, ...structuredClone(updates), version: candidate.version + 1, updatedAt: timestamp }
+        : candidate),
+    };
+    this.semesterFrameworks.set(key(ownerId, frameworkId), structuredClone(updated));
+    this.semesterFrameworkManualRequests.set(requestKey, {
+      signature,
+      aggregate: structuredClone(updated),
+    });
+    return structuredClone(updated);
+  }
+
+  async deleteLessonBlueprint(
+    ownerId: string,
+    frameworkId: string,
+    blueprintId: string,
+    input: DeleteLessonBlueprintInput,
+    idempotencyKey: string,
+  ) {
+    const requestKey = key(ownerId, idempotencyKey);
+    const signature = JSON.stringify({ frameworkId, blueprintId, input });
+    const existingRequest = this.semesterFrameworkManualRequests.get(requestKey);
+    if (existingRequest) {
+      if (existingRequest.signature !== signature) throw new Error("idempotency_conflict");
+      return structuredClone(existingRequest.aggregate);
+    }
+    const aggregate = await this.getSemesterFramework(ownerId, frameworkId);
+    if (!aggregate) throw new Error("semester_framework_not_found");
+    const updated = applySemesterFrameworkPatch(aggregate, {
+      frameworkId,
+      baseFrameworkVersion: aggregate.framework.version,
+      summary: "教师删除课时蓝图",
+      operations: [{
+        op: "delete_lesson_blueprint",
+        blueprintId,
+        expectedVersion: input.expectedVersion,
+      }],
+    }, now());
+    this.semesterFrameworks.set(key(ownerId, frameworkId), structuredClone(updated));
+    this.semesterFrameworkManualRequests.set(requestKey, {
+      signature,
+      aggregate: structuredClone(updated),
+    });
+    return structuredClone(updated);
+  }
+
+  async getSemesterFramework(ownerId: string, frameworkId: string) {
+    const aggregate = this.semesterFrameworks.get(key(ownerId, frameworkId));
+    return aggregate ? structuredClone(aggregate) : null;
+  }
+
+  async getSemesterFrameworkContinuity(ownerId: string, frameworkId: string) {
+    const aggregate = await this.getSemesterFramework(ownerId, frameworkId);
+    if (!aggregate) throw new Error("semester_framework_not_found");
+    const candidates = [...(this.frameworkContinuity.get(key(ownerId, frameworkId))?.values() ?? [])]
+      .filter((candidate) => candidate.active)
+      .sort((left, right) => (
+        left.targetUnitId.localeCompare(right.targetUnitId)
+        || left.direction.localeCompare(right.direction)
+        || right.confidence - left.confidence
+      ));
+    return structuredClone({
+      status: aggregate.framework.semanticReleaseId
+        ? "available" as const
+        : "semantic_release_unavailable" as const,
+      frameworkVersion: aggregate.framework.version,
+      candidates,
+    });
+  }
+
+  async refreshSemesterFrameworkContinuity(ownerId: string, frameworkId: string) {
+    const aggregate = await this.getSemesterFramework(ownerId, frameworkId);
+    if (!aggregate) throw new Error("semester_framework_not_found");
+    if (!aggregate.framework.semanticReleaseId) {
+      this.frameworkContinuity.delete(key(ownerId, frameworkId));
+      return {
+        status: "semantic_release_unavailable" as const,
+        frameworkVersion: aggregate.framework.version,
+        candidates: [],
+      };
+    }
+
+    const nodes = this.curriculumNodes.filter((node) => (
+      node.textbookId === aggregate.framework.textbookId
+    ));
+    const nodeById = new Map(nodes.map((node) => [node.nodeId, node]));
+    const unitByRootNode = new Map(aggregate.units.map((unit) => [unit.curriculumNodeId, unit]));
+    const unitForNode = (nodeId: string) => {
+      let node = nodeById.get(nodeId);
+      const visited = new Set<string>();
+      while (node && !visited.has(node.nodeId)) {
+        visited.add(node.nodeId);
+        const unit = unitByRootNode.get(node.nodeId);
+        if (unit) return unit;
+        node = node.parentId ? nodeById.get(node.parentId) : undefined;
+      }
+      return undefined;
+    };
+    const occurrences = this.curriculumNodeKnowledge.flatMap((record) => {
+      if (record.textbookId !== aggregate.framework.textbookId) return [];
+      const unit = unitForNode(record.nodeId);
+      if (!unit) return [];
+      return record.points.map((point) => ({
+        unitId: unit.id,
+        unitSortNo: unit.sortNo,
+        nodeId: record.nodeId,
+        sequenceNo: point.sequenceNo,
+        entityId: point.point.id,
+        pointName: point.point.canonicalName,
+        confidence: point.point.confidence,
+      }));
+    });
+    const relationTypes = new Set([
+      "prerequisite", "supports", "develops_into", "transfers_to",
+    ]);
+    const relations = this.curriculumSemanticPaths
+      .filter((step) => step.depth === 1 && relationTypes.has(step.relationType))
+      .map((step): ReviewedProgressionRelation => ({
+        id: step.relationId,
+        relationType: step.relationType as ReviewedProgressionRelation["relationType"],
+        fromEntityId: step.fromEntity.id,
+        toEntityId: step.toEntity.id,
+        confidence: step.confidence,
+        rationale: step.rationale,
+      }));
+    const drafts = deriveFrameworkContinuity({ occurrences, relations });
+    const storageKey = key(ownerId, frameworkId);
+    const existing = this.frameworkContinuity.get(storageKey) ?? new Map();
+    for (const record of existing.values()) record.active = false;
+    const timestamp = now();
+    for (const draft of drafts) {
+      const prior = existing.get(draft.fingerprint);
+      const { fingerprint, ...candidate } = draft;
+      existing.set(fingerprint, {
+        id: prior?.id ?? crypto.randomUUID(),
+        frameworkId,
+        derivedFromFrameworkVersion: aggregate.framework.version,
+        ...candidate,
+        decision: prior?.decision ?? "candidate",
+        active: true,
+        createdAt: prior?.createdAt ?? timestamp,
+        updatedAt: timestamp,
+      });
+    }
+    this.frameworkContinuity.set(storageKey, existing);
+    return this.getSemesterFrameworkContinuity(ownerId, frameworkId);
+  }
+
+  async getCurrentCurriculumCatalogRelease() {
+    return structuredClone(this.curriculumCatalogRelease);
+  }
+
+  async getCurriculumCatalogRelease(releaseId: string) {
+    return releaseId === this.curriculumCatalogRelease.id
+      ? structuredClone(this.curriculumCatalogRelease)
+      : null;
+  }
+
   async listCurriculumFacets() {
     return buildCurriculumFacets(this.curriculumTextbooks);
   }
@@ -986,16 +1766,19 @@ export class MemoryLessonRepository implements LessonRepository {
     return filterCurriculumTextbooks(this.curriculumTextbooks, filter).map((book) => structuredClone(book));
   }
 
-  async getCurriculumTextbook(textbookId: string) {
+  async getCurriculumTextbook(textbookId: string, catalogReleaseId?: string) {
+    if (catalogReleaseId && catalogReleaseId !== this.curriculumCatalogRelease.id) return null;
     const book = this.curriculumTextbooks.find((item) => item.id === textbookId);
     return book ? structuredClone(book) : null;
   }
 
   async listCurriculumNodes(args: {
     textbookId: string;
+    catalogReleaseId?: string;
     parentId?: string | null;
     maxLevel?: number;
   }) {
+    if (args.catalogReleaseId && args.catalogReleaseId !== this.curriculumCatalogRelease.id) return [];
     const nodes = this.curriculumNodes.filter((node) => node.textbookId === args.textbookId);
     return buildCurriculumOutline(nodes, {
       parentId: args.parentId,
@@ -1009,5 +1792,111 @@ export class MemoryLessonRepository implements LessonRepository {
       nodes: this.curriculumNodes,
       ...args,
     }).map((match) => structuredClone(match));
+  }
+
+  async readCurriculumNodeSemantics(
+    args: Parameters<LessonRepository["readCurriculumNodeSemantics"]>[0],
+  ): Promise<CurriculumNodeSemanticsRecord> {
+    const record = this.curriculumNodeSemantics.find((item) => (
+      item.textbookId === args.textbookId && item.nodeId === args.nodeId
+    ));
+    return record
+      ? structuredClone({ release: record.release, mappings: record.mappings })
+      : { release: null, mappings: [] };
+  }
+
+  async getCurriculumSemanticEntity(entityId: string): Promise<CurriculumSemanticEntityRecord | null> {
+    const entity = this.curriculumSemanticEntities.find((item) => item.id === entityId);
+    return entity ? structuredClone(entity) : null;
+  }
+
+  async traceCurriculumSemanticPath(
+    args: Parameters<LessonRepository["traceCurriculumSemanticPath"]>[0],
+  ): Promise<CurriculumSemanticPathStep[]> {
+    const allowed = new Set(args.relationTypes ?? ["prerequisite", "develops_into", "supports"]);
+    const maxDepth = Math.min(Math.max(args.maxDepth ?? 3, 1), 6);
+    return this.curriculumSemanticPaths.filter((step) => {
+      if (!allowed.has(step.relationType) || step.depth > maxDepth) return false;
+      return args.direction === "forward"
+        ? step.fromEntity.id === args.entityId
+        : step.toEntity.id === args.entityId;
+    }).map((step) => {
+      const reachedEntity = args.direction === "forward" ? step.toEntity : step.fromEntity;
+      const locations = this.curriculumNodeSemantics.flatMap((record) => (
+        record.mappings
+          .filter((mapping) => mapping.entity.id === reachedEntity.id)
+          .map((mapping) => {
+            const textbook = this.curriculumTextbooks.find((item) => item.id === record.textbookId);
+            const node = this.curriculumNodes.find((item) => (
+              item.textbookId === record.textbookId && item.nodeId === record.nodeId
+            ));
+            return textbook && node ? {
+              textbook,
+              node,
+              instructionalRole: mapping.instructionalRole,
+              expectedDepth: mapping.expectedDepth,
+            } : null;
+          })
+          .filter((location) => location !== null)
+      ));
+      return structuredClone({ ...step, reachedEntity, locations });
+    });
+  }
+
+  async readCurriculumNodeKnowledgePoints(
+    args: Parameters<LessonRepository["readCurriculumNodeKnowledgePoints"]>[0],
+  ) {
+    const record = this.curriculumNodeKnowledge.find((item) => (
+      item.textbookId === args.textbookId && item.nodeId === args.nodeId
+    ));
+    return record
+      ? structuredClone({
+        release: record.release,
+        points: record.points,
+        periodRecommendations: record.periodRecommendations,
+      })
+      : { release: null, points: [], periodRecommendations: [] };
+  }
+
+  async readCurriculumNodesKnowledgePoints(
+    args: Parameters<LessonRepository["readCurriculumNodesKnowledgePoints"]>[0],
+  ) {
+    return Object.fromEntries(await Promise.all([...new Set(args.nodeIds)].map(async (nodeId) => [
+      nodeId,
+      await this.readCurriculumNodeKnowledgePoints({ textbookId: args.textbookId, nodeId }),
+    ])));
+  }
+
+  async searchCurriculumKnowledgePoints(
+    args: Parameters<LessonRepository["searchCurriculumKnowledgePoints"]>[0],
+  ) {
+    const query = args.query.trim().toLowerCase();
+    return this.curriculumKnowledgeSearch
+      .filter((result) => result.occurrences.some((occurrence) => (
+        this.curriculumNodes.some((node) => (
+          node.textbookId === args.textbookId && node.nodeId === occurrence.nodeId
+        ))
+      )))
+      .filter((result) => (
+        result.point.canonicalName.toLowerCase().includes(query)
+        || result.point.definition.toLowerCase().includes(query)
+        || result.point.sources.some((source) => source.title.toLowerCase().includes(query))
+      ))
+      .slice(0, args.limit ?? 12)
+      .map((result) => structuredClone(result));
+  }
+
+  async readCurriculumKnowledgeContinuity(
+    args: Parameters<LessonRepository["readCurriculumKnowledgeContinuity"]>[0],
+  ) {
+    if (args.textbookId !== "textbook-math-bnu"
+      || args.currentNodeId !== "ch1"
+      || args.entityId !== curriculumFixtureKnowledgeContinuity.target?.id) {
+      return { status: "unavailable" as const, currentSequenceNo: null, candidates: [] };
+    }
+    return structuredClone({
+      ...curriculumFixtureKnowledgeContinuity,
+      candidates: curriculumFixtureKnowledgeContinuity.candidates.slice(0, args.limit ?? 12),
+    });
   }
 }

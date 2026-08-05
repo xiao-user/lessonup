@@ -71,4 +71,21 @@ describe("extractSources", () => {
       chunkId: undefined,
     }]);
   });
+
+  it("does not persist an inaccessible curriculum object URL into the conversation", () => {
+    expect(extractSources(JSON.stringify({
+      sources: [{
+        id: "curriculum-knowledge:1",
+        title: "语文七年级上册：核心知识",
+        url: "https://r1-ndr.ykt.cbern.com.cn/assets/textbook.pdf",
+        kind: "public",
+      }],
+    }))).toEqual([{
+      id: "curriculum-knowledge:1",
+      title: "语文七年级上册：核心知识",
+      kind: "public",
+      page: undefined,
+      chunkId: undefined,
+    }]);
+  });
 });

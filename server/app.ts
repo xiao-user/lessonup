@@ -6,7 +6,17 @@ import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 import { requireUser, type AppBindings } from "./auth.js";
 import { config, hasDeepSeek, runtimeCapabilities } from "./config.js";
-import { lessonContextProfileSchema, lessonPlanSchema } from "./domain.js";
+import {
+  curriculumSemanticRelationSchema,
+  createSemesterFrameworkSchema,
+  createLessonBlueprintSchema,
+  deleteLessonBlueprintSchema,
+  lessonContextProfileSchema,
+  lessonDesignBasisPatchSchema,
+  lessonPlanSchema,
+  semesterFrameworkPatchSchema,
+  updateLessonBlueprintSchema,
+} from "./domain.js";
 import { LessonAgentHarness } from "./agent/harness.js";
 import { publicAgentError } from "./agent/public-error.js";
 import { handleMcpRequest } from "./mcp/servers.js";
@@ -24,7 +34,7 @@ import { canonicalizeLessonContextProfile } from "./curriculum/context-profile.j
 let tracingConfigured = false;
 
 const selectionSchema = z.object({
-  field: z.enum(["unit", "period", "totalPeriods", "topic", "objectives", "focus", "preparation", "process", "assessment", "homework", "board", "reflection"]),
+  field: z.enum(["unit", "period", "totalPeriods", "topic", "objectives", "knowledgePoints", "continuity", "focus", "preparation", "process", "assessment", "homework", "board", "reflection"]),
   start: z.number().int().nonnegative(),
   end: z.number().int().nonnegative(),
   text: z.string(),
@@ -34,6 +44,7 @@ const runInputSchema = z.object({
   branchId: z.string().min(1),
   message: z.string().trim().min(1).max(20_000),
   activeSectionId: z.string().min(1),
+  activeUnitId: z.string().uuid().optional(),
   documentVersion: z.number().int().nonnegative(),
   selection: selectionSchema.optional(),
   attachmentIds: z.array(z.string().uuid()).max(8).default([]),
@@ -146,7 +157,11 @@ export function createApp(
   });
 
   app.delete("/api/notebooks/:id", async (c) => {
-    await repository.deleteNotebook(c.get("userId"), c.req.param("id"));
+    const ownerId = c.get("userId");
+    const notebookId = c.req.param("id");
+    if (!await repository.getNotebook(ownerId, notebookId)) throw new Error("notebook_not_found");
+    await knowledgeUploads.deleteForNotebook(ownerId, notebookId);
+    await repository.deleteNotebook(ownerId, notebookId);
     return c.body(null, 204);
   });
 
@@ -158,6 +173,7 @@ export function createApp(
       image: z.string().max(500).optional(),
       document: lessonPlanSchema,
       contextProfile: lessonContextProfileSchema.optional(),
+      lessonBlueprintId: z.string().uuid().optional(),
       pageCount: z.number().int().positive().default(1),
     }).parse(await c.req.json());
     const notebook = await repository.getNotebook(c.get("userId"), input.notebookId);
@@ -175,7 +191,7 @@ export function createApp(
     return c.json(await repository.createLessonFile(c.get("userId"), {
       ...input,
       contextProfile,
-    }), 201);
+    }, c.req.header("idempotency-key") ?? crypto.randomUUID()), 201);
   });
 
   app.patch("/api/lesson-files/:id", async (c) => {
@@ -206,14 +222,103 @@ export function createApp(
     }));
   });
 
+  app.get("/api/lesson-files/:id/design-basis", async (c) => {
+    const basis = await repository.getLessonDesignBasis(c.get("userId"), c.req.param("id"));
+    return basis
+      ? c.json(basis)
+      : c.json({ error: "lesson_design_basis_not_found" }, 404);
+  });
+
+  app.patch("/api/lesson-files/:id/design-basis", async (c) => {
+    const fileId = c.req.param("id");
+    const patch = lessonDesignBasisPatchSchema.parse({
+      ...await c.req.json(),
+      fileId,
+    });
+    const basis = await repository.getLessonDesignBasis(c.get("userId"), fileId);
+    if (!basis || basis.basis.id !== patch.basisId) {
+      return c.json({ error: "lesson_design_basis_not_found" }, 404);
+    }
+    return c.json(await repository.applyManualLessonDesignBasisPatch(
+      c.get("userId"),
+      patch,
+      c.req.header("idempotency-key") ?? crypto.randomUUID(),
+    ));
+  });
+
   app.delete("/api/lesson-files/:id", async (c) => {
-    await repository.deleteLessonFile(c.get("userId"), c.req.param("id"));
+    const ownerId = c.get("userId");
+    const fileId = c.req.param("id");
+    if (!await repository.getLessonFile(ownerId, fileId)) throw new Error("lesson_file_not_found");
+    await knowledgeUploads.deleteForLessonFile(ownerId, fileId);
+    await repository.deleteLessonFile(ownerId, fileId);
     return c.body(null, 204);
   });
 
   app.get("/api/curriculum/facets", async (c) => (
     c.json(await repository.listCurriculumFacets())
   ));
+
+  app.get("/api/curriculum/catalog/releases/current", async (c) => {
+    const release = await repository.getCurrentCurriculumCatalogRelease();
+    return release
+      ? c.json(release)
+      : c.json({ error: "curriculum_catalog_release_not_found" }, 404);
+  });
+
+  app.get("/api/curriculum/catalog/releases/:releaseId", async (c) => {
+    const releaseId = z.string().uuid().parse(c.req.param("releaseId"));
+    const release = await repository.getCurriculumCatalogRelease(releaseId);
+    return release
+      ? c.json(release)
+      : c.json({ error: "curriculum_catalog_release_not_found" }, 404);
+  });
+
+  app.get("/api/curriculum/catalog/releases/:releaseId/textbooks/:textbookId", async (c) => {
+    const releaseId = z.string().uuid().parse(c.req.param("releaseId"));
+    const release = await repository.getCurriculumCatalogRelease(releaseId);
+    if (!release?.snapshotComplete) {
+      return c.json({ error: "curriculum_catalog_snapshot_unavailable" }, 409);
+    }
+    const textbook = await repository.getCurriculumTextbook(
+      c.req.param("textbookId"),
+      releaseId,
+    );
+    return textbook
+      ? c.json({ release, textbook })
+      : c.json({ error: "curriculum_textbook_not_found" }, 404);
+  });
+
+  app.get("/api/curriculum/catalog/releases/:releaseId/textbooks/:textbookId/nodes", async (c) => {
+    const releaseId = z.string().uuid().parse(c.req.param("releaseId"));
+    const release = await repository.getCurriculumCatalogRelease(releaseId);
+    if (!release?.snapshotComplete) {
+      return c.json({ error: "curriculum_catalog_snapshot_unavailable" }, 409);
+    }
+    const textbook = await repository.getCurriculumTextbook(
+      c.req.param("textbookId"),
+      releaseId,
+    );
+    if (!textbook) return c.json({ error: "curriculum_textbook_not_found" }, 404);
+    const query = c.req.query();
+    const filter = z.object({
+      parentId: z.string().trim().min(1).max(80).optional(),
+      maxLevel: z.coerce.number().int().min(1).max(8).optional(),
+      rootsOnly: z.enum(["true", "false"]).optional(),
+    }).parse({
+      parentId: query.parentId || undefined,
+      maxLevel: query.maxLevel || undefined,
+      rootsOnly: query.rootsOnly || undefined,
+    });
+    const rootsOnly = filter.rootsOnly === "true";
+    const nodes = await repository.listCurriculumNodes({
+      textbookId: textbook.id,
+      catalogReleaseId: releaseId,
+      parentId: rootsOnly ? null : filter.parentId,
+      maxLevel: filter.maxLevel ?? (rootsOnly ? 1 : 8),
+    });
+    return c.json({ release, textbook, nodes });
+  });
 
   app.get("/api/curriculum/textbooks", async (c) => {
     const query = c.req.query();
@@ -265,6 +370,127 @@ export function createApp(
     return c.json({ textbook, nodes });
   });
 
+  app.get("/api/curriculum/textbooks/:id/nodes/:nodeId/semantics", async (c) => {
+    const textbook = await repository.getCurriculumTextbook(c.req.param("id"));
+    if (!textbook) return c.json({ error: "curriculum_textbook_not_found" }, 404);
+    const nodeId = z.string().trim().min(1).max(80).parse(c.req.param("nodeId"));
+    const nodes = await repository.listCurriculumNodes({ textbookId: textbook.id, maxLevel: 8 });
+    const node = nodes.find((candidate) => candidate.nodeId === nodeId);
+    if (!node) return c.json({ error: "curriculum_node_not_found" }, 404);
+    const semantics = await repository.readCurriculumNodeSemantics({
+      textbookId: textbook.id,
+      nodeId,
+    });
+    return c.json({ textbook, node, ...semantics });
+  });
+
+  app.get("/api/curriculum/textbooks/:id/nodes/:nodeId/knowledge-points", async (c) => {
+    const textbook = await repository.getCurriculumTextbook(c.req.param("id"));
+    if (!textbook) return c.json({ error: "curriculum_textbook_not_found" }, 404);
+    const nodeId = z.string().trim().min(1).max(80).parse(c.req.param("nodeId"));
+    const nodes = await repository.listCurriculumNodes({ textbookId: textbook.id, maxLevel: 8 });
+    const node = nodes.find((candidate) => candidate.nodeId === nodeId);
+    if (!node) return c.json({ error: "curriculum_node_not_found" }, 404);
+    return c.json({
+      textbook,
+      node,
+      ...await repository.readCurriculumNodeKnowledgePoints({ textbookId: textbook.id, nodeId }),
+    });
+  });
+
+  app.post("/api/curriculum/textbooks/:id/knowledge-points/batch", async (c) => {
+    const textbook = await repository.getCurriculumTextbook(c.req.param("id"));
+    if (!textbook) return c.json({ error: "curriculum_textbook_not_found" }, 404);
+    const { nodeIds } = z.object({
+      nodeIds: z.array(z.string().trim().min(1).max(80)).min(1).max(100),
+    }).parse(await c.req.json());
+    return c.json({
+      records: await repository.readCurriculumNodesKnowledgePoints({
+        textbookId: textbook.id,
+        nodeIds,
+      }),
+    });
+  });
+
+  app.get("/api/curriculum/textbooks/:id/knowledge-points", async (c) => {
+    const textbook = await repository.getCurriculumTextbook(c.req.param("id"));
+    if (!textbook) return c.json({ error: "curriculum_textbook_not_found" }, 404);
+    const input = z.object({
+      query: z.string().trim().min(1).max(200),
+      limit: z.coerce.number().int().min(1).max(30).default(12),
+    }).parse({ query: c.req.query("query"), limit: c.req.query("limit") || undefined });
+    return c.json({
+      textbook,
+      query: input.query,
+      results: await repository.searchCurriculumKnowledgePoints({
+        textbookId: textbook.id,
+        query: input.query,
+        limit: input.limit,
+      }),
+    });
+  });
+
+  app.get("/api/curriculum/textbooks/:id/knowledge-points/:entityId/continuity", async (c) => {
+    const textbook = await repository.getCurriculumTextbook(c.req.param("id"));
+    if (!textbook) return c.json({ error: "curriculum_textbook_not_found" }, 404);
+    const input = z.object({
+      entityId: z.string().uuid(),
+      currentNodeId: z.string().trim().min(1).max(80),
+      limit: z.coerce.number().int().min(1).max(30).default(12),
+    }).parse({
+      entityId: c.req.param("entityId"),
+      currentNodeId: c.req.query("currentNodeId"),
+      limit: c.req.query("limit") || undefined,
+    });
+    return c.json(await repository.readCurriculumKnowledgeContinuity({
+      textbookId: textbook.id,
+      currentNodeId: input.currentNodeId,
+      entityId: input.entityId,
+      limit: input.limit,
+    }));
+  });
+
+  app.get("/api/curriculum/semantics/:id", async (c) => {
+    const entityId = z.string().uuid().parse(c.req.param("id"));
+    const entity = await repository.getCurriculumSemanticEntity(entityId);
+    return entity
+      ? c.json(entity)
+      : c.json({ error: "curriculum_semantic_entity_not_found" }, 404);
+  });
+
+  app.get("/api/curriculum/semantics/:id/path", async (c) => {
+    const query = c.req.query();
+    const input = z.object({
+      entityId: z.string().uuid(),
+      direction: z.enum(["backward", "forward"]).default("backward"),
+      relationTypes: z.string().trim().optional(),
+      maxDepth: z.coerce.number().int().min(1).max(6).default(3),
+    }).parse({
+      entityId: c.req.param("id"),
+      direction: query.direction || undefined,
+      relationTypes: query.relationTypes || undefined,
+      maxDepth: query.maxDepth || undefined,
+    });
+    const relationTypes = input.relationTypes
+      ? z.array(curriculumSemanticRelationSchema).min(1).max(7).parse(
+        input.relationTypes.split(",").map((value) => value.trim()).filter(Boolean),
+      )
+      : undefined;
+    if (!await repository.getCurriculumSemanticEntity(input.entityId)) {
+      return c.json({ error: "curriculum_semantic_entity_not_found" }, 404);
+    }
+    return c.json({
+      entityId: input.entityId,
+      direction: input.direction,
+      steps: await repository.traceCurriculumSemanticPath({
+        entityId: input.entityId,
+        direction: input.direction,
+        relationTypes,
+        maxDepth: input.maxDepth,
+      }),
+    });
+  });
+
   app.post("/api/knowledge/uploads", async (c) => {
     if (!knowledgeUploads.configured) return c.json({ error: "knowledge_indexing_not_configured" }, 503);
     const form = await c.req.formData();
@@ -284,15 +510,25 @@ export function createApp(
   });
 
   app.get("/api/knowledge/uploads", async (c) => {
-    if (!knowledgeUploads.configured) return c.json({ error: "knowledge_indexing_not_configured" }, 503);
+    if (!knowledgeUploads.storageConfigured) return c.json({ error: "knowledge_storage_not_configured" }, 503);
+    const query = z.object({
+      notebookId: z.string().min(1).optional(),
+      lessonFileId: z.string().min(1).optional(),
+      view: z.enum(["drafts", "all"]).default("drafts"),
+    }).parse({
+      notebookId: c.req.query("notebookId") || undefined,
+      lessonFileId: c.req.query("lessonFileId") || undefined,
+      view: c.req.query("view") || undefined,
+    });
     return c.json(await knowledgeUploads.list(c.get("userId"), {
-      notebookId: c.req.query("notebookId"),
-      lessonFileId: c.req.query("lessonFileId"),
+      notebookId: query.notebookId,
+      lessonFileId: query.lessonFileId,
+      includeAttached: query.view === "all",
     }));
   });
 
   app.get("/api/knowledge/uploads/:id", async (c) => {
-    if (!knowledgeUploads.configured) return c.json({ error: "knowledge_indexing_not_configured" }, 503);
+    if (!knowledgeUploads.storageConfigured) return c.json({ error: "knowledge_storage_not_configured" }, 503);
     return c.json(await knowledgeUploads.get(c.get("userId"), c.req.param("id")));
   });
 
@@ -301,8 +537,119 @@ export function createApp(
   });
 
   app.delete("/api/knowledge/uploads/:id", async (c) => {
+    if (!knowledgeUploads.storageConfigured) return c.json({ error: "knowledge_storage_not_configured" }, 503);
     await knowledgeUploads.delete(c.get("userId"), c.req.param("id"));
     return c.body(null, 204);
+  });
+
+  app.get("/api/notebooks/:id/semester-frameworks", async (c) => {
+    const ownerId = c.get("userId");
+    const notebookId = c.req.param("id");
+    if (!await repository.getNotebook(ownerId, notebookId)) {
+      return c.json({ error: "notebook_not_found" }, 404);
+    }
+    return c.json({
+      frameworks: await repository.listSemesterFrameworks(ownerId, notebookId),
+    });
+  });
+
+  app.post("/api/notebooks/:id/semester-frameworks", async (c) => {
+    const ownerId = c.get("userId");
+    const notebookId = c.req.param("id");
+    const input = createSemesterFrameworkSchema.parse(await c.req.json());
+    const framework = await repository.createSemesterFramework(
+      ownerId,
+      notebookId,
+      input,
+      c.req.header("idempotency-key") ?? crypto.randomUUID(),
+    );
+    return c.json(framework, 201);
+  });
+
+  app.get("/api/semester-frameworks/:id", async (c) => {
+    const frameworkId = z.string().uuid().parse(c.req.param("id"));
+    const framework = await repository.getSemesterFramework(c.get("userId"), frameworkId);
+    return framework
+      ? c.json(framework)
+      : c.json({ error: "semester_framework_not_found" }, 404);
+  });
+
+  app.patch("/api/semester-frameworks/:id", async (c) => {
+    const frameworkId = z.string().uuid().parse(c.req.param("id"));
+    const patch = semesterFrameworkPatchSchema.parse({
+      ...await c.req.json(),
+      frameworkId,
+    });
+    const framework = await repository.getSemesterFramework(c.get("userId"), frameworkId);
+    if (!framework) return c.json({ error: "semester_framework_not_found" }, 404);
+    return c.json(await repository.applyManualSemesterFrameworkPatch(
+      c.get("userId"),
+      patch,
+      c.req.header("idempotency-key") ?? crypto.randomUUID(),
+    ));
+  });
+
+  app.post("/api/semester-frameworks/:id/blueprints", async (c) => {
+    const frameworkId = z.string().uuid().parse(c.req.param("id"));
+    const input = createLessonBlueprintSchema.parse(await c.req.json());
+    const framework = await repository.getSemesterFramework(c.get("userId"), frameworkId);
+    if (!framework) return c.json({ error: "semester_framework_not_found" }, 404);
+    return c.json(await repository.createLessonBlueprint(
+      c.get("userId"),
+      frameworkId,
+      input,
+      c.req.header("idempotency-key") ?? crypto.randomUUID(),
+    ), 201);
+  });
+
+  app.patch("/api/semester-frameworks/:id/blueprints/:blueprintId", async (c) => {
+    const frameworkId = z.string().uuid().parse(c.req.param("id"));
+    const blueprintId = z.string().uuid().parse(c.req.param("blueprintId"));
+    const input = updateLessonBlueprintSchema.parse(await c.req.json());
+    const framework = await repository.getSemesterFramework(c.get("userId"), frameworkId);
+    if (!framework) return c.json({ error: "semester_framework_not_found" }, 404);
+    return c.json(await repository.updateLessonBlueprint(
+      c.get("userId"),
+      frameworkId,
+      blueprintId,
+      input,
+      c.req.header("idempotency-key") ?? crypto.randomUUID(),
+    ));
+  });
+
+  app.delete("/api/semester-frameworks/:id/blueprints/:blueprintId", async (c) => {
+    const frameworkId = z.string().uuid().parse(c.req.param("id"));
+    const blueprintId = z.string().uuid().parse(c.req.param("blueprintId"));
+    const input = deleteLessonBlueprintSchema.parse(await c.req.json());
+    const framework = await repository.getSemesterFramework(c.get("userId"), frameworkId);
+    if (!framework) return c.json({ error: "semester_framework_not_found" }, 404);
+    return c.json(await repository.deleteLessonBlueprint(
+      c.get("userId"),
+      frameworkId,
+      blueprintId,
+      input,
+      c.req.header("idempotency-key") ?? crypto.randomUUID(),
+    ));
+  });
+
+  app.get("/api/semester-frameworks/:id/continuity", async (c) => {
+    const frameworkId = z.string().uuid().parse(c.req.param("id"));
+    const framework = await repository.getSemesterFramework(c.get("userId"), frameworkId);
+    if (!framework) return c.json({ error: "semester_framework_not_found" }, 404);
+    return c.json(await repository.getSemesterFrameworkContinuity(
+      c.get("userId"),
+      frameworkId,
+    ));
+  });
+
+  app.post("/api/semester-frameworks/:id/continuity/refresh", async (c) => {
+    const frameworkId = z.string().uuid().parse(c.req.param("id"));
+    const framework = await repository.getSemesterFramework(c.get("userId"), frameworkId);
+    if (!framework) return c.json({ error: "semester_framework_not_found" }, 404);
+    return c.json(await repository.refreshSemesterFrameworkContinuity(
+      c.get("userId"),
+      frameworkId,
+    ));
   });
 
   app.get("/api/lesson-files/:id", async (c) => {
@@ -340,22 +687,45 @@ export function createApp(
   });
 
   app.get("/api/agent/threads", async (c) => {
-    const fileId = z.string().min(1).parse(c.req.query("lessonFileId"));
+    const scope = z.object({
+      lessonFileId: z.string().min(1).optional(),
+      semesterFrameworkId: z.string().uuid().optional(),
+    }).refine(
+      (value) => Number(Boolean(value.lessonFileId)) + Number(Boolean(value.semesterFrameworkId)) === 1,
+      "agent_resource_scope_invalid",
+    ).parse({
+      lessonFileId: c.req.query("lessonFileId") || undefined,
+      semesterFrameworkId: c.req.query("semesterFrameworkId") || undefined,
+    });
     const includeArchived = c.req.query("includeArchived") === "true";
-    return c.json(await repository.listThreads(c.get("userId"), fileId, includeArchived));
+    return c.json(await repository.listThreads(
+      c.get("userId"),
+      scope.semesterFrameworkId
+        ? { resourceType: "semester_framework", semesterFrameworkId: scope.semesterFrameworkId }
+        : { resourceType: "lesson_file", lessonFileId: scope.lessonFileId! },
+      includeArchived,
+    ));
   });
 
   app.post("/api/agent/threads", async (c) => {
     const input = z.object({
       notebookId: z.string(),
-      lessonFileId: z.string(),
+      lessonFileId: z.string().optional(),
+      semesterFrameworkId: z.string().uuid().optional(),
       title: z.string().max(80).optional(),
       currentThreadId: z.string().optional(),
       currentBranchId: z.string().optional(),
-    }).refine(
-      (value) => Boolean(value.currentThreadId) === Boolean(value.currentBranchId),
-      "current_thread_scope_incomplete",
-    ).parse(await c.req.json());
+    }).superRefine((value, context) => {
+      if (Boolean(value.currentThreadId) !== Boolean(value.currentBranchId)) {
+        context.addIssue({ code: "custom", message: "current_thread_scope_incomplete" });
+      }
+      if (Number(Boolean(value.lessonFileId)) + Number(Boolean(value.semesterFrameworkId)) !== 1) {
+        context.addIssue({ code: "custom", message: "agent_resource_scope_invalid" });
+      }
+    }).parse(await c.req.json());
+    const resource = input.semesterFrameworkId
+      ? { resourceType: "semester_framework" as const, semesterFrameworkId: input.semesterFrameworkId }
+      : { resourceType: "lesson_file" as const, lessonFileId: input.lessonFileId! };
     const ownerId = c.get("userId");
     if (input.currentThreadId && input.currentBranchId) {
       const [thread, branch, messages] = await Promise.all([
@@ -363,12 +733,20 @@ export function createApp(
         repository.getBranch(ownerId, input.currentThreadId, input.currentBranchId),
         repository.listMessages(ownerId, input.currentThreadId, input.currentBranchId, undefined, 1),
       ]);
-      if (!thread || !branch || thread.lessonFileId !== input.lessonFileId) {
+      const sameResource = resource.resourceType === "lesson_file"
+        ? thread?.resourceType === "lesson_file" && thread.lessonFileId === resource.lessonFileId
+        : thread?.resourceType === "semester_framework"
+          && thread.semesterFrameworkId === resource.semesterFrameworkId;
+      if (!thread || !branch || !sameResource) {
         return c.json({ error: "current_thread_scope_invalid" }, 404);
       }
       if (!messages.length) return c.json({ error: "current_thread_empty" }, 409);
     }
-    const created = await repository.createThread(ownerId, input);
+    const created = await repository.createThread(
+      ownerId,
+      { notebookId: input.notebookId, title: input.title, ...resource },
+      c.req.header("idempotency-key") ?? crypto.randomUUID(),
+    );
     return c.json(created, 201);
   });
 
@@ -377,15 +755,27 @@ export function createApp(
     const ownerId = c.get("userId");
     const thread = await repository.getThread(ownerId, c.req.param("id"));
     if (!thread) return c.json({ error: "thread_not_found" }, 404);
-    const [notebook, file] = await Promise.all([
-      repository.getNotebook(ownerId, thread.notebookId),
-      repository.getLessonFile(ownerId, thread.lessonFileId),
-    ]);
-    if (!notebook || !file) return c.json({ error: "lesson_file_not_found" }, 404);
-    const updated = await repository.updateThread(ownerId, thread.id, {
-      starterSuggestions: await threadStarterGenerator({ notebook, file }),
-      starterSuggestionsDocumentVersion: file.documentVersion,
-    });
+    const notebook = await repository.getNotebook(ownerId, thread.notebookId);
+    if (!notebook) return c.json({ error: "notebook_not_found" }, 404);
+    let updated;
+    if (thread.resourceType === "semester_framework") {
+      const framework = await repository.getSemesterFramework(
+        ownerId,
+        thread.semesterFrameworkId,
+      );
+      if (!framework) return c.json({ error: "semester_framework_not_found" }, 404);
+      updated = await repository.updateThread(ownerId, thread.id, {
+        starterSuggestions: await threadStarterGenerator({ notebook, framework }),
+        starterSuggestionsResourceVersion: framework.framework.version,
+      });
+    } else {
+      const file = await repository.getLessonFile(ownerId, thread.lessonFileId);
+      if (!file) return c.json({ error: "lesson_file_not_found" }, 404);
+      updated = await repository.updateThread(ownerId, thread.id, {
+        starterSuggestions: await threadStarterGenerator({ notebook, file }),
+        starterSuggestionsDocumentVersion: file.documentVersion,
+      });
+    }
     return c.json(updated);
   });
 
@@ -423,6 +813,7 @@ export function createApp(
       assistantMessageId: approval.assistantMessageId,
       state: approval.state,
       continuationStatus: approval.continuationStatus,
+      continuationMessageId: approval.continuationMessageId,
       patch: approval.patch,
       expiresAt: approval.expiresAt,
       createdAt: approval.createdAt,

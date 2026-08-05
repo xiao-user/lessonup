@@ -6,14 +6,37 @@ import type {
   AgentMessageRecord,
   AgentRunEvidenceRecord,
   AgentRunRecord,
+  AgentResourceRef,
   AgentThreadRecord,
+  CurriculumCatalogReleaseRecord,
   CurriculumNodeRecord,
+  CurriculumNodeKnowledgeRecord,
+  CurriculumNodeSemanticsRecord,
+  CurriculumKnowledgeContinuityRecord,
+  CurriculumKnowledgeSearchResult,
+  CurriculumSemanticEntityRecord,
+  CurriculumSemanticPathStep,
   CurriculumTextbookRecord,
+  CreateSemesterFrameworkInput,
+  CreateLessonBlueprintInput,
+  DeleteLessonBlueprintInput,
+  FrameworkOutcomeSelectionRecord,
+  FrameworkContinuityCandidateRecord,
   KnowledgeResult,
+  LessonDesignBasisAggregate,
+  LessonDesignBasisEntryRecord,
+  LessonDesignBasisPatch,
+  LessonDesignBasisRecord,
+  LessonBlueprintRecord,
   LessonFileRecord,
   NotebookRecord,
   SourceRef,
   NormalizedAgentEvent,
+  SemesterFrameworkAggregate,
+  SemesterFrameworkRecord,
+  SemesterFrameworkPatch,
+  SemesterUnitRecord,
+  UpdateLessonBlueprintInput,
 } from "../domain.js";
 import { lessonContextProfileSchema, lessonPlanSchema } from "../domain.js";
 import {
@@ -23,10 +46,13 @@ import {
   searchCurriculumNodeRecords,
   type CurriculumTextbookFilter,
 } from "../curriculum/catalog.js";
+import { deriveFrameworkContinuity } from "../curriculum/framework-continuity.js";
 import type { CreateThreadInput, ImportedNotebook, LessonRepository } from "../repository.js";
+import { createLessonPlanPreview } from "../../src/lib/lesson-preview.js";
+import { persistedActivitiesFromEvents } from "../agent-activity-presentation.js";
 
 const mapCurriculumTextbook = (row: Record<string, any>): CurriculumTextbookRecord => ({
-  id: row.id,
+  id: row.id ?? row.textbook_id,
   title: row.title,
   stage: row.stage,
   subject: row.subject,
@@ -43,6 +69,21 @@ const mapCurriculumTextbook = (row: Record<string, any>): CurriculumTextbookReco
   sourceUpdatedAt: row.source_updated_at ?? null,
 });
 
+const mapCurriculumCatalogRelease = (
+  row: Record<string, any>,
+): CurriculumCatalogReleaseRecord => ({
+  id: row.id,
+  generationId: row.generation_id,
+  status: row.status,
+  snapshotComplete: row.snapshot_complete,
+  manifest: row.manifest ?? {},
+  textbookCount: Number(row.textbook_count ?? 0),
+  nodeCount: Number(row.node_count ?? 0),
+  createdAt: row.created_at,
+  publishedAt: row.published_at ?? null,
+  retiredAt: row.retired_at ?? null,
+});
+
 const mapCurriculumNode = (row: Record<string, any>): CurriculumNodeRecord => ({
   textbookId: row.textbook_id,
   nodeId: row.node_id,
@@ -51,6 +92,197 @@ const mapCurriculumNode = (row: Record<string, any>): CurriculumNodeRecord => ({
   sortNo: row.sort_no,
   title: row.title,
   pageNumber: row.page_number ?? null,
+});
+
+const mapSemesterFramework = (row: Record<string, any>): SemesterFrameworkRecord => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  notebookId: row.notebook_id,
+  textbookId: row.textbook_id,
+  catalogReleaseId: row.catalog_release_id,
+  semanticReleaseId: row.semantic_release_id ?? null,
+  title: row.title,
+  term: row.term,
+  startDate: row.start_date ?? null,
+  totalWeeks: Number(row.total_weeks),
+  weeklyPeriods: Number(row.weekly_periods),
+  lessonDurationMinutes: Number(row.lesson_duration_minutes),
+  capacityRatio: Number(row.capacity_ratio),
+  planningHorizonWeeks: Number(row.planning_horizon_weeks),
+  contextProfile: row.context_profile ?? {},
+  version: Number(row.version),
+  status: row.status,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const mapSemesterUnit = (row: Record<string, any>): SemesterUnitRecord => ({
+  id: row.id,
+  frameworkId: row.framework_id,
+  curriculumNodeId: row.curriculum_node_id,
+  sortNo: Number(row.sort_no),
+  plannedStartWeek: row.planned_start_week == null ? null : Number(row.planned_start_week),
+  plannedEndWeek: row.planned_end_week == null ? null : Number(row.planned_end_week),
+  plannedPeriods: Number(row.planned_periods),
+  learningGoals: row.learning_goals ?? "",
+  teacherNotes: row.teacher_notes ?? "",
+  status: row.status,
+  version: Number(row.version),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const mapLessonBlueprint = (row: Record<string, any>): LessonBlueprintRecord => ({
+  id: row.id,
+  frameworkId: row.framework_id,
+  semesterUnitId: row.semester_unit_id,
+  curriculumNodeId: row.curriculum_node_id,
+  chapterPeriodNo: Number(row.chapter_period_no ?? 1),
+  plannedPeriod: Number(row.planned_period),
+  sortNo: Number(row.sort_no),
+  title: row.title,
+  mainActivity: row.main_activity ?? "",
+  observableProduct: row.observable_product ?? "",
+  assessmentEvidence: row.assessment_evidence ?? "",
+  anticipatedDifficulties: row.anticipated_difficulties ?? [],
+  plannedMinutes: Number(row.planned_minutes ?? 40),
+  teacherNotes: row.teacher_notes ?? "",
+  status: row.status,
+  version: Number(row.version),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const mapFrameworkOutcomeSelection = (
+  row: Record<string, any>,
+): FrameworkOutcomeSelectionRecord => ({
+  id: row.id,
+  frameworkId: row.framework_id,
+  semesterUnitId: row.semester_unit_id ?? null,
+  lessonBlueprintId: row.lesson_blueprint_id ?? null,
+  semanticReleaseId: row.semantic_release_id,
+  semanticEntityId: row.semantic_entity_id,
+  priority: Number(row.priority),
+  teacherConfirmed: Boolean(row.teacher_confirmed),
+  teacherAdjusted: Boolean(row.teacher_adjusted),
+  adjustmentReason: row.adjustment_reason ?? "",
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const mapLessonDesignBasis = (row: Record<string, any>): LessonDesignBasisRecord => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  notebookId: row.notebook_id,
+  lessonFileId: row.lesson_file_id,
+  frameworkId: row.framework_id ?? null,
+  semesterUnitId: row.semester_unit_id ?? null,
+  lessonBlueprintId: row.lesson_blueprint_id ?? null,
+  catalogReleaseId: row.catalog_release_id ?? null,
+  textbookId: row.textbook_id ?? null,
+  curriculumNodeId: row.curriculum_node_id ?? null,
+  semanticReleaseId: row.semantic_release_id ?? null,
+  sourceFrameworkVersion: row.source_framework_version == null
+    ? null
+    : Number(row.source_framework_version),
+  sourceBlueprintVersion: row.source_blueprint_version == null
+    ? null
+    : Number(row.source_blueprint_version),
+  learnerContext: row.learner_context ?? {},
+  teacherNotes: row.teacher_notes ?? "",
+  status: row.status,
+  version: Number(row.version),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const mapLessonDesignBasisEntry = (
+  row: Record<string, any>,
+): LessonDesignBasisEntryRecord => ({
+  id: row.id,
+  basisId: row.basis_id,
+  kind: row.kind,
+  semanticEntityId: row.semantic_entity_id ?? null,
+  semanticEntityName: row.semantic_entity_name ?? null,
+  relatedSemanticEntityId: row.related_semantic_entity_id ?? null,
+  relatedSemanticEntityName: row.related_semantic_entity_name ?? null,
+  relatedCurriculumNodeId: row.related_curriculum_node_id ?? null,
+  relatedCurriculumNodeTitle: row.related_curriculum_node_title ?? null,
+  statement: row.statement,
+  rationale: row.rationale ?? "",
+  evidence: row.evidence ?? [],
+  decision: row.decision,
+  teacherConfirmed: Boolean(row.teacher_confirmed),
+  origin: row.origin,
+  sortNo: Number(row.sort_no),
+  version: Number(row.version),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const mapLessonDesignBasisAggregate = (
+  payload: Record<string, any>,
+): LessonDesignBasisAggregate => ({
+  basis: mapLessonDesignBasis(payload.basis),
+  entries: (payload.entries ?? []).map(mapLessonDesignBasisEntry),
+});
+
+const mapFrameworkContinuityCandidate = (
+  row: Record<string, any>,
+): FrameworkContinuityCandidateRecord => ({
+  id: row.id,
+  frameworkId: row.framework_id,
+  derivedFromFrameworkVersion: Number(row.derived_from_framework_version),
+  targetUnitId: row.target_unit_id,
+  direction: row.direction,
+  currentEntityId: row.current_entity_id,
+  currentPointName: row.current_point_name,
+  relatedEntityId: row.related_entity_id,
+  relatedPointName: row.related_point_name,
+  relatedUnitId: row.related_unit_id,
+  evidenceKind: row.evidence_kind,
+  relationId: row.relation_id ?? null,
+  relationType: row.relation_type ?? null,
+  confidence: Number(row.confidence),
+  rationale: row.rationale,
+  evidence: row.evidence ?? {},
+  decision: row.decision,
+  active: Boolean(row.active),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+function mergeFrameworkContinuityCandidates(
+  verified: FrameworkContinuityCandidateRecord[],
+  suggested: FrameworkContinuityCandidateRecord[],
+) {
+  const keys = new Set(verified.map((candidate) => [
+    candidate.targetUnitId,
+    candidate.direction,
+    candidate.currentEntityId,
+    candidate.relatedEntityId,
+    candidate.relatedUnitId,
+  ].join(":")));
+  return [...verified, ...suggested.filter((candidate) => !keys.has([
+    candidate.targetUnitId,
+    candidate.direction,
+    candidate.currentEntityId,
+    candidate.relatedEntityId,
+    candidate.relatedUnitId,
+  ].join(":")))].sort((left, right) => (
+    left.targetUnitId.localeCompare(right.targetUnitId)
+    || left.direction.localeCompare(right.direction)
+    || (left.evidenceKind === "lexical_similarity" ? 1 : 0)
+      - (right.evidenceKind === "lexical_similarity" ? 1 : 0)
+    || right.confidence - left.confidence
+  ));
+}
+
+const mapSemesterFrameworkAggregate = (payload: Record<string, any>): SemesterFrameworkAggregate => ({
+  framework: mapSemesterFramework(payload.framework),
+  units: (payload.units ?? []).map(mapSemesterUnit),
+  blueprints: (payload.blueprints ?? []).map(mapLessonBlueprint),
+  outcomeSelections: (payload.outcomeSelections ?? []).map(mapFrameworkOutcomeSelection),
 });
 
 function unwrap<T>(result: { data: T | null; error: { message: string } | null }): T {
@@ -63,18 +295,24 @@ const mapThread = (row: Record<string, any>): AgentThreadRecord => ({
   id: row.id,
   ownerId: row.owner_id,
   notebookId: row.notebook_id,
-  lessonFileId: row.lesson_file_id,
+  resourceType: row.resource_type ?? "lesson_file",
+  ...(row.resource_type === "semester_framework"
+    ? { semesterFrameworkId: row.semester_framework_id }
+    : { lessonFileId: row.lesson_file_id }),
   title: row.title,
   status: row.status,
   starterSuggestions: row.starter_suggestions ?? [],
   starterSuggestionsDocumentVersion: row.starter_suggestions_document_version == null
     ? undefined
     : Number(row.starter_suggestions_document_version),
+  starterSuggestionsResourceVersion: row.starter_suggestions_resource_version == null
+    ? undefined
+    : Number(row.starter_suggestions_resource_version),
   archivedAt: row.archived_at ?? undefined,
   deletedAt: row.deleted_at ?? undefined,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
-});
+}) as AgentThreadRecord;
 
 const mapBranch = (row: Record<string, any>): AgentBranchRecord => ({
   id: row.id, ownerId: row.owner_id, threadId: row.thread_id,
@@ -119,7 +357,14 @@ const mapApproval = (row: Record<string, any>): AgentApprovalRecord => ({
   patch: row.patch,
   encryptedRunState: row.encrypted_run_state,
   agentDefinitionVersion: row.agent_definition_version,
-  documentVersion: row.document_version,
+  resourceType: row.resource_type ?? undefined,
+  patchKind: row.patch_kind ?? undefined,
+  lessonFileId: row.lesson_file_id ?? undefined,
+  semesterFrameworkId: row.semester_framework_id ?? undefined,
+  baseResourceVersion: row.base_resource_version == null
+    ? undefined
+    : Number(row.base_resource_version),
+  documentVersion: row.document_version == null ? undefined : Number(row.document_version),
   continuationStatus: row.continuation_status ?? undefined,
   continuationLeaseToken: row.continuation_lease_token ?? undefined,
   continuationLeaseExpiresAt: row.continuation_lease_expires_at ?? undefined,
@@ -132,6 +377,7 @@ const mapApproval = (row: Record<string, any>): AgentApprovalRecord => ({
 
 const mapFile = (row: Record<string, any>): LessonFileRecord => ({
   id: row.id, ownerId: row.owner_id, notebookId: row.notebook_id,
+  lessonBlueprintId: row.lesson_blueprint_id ?? undefined,
   title: row.title, type: row.type, image: row.image ?? undefined,
   document: lessonPlanSchema.parse(row.document), documentVersion: row.document_version,
   contextProfile: lessonContextProfileSchema.parse(row.context_profile ?? {}),
@@ -174,7 +420,7 @@ export class SupabaseLessonRepository implements LessonRepository {
       this.client.from("notebooks").select("*")
         .eq("owner_id", ownerId).order("updated_at", { ascending: false }),
       this.client.from("lesson_files")
-        .select("id,owner_id,notebook_id,title,type,image,document_version,page_count,updated_at")
+        .select("id,owner_id,notebook_id,title,type,image,document,document_version,page_count,updated_at")
         .eq("owner_id", ownerId).order("updated_at", { ascending: false }),
     ]);
     if (notebooks.error) throw new Error(notebooks.error.message);
@@ -186,15 +432,22 @@ export class SupabaseLessonRepository implements LessonRepository {
       title: row.title,
       type: row.type,
       image: row.image ?? undefined,
+      preview: createLessonPlanPreview(lessonPlanSchema.parse(row.document)),
       documentVersion: row.document_version,
       pageCount: row.page_count,
       updatedAt: row.updated_at,
     }));
+    const filesByNotebook = new Map<string, typeof mappedFiles>();
+    for (const file of mappedFiles) {
+      const grouped = filesByNotebook.get(file.notebookId);
+      if (grouped) grouped.push(file);
+      else filesByNotebook.set(file.notebookId, [file]);
+    }
     return (notebooks.data ?? []).map((row) => {
       const notebook = mapNotebook(row);
       return {
         ...notebook,
-        files: mappedFiles.filter((file) => file.notebookId === notebook.id),
+        files: filesByNotebook.get(notebook.id) ?? [],
       };
     });
   }
@@ -251,7 +504,11 @@ export class SupabaseLessonRepository implements LessonRepository {
     return mapNotebook(result.data);
   }
 
-  async createLessonFile(ownerId: string, input: Parameters<LessonRepository["createLessonFile"]>[1]) {
+  async createLessonFile(
+    ownerId: string,
+    input: Parameters<LessonRepository["createLessonFile"]>[1],
+    idempotencyKey: string = crypto.randomUUID(),
+  ) {
     const result = await this.client.rpc("create_lesson_file", {
       p_owner_id: ownerId,
       p_file_id: crypto.randomUUID(),
@@ -261,15 +518,14 @@ export class SupabaseLessonRepository implements LessonRepository {
       p_image: input.image ?? null,
       p_document: input.document,
       p_page_count: input.pageCount,
-      p_idempotency_key: `create:${crypto.randomUUID()}`,
+      p_context_profile: input.contextProfile ?? {},
+      p_lesson_blueprint_id: input.lessonBlueprintId ?? null,
+      p_idempotency_key: `create:${idempotencyKey}`,
     });
-    const created = mapFile(unwrap(result as any));
-    if (input.contextProfile && Object.keys(input.contextProfile).length > 0) {
-      return this.updateLessonFile(ownerId, created.id, {
-        contextProfile: input.contextProfile,
-      });
-    }
-    return created;
+    return {
+      ...mapFile(unwrap(result as any)),
+      lessonBlueprintId: input.lessonBlueprintId,
+    };
   }
 
   async updateLessonFile(
@@ -301,6 +557,46 @@ export class SupabaseLessonRepository implements LessonRepository {
       .eq("owner_id", ownerId).eq("id", fileId).maybeSingle();
     if (result.error) throw new Error(result.error.message);
     return result.data ? mapFile(result.data) : null;
+  }
+
+  async getLessonDesignBasis(ownerId: string, lessonFileId: string) {
+    const result = await this.client.rpc("lesson_design_basis_snapshot", {
+      p_owner_id: ownerId,
+      p_lesson_file_id: lessonFileId,
+    });
+    if (result.error) throw new Error(result.error.message);
+    return result.data
+      ? mapLessonDesignBasisAggregate(result.data as Record<string, any>)
+      : null;
+  }
+
+  async applyManualLessonDesignBasisPatch(
+    ownerId: string,
+    patch: LessonDesignBasisPatch,
+    idempotencyKey: string,
+  ) {
+    const result = await this.client.rpc("apply_manual_lesson_design_basis_patch", {
+      p_owner_id: ownerId,
+      p_basis_id: patch.basisId,
+      p_patch: patch,
+      p_idempotency_key: idempotencyKey,
+    });
+    if (result.error) throw new Error(result.error.message);
+    return mapLessonDesignBasisAggregate(result.data as Record<string, any>);
+  }
+
+  async applyApprovedLessonDesignBasisPatch(args: {
+    ownerId: string;
+    approvalId: string;
+    idempotencyKey: string;
+  }) {
+    const result = await this.client.rpc("apply_approved_lesson_design_basis_patch", {
+      p_owner_id: args.ownerId,
+      p_approval_id: args.approvalId,
+      p_idempotency_key: args.idempotencyKey,
+    });
+    if (result.error) throw new Error(result.error.message);
+    return mapLessonDesignBasisAggregate(result.data as Record<string, any>);
   }
 
   async saveLessonDocument(args: Parameters<LessonRepository["saveLessonDocument"]>[0]) {
@@ -335,27 +631,58 @@ export class SupabaseLessonRepository implements LessonRepository {
     return mapFile(unwrap(result as any));
   }
 
-  async listThreads(ownerId: string, lessonFileId: string, includeArchived = false) {
+  async applyApprovedSemesterFrameworkPatch(
+    args: Parameters<LessonRepository["applyApprovedSemesterFrameworkPatch"]>[0],
+  ) {
+    const result = await this.client.rpc("apply_approved_semester_framework_patch", {
+      p_owner_id: args.ownerId,
+      p_approval_id: args.approvalId,
+      p_idempotency_key: args.idempotencyKey,
+    });
+    if (result.error) throw new Error(result.error.message);
+    return mapSemesterFrameworkAggregate(result.data as Record<string, any>);
+  }
+
+  async listThreads(
+    ownerId: string,
+    resource: string | AgentResourceRef,
+    includeArchived = false,
+  ) {
+    const scope = typeof resource === "string"
+      ? { resourceType: "lesson_file" as const, lessonFileId: resource }
+      : resource;
     let query = this.client.from("agent_threads").select("*")
-      .eq("owner_id", ownerId).eq("lesson_file_id", lessonFileId).is("deleted_at", null);
+      .eq("owner_id", ownerId)
+      .eq("resource_type", scope.resourceType)
+      .is("deleted_at", null);
+    query = scope.resourceType === "lesson_file"
+      ? query.eq("lesson_file_id", scope.lessonFileId)
+      : query.eq("semester_framework_id", scope.semesterFrameworkId);
     if (!includeArchived) query = query.is("archived_at", null);
     const result = await query.order("updated_at", { ascending: false });
     if (result.error) throw new Error(result.error.message);
     return (result.data ?? []).map(mapThread);
   }
 
-  async createThread(ownerId: string, input: CreateThreadInput) {
-    const file = await this.getLessonFile(ownerId, input.lessonFileId);
-    if (!file || file.notebookId !== input.notebookId) throw new Error("lesson_file_not_found");
-    const threadResult = await this.client.from("agent_threads").insert({
-      owner_id: ownerId, notebook_id: input.notebookId, lesson_file_id: input.lessonFileId,
-      title: input.title ?? "新会话",
-    }).select("*").single();
-    const thread = mapThread(unwrap(threadResult as any));
-    const branchResult = await this.client.from("agent_branches").insert({
-      owner_id: ownerId, thread_id: thread.id, label: "主分支",
-    }).select("*").single();
-    return { thread, branch: mapBranch(unwrap(branchResult as any)) };
+  async createThread(ownerId: string, input: CreateThreadInput, idempotencyKey: string = crypto.randomUUID()) {
+    const resource: AgentResourceRef = input.resourceType === "semester_framework"
+      ? { resourceType: "semester_framework", semesterFrameworkId: input.semesterFrameworkId }
+      : { resourceType: "lesson_file", lessonFileId: input.lessonFileId };
+    const result = await this.client.rpc("create_agent_resource_thread", {
+      p_owner_id: ownerId,
+      p_thread_id: crypto.randomUUID(),
+      p_branch_id: crypto.randomUUID(),
+      p_notebook_id: input.notebookId,
+      p_resource_type: resource.resourceType,
+      p_lesson_file_id: resource.resourceType === "lesson_file" ? resource.lessonFileId : null,
+      p_semester_framework_id: resource.resourceType === "semester_framework"
+        ? resource.semesterFrameworkId
+        : null,
+      p_title: input.title ?? "新会话",
+      p_idempotency_key: idempotencyKey,
+    });
+    const created = unwrap(result as any) as { thread: Record<string, any>; branch: Record<string, any> };
+    return { thread: mapThread(created.thread), branch: mapBranch(created.branch) };
   }
 
   async getThread(ownerId: string, threadId: string) {
@@ -374,6 +701,9 @@ export class SupabaseLessonRepository implements LessonRepository {
     if (patch.starterSuggestions !== undefined) payload.starter_suggestions = patch.starterSuggestions;
     if (patch.starterSuggestionsDocumentVersion !== undefined) {
       payload.starter_suggestions_document_version = patch.starterSuggestionsDocumentVersion;
+    }
+    if (patch.starterSuggestionsResourceVersion !== undefined) {
+      payload.starter_suggestions_resource_version = patch.starterSuggestionsResourceVersion;
     }
     const result = await this.client.from("agent_threads").update(payload)
       .eq("owner_id", ownerId).eq("id", threadId).select("*").single();
@@ -420,7 +750,41 @@ export class SupabaseLessonRepository implements LessonRepository {
       .order("sequence", { ascending: false })
       .limit(limit);
     if (result.error) throw new Error(result.error.message);
-    return (result.data ?? []).reverse().map(mapMessage);
+    const messages = (result.data ?? []).reverse().map(mapMessage);
+    const assistantIds = messages.filter((message) => message.role === "assistant").map((message) => message.id);
+    if (!assistantIds.length) return messages;
+    const runsResult = await this.client.from("agent_runs")
+      .select("id,assistant_message_id,status,started_at")
+      .eq("owner_id", ownerId)
+      .in("assistant_message_id", assistantIds)
+      .order("started_at", { ascending: false });
+    if (runsResult.error) throw new Error(runsResult.error.message);
+    const runByMessageId = new Map<string, Record<string, any>>();
+    for (const run of runsResult.data ?? []) {
+      if (!runByMessageId.has(run.assistant_message_id)) runByMessageId.set(run.assistant_message_id, run);
+    }
+    const runIds = [...runByMessageId.values()].map((run) => run.id);
+    if (!runIds.length) return messages;
+    const eventsResult = await this.client.from("agent_events")
+      .select("run_id,data,created_at")
+      .eq("owner_id", ownerId)
+      .in("run_id", runIds)
+      .order("created_at", { ascending: true });
+    if (eventsResult.error) throw new Error(eventsResult.error.message);
+    const eventsByRunId = new Map<string, NormalizedAgentEvent[]>();
+    for (const event of eventsResult.data ?? []) {
+      const list = eventsByRunId.get(event.run_id) ?? [];
+      list.push(event.data as NormalizedAgentEvent);
+      eventsByRunId.set(event.run_id, list);
+    }
+    return messages.map((message) => {
+      const run = runByMessageId.get(message.id);
+      if (!run) return message;
+      return {
+        ...message,
+        activities: persistedActivitiesFromEvents(eventsByRunId.get(run.id) ?? [], run.status),
+      };
+    });
   }
 
   async getMessage(ownerId: string, messageId: string) {
@@ -575,7 +939,13 @@ export class SupabaseLessonRepository implements LessonRepository {
       assistant_message_id: approval.assistantMessageId,
       patch: approval.patch, encrypted_run_state: approval.encryptedRunState,
       agent_definition_version: approval.agentDefinitionVersion,
-      document_version: approval.documentVersion, expires_at: approval.expiresAt,
+      resource_type: approval.resourceType,
+      patch_kind: approval.patchKind,
+      lesson_file_id: approval.lessonFileId,
+      semester_framework_id: approval.semesterFrameworkId,
+      base_resource_version: approval.baseResourceVersion,
+      document_version: approval.documentVersion,
+      expires_at: approval.expiresAt,
       created_at: approval.createdAt,
     });
     if (result.error) throw new Error(result.error.message);
@@ -640,10 +1010,19 @@ export class SupabaseLessonRepository implements LessonRepository {
       p_approved: args.approved,
       p_encrypted_run_state: args.encryptedRunState,
     });
-    const payload = unwrap(result as any) as { approval: Record<string, any>; file: Record<string, any> | null };
+    const payload = unwrap(result as any) as {
+      approval: Record<string, any>;
+      file: Record<string, any> | null;
+      framework: Record<string, any> | null;
+      basis: Record<string, any> | null;
+    };
     return {
       approval: mapApproval(payload.approval),
       file: payload.file ? mapFile(payload.file) : null,
+      framework: payload.framework
+        ? mapSemesterFrameworkAggregate(payload.framework)
+        : null,
+      basis: payload.basis ? mapLessonDesignBasisAggregate(payload.basis) : null,
     };
   }
 
@@ -893,10 +1272,288 @@ export class SupabaseLessonRepository implements LessonRepository {
     }));
   }
 
+  async createSemesterFramework(
+    ownerId: string,
+    notebookId: string,
+    input: CreateSemesterFrameworkInput,
+    idempotencyKey: string,
+  ) {
+    const result = await this.client.rpc("create_semester_framework", {
+      p_owner_id: ownerId,
+      p_framework_id: crypto.randomUUID(),
+      p_notebook_id: notebookId,
+      p_textbook_id: input.textbookId,
+      p_title: input.title,
+      p_term: input.term,
+      p_start_date: input.startDate ?? null,
+      p_total_weeks: input.totalWeeks,
+      p_weekly_periods: input.weeklyPeriods,
+      p_lesson_duration_minutes: input.lessonDurationMinutes,
+      p_capacity_ratio: input.capacityRatio,
+      p_planning_horizon_weeks: input.planningHorizonWeeks,
+      p_context_profile: input.contextProfile,
+      p_idempotency_key: idempotencyKey,
+    });
+    if (result.error) throw new Error(result.error.message);
+    return mapSemesterFrameworkAggregate(result.data as Record<string, any>);
+  }
+
+  async listSemesterFrameworks(ownerId: string, notebookId: string) {
+    const result = await this.client
+      .from("semester_frameworks")
+      .select("*")
+      .eq("owner_id", ownerId)
+      .eq("notebook_id", notebookId)
+      .order("updated_at", { ascending: false });
+    if (result.error) throw new Error(result.error.message);
+    return (result.data ?? []).map(mapSemesterFramework);
+  }
+
+  async applyManualSemesterFrameworkPatch(
+    ownerId: string,
+    patch: SemesterFrameworkPatch,
+    idempotencyKey: string,
+  ) {
+    const result = await this.client.rpc("apply_manual_semester_framework_patch", {
+      p_owner_id: ownerId,
+      p_framework_id: patch.frameworkId,
+      p_patch: patch,
+      p_idempotency_key: idempotencyKey,
+    });
+    if (result.error) throw new Error(result.error.message);
+    return mapSemesterFrameworkAggregate(result.data as Record<string, any>);
+  }
+
+  async createLessonBlueprint(
+    ownerId: string,
+    frameworkId: string,
+    input: CreateLessonBlueprintInput,
+    idempotencyKey: string,
+  ) {
+    const aggregate = await this.getSemesterFramework(ownerId, frameworkId);
+    if (!aggregate) throw new Error("semester_framework_not_found");
+    const result = await this.client.rpc("create_lesson_blueprint", {
+      p_owner_id: ownerId,
+      p_framework_id: frameworkId,
+      p_blueprint_id: crypto.randomUUID(),
+      p_input: {
+        ...input,
+        plannedMinutes: aggregate.framework.lessonDurationMinutes,
+      },
+      p_idempotency_key: idempotencyKey,
+    });
+    if (result.error) throw new Error(result.error.message);
+    return mapSemesterFrameworkAggregate(result.data as Record<string, any>);
+  }
+
+  async updateLessonBlueprint(
+    ownerId: string,
+    frameworkId: string,
+    blueprintId: string,
+    input: UpdateLessonBlueprintInput,
+    idempotencyKey: string,
+  ) {
+    const result = await this.client.rpc("update_lesson_blueprint", {
+      p_owner_id: ownerId,
+      p_framework_id: frameworkId,
+      p_blueprint_id: blueprintId,
+      p_input: input,
+      p_idempotency_key: idempotencyKey,
+    });
+    if (result.error) throw new Error(result.error.message);
+    return mapSemesterFrameworkAggregate(result.data as Record<string, any>);
+  }
+
+  async deleteLessonBlueprint(
+    ownerId: string,
+    frameworkId: string,
+    blueprintId: string,
+    input: DeleteLessonBlueprintInput,
+    idempotencyKey: string,
+  ) {
+    const result = await this.client.rpc("delete_lesson_blueprint", {
+      p_owner_id: ownerId,
+      p_framework_id: frameworkId,
+      p_blueprint_id: blueprintId,
+      p_expected_version: input.expectedVersion,
+      p_idempotency_key: idempotencyKey,
+    });
+    if (result.error) throw new Error(result.error.message);
+    return mapSemesterFrameworkAggregate(result.data as Record<string, any>);
+  }
+
+  async getSemesterFramework(ownerId: string, frameworkId: string) {
+    const result = await this.client.rpc("semester_framework_snapshot", {
+      p_owner_id: ownerId,
+      p_framework_id: frameworkId,
+    });
+    if (result.error) throw new Error(result.error.message);
+    return result.data
+      ? mapSemesterFrameworkAggregate(result.data as Record<string, any>)
+      : null;
+  }
+
+  private async deriveSuggestedFrameworkContinuity(
+    aggregate: SemesterFrameworkAggregate,
+  ): Promise<FrameworkContinuityCandidateRecord[]> {
+    const semanticReleaseId = aggregate.framework.semanticReleaseId;
+    if (!semanticReleaseId) return [];
+    const [nodes, mappingsResult, revisionsResult] = await Promise.all([
+      this.listCurriculumNodes({
+        textbookId: aggregate.framework.textbookId,
+        catalogReleaseId: aggregate.framework.catalogReleaseId,
+        maxLevel: 8,
+      }),
+      this.client.from("curriculum_node_semantics")
+        .select("node_id,sequence_no,semantic_entity_id,confidence")
+        .eq("release_id", semanticReleaseId)
+        .eq("textbook_id", aggregate.framework.textbookId)
+        .eq("review_state", "approved"),
+      this.client.from("curriculum_semantic_entity_revisions")
+        .select("semantic_entity_id,canonical_name,confidence")
+        .eq("release_id", semanticReleaseId)
+        .eq("review_state", "approved"),
+    ]);
+    if (mappingsResult.error) throw new Error(mappingsResult.error.message);
+    if (revisionsResult.error) throw new Error(revisionsResult.error.message);
+    const nodeById = new Map(nodes.map((node) => [node.nodeId, node]));
+    const unitByRootNode = new Map(aggregate.units.map((unit) => [
+      unit.curriculumNodeId,
+      unit,
+    ]));
+    const unitForNode = (nodeId: string) => {
+      let node = nodeById.get(nodeId);
+      const visited = new Set<string>();
+      while (node && !visited.has(node.nodeId)) {
+        visited.add(node.nodeId);
+        const unit = unitByRootNode.get(node.nodeId);
+        if (unit) return unit;
+        node = node.parentId ? nodeById.get(node.parentId) : undefined;
+      }
+      return undefined;
+    };
+    const revisionById = new Map((revisionsResult.data ?? []).map((revision) => [
+      String(revision.semantic_entity_id),
+      revision,
+    ]));
+    const occurrenceByUnitAndPoint = new Map<string, {
+      unitId: string;
+      unitSortNo: number;
+      nodeId: string;
+      sequenceNo: number;
+      entityId: string;
+      pointName: string;
+      confidence: number;
+    }>();
+    for (const mapping of mappingsResult.data ?? []) {
+      const unit = unitForNode(String(mapping.node_id));
+      const revision = revisionById.get(String(mapping.semantic_entity_id));
+      if (!unit || !revision) continue;
+      const key = `${unit.id}:${mapping.semantic_entity_id}`;
+      const occurrence = {
+        unitId: unit.id,
+        unitSortNo: unit.sortNo,
+        nodeId: String(mapping.node_id),
+        sequenceNo: Number(mapping.sequence_no ?? 0),
+        entityId: String(mapping.semantic_entity_id),
+        pointName: String(revision.canonical_name),
+        confidence: Math.min(
+          Number(mapping.confidence ?? 1),
+          Number(revision.confidence ?? 1),
+        ),
+      };
+      const existing = occurrenceByUnitAndPoint.get(key);
+      if (!existing || occurrence.sequenceNo < existing.sequenceNo) {
+        occurrenceByUnitAndPoint.set(key, occurrence);
+      }
+    }
+    const timestamp = new Date().toISOString();
+    return deriveFrameworkContinuity({
+      occurrences: [...occurrenceByUnitAndPoint.values()],
+      relations: [],
+      includeLexicalCandidates: true,
+    }).filter((draft) => draft.evidenceKind === "lexical_similarity")
+      .map(({ fingerprint, ...draft }) => ({
+        id: `lexical-${fingerprint}`,
+        frameworkId: aggregate.framework.id,
+        derivedFromFrameworkVersion: aggregate.framework.version,
+        ...draft,
+        decision: "candidate" as const,
+        active: true,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }));
+  }
+
+  async getSemesterFrameworkContinuity(ownerId: string, frameworkId: string) {
+    const framework = await this.getSemesterFramework(ownerId, frameworkId);
+    if (!framework) throw new Error("semester_framework_not_found");
+    const result = await this.client
+      .from("framework_continuity_candidates")
+      .select("*")
+      .eq("owner_id", ownerId)
+      .eq("framework_id", frameworkId)
+      .eq("active", true)
+      .order("target_unit_id", { ascending: true })
+      .order("direction", { ascending: true })
+      .order("confidence", { ascending: false });
+    if (result.error) throw new Error(result.error.message);
+    const verified = (result.data ?? []).map(mapFrameworkContinuityCandidate);
+    const suggested = await this.deriveSuggestedFrameworkContinuity(framework);
+    return {
+      status: framework.framework.semanticReleaseId
+        ? "available" as const
+        : "semantic_release_unavailable" as const,
+      frameworkVersion: framework.framework.version,
+      candidates: mergeFrameworkContinuityCandidates(verified, suggested),
+    };
+  }
+
+  async refreshSemesterFrameworkContinuity(ownerId: string, frameworkId: string) {
+    const result = await this.client.rpc("refresh_semester_framework_continuity", {
+      p_owner_id: ownerId,
+      p_framework_id: frameworkId,
+    });
+    if (result.error) throw new Error(result.error.message);
+    const payload = result.data as Record<string, any>;
+    const framework = await this.getSemesterFramework(ownerId, frameworkId);
+    if (!framework) throw new Error("semester_framework_not_found");
+    const verified = (payload.candidates ?? []).map(mapFrameworkContinuityCandidate);
+    const suggested = await this.deriveSuggestedFrameworkContinuity(framework);
+    return {
+      status: payload.status,
+      frameworkVersion: Number(payload.frameworkVersion),
+      candidates: mergeFrameworkContinuityCandidates(verified, suggested),
+    };
+  }
+
+  async getCurrentCurriculumCatalogRelease() {
+    const pointer = await this.client
+      .from("curriculum_catalog_current")
+      .select("catalog_release_id")
+      .eq("singleton", true)
+      .maybeSingle();
+    if (pointer.error) throw new Error(pointer.error.message);
+    return pointer.data?.catalog_release_id
+      ? this.getCurriculumCatalogRelease(pointer.data.catalog_release_id)
+      : null;
+  }
+
+  async getCurriculumCatalogRelease(releaseId: string) {
+    const result = await this.client
+      .from("curriculum_catalog_releases")
+      .select("*")
+      .eq("id", releaseId)
+      .maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    return result.data ? mapCurriculumCatalogRelease(result.data) : null;
+  }
+
   async listCurriculumFacets() {
     const result = await this.client
       .from("curriculum_textbooks")
-      .select("stage,subject,edition,grade");
+      .select("stage,subject,edition,grade")
+      .is("retired_at", null);
     if (result.error) throw new Error(result.error.message);
     return buildCurriculumFacets((result.data ?? []).map((row) => ({
       id: "",
@@ -919,54 +1576,60 @@ export class SupabaseLessonRepository implements LessonRepository {
 
   async searchCurriculumTextbooks(filter: CurriculumTextbookFilter = {}) {
     const limit = Math.min(Math.max(filter.limit ?? 20, 1), 200);
-    let query = this.client
-      .from("curriculum_textbooks")
-      .select("*")
-      .order("stage", { ascending: true })
-      .order("subject", { ascending: true })
-      .order("edition", { ascending: true })
-      .order("title", { ascending: true })
-      .limit(limit);
-
-    if (filter.stage?.trim()) query = query.eq("stage", filter.stage.trim());
-    if (filter.subject?.trim()) query = query.eq("subject", filter.subject.trim());
-    if (filter.edition?.trim()) query = query.eq("edition", filter.edition.trim());
-    if (filter.grade?.trim()) query = query.eq("grade", filter.grade.trim());
-    if (filter.query?.trim()) {
-      const q = filter.query.trim();
-      query = query.or(
-        `title.ilike.%${q}%,volume.ilike.%${q}%,edition.ilike.%${q}%,subject.ilike.%${q}%`,
-      );
-    }
-
-    const result = await query;
+    const result = await this.client.rpc("search_curriculum_textbooks", {
+      p_stage: filter.stage?.trim() || null,
+      p_subject: filter.subject?.trim() || null,
+      p_edition: filter.edition?.trim() || null,
+      p_grade: filter.grade?.trim() || null,
+      p_query: filter.query?.trim() || null,
+      p_limit: limit,
+    });
     if (result.error) throw new Error(result.error.message);
     return (result.data ?? []).map(mapCurriculumTextbook);
   }
 
-  async getCurriculumTextbook(textbookId: string) {
-    const result = await this.client
-      .from("curriculum_textbooks")
-      .select("*")
-      .eq("id", textbookId)
-      .maybeSingle();
+  async getCurriculumTextbook(textbookId: string, catalogReleaseId?: string) {
+    const result = catalogReleaseId
+      ? await this.client
+        .from("curriculum_textbook_revisions")
+        .select("*")
+        .eq("catalog_release_id", catalogReleaseId)
+        .eq("textbook_id", textbookId)
+        .maybeSingle()
+      : await this.client
+        .from("curriculum_textbooks")
+        .select("*")
+        .eq("id", textbookId)
+        .is("retired_at", null)
+        .maybeSingle();
     if (result.error) throw new Error(result.error.message);
     return result.data ? mapCurriculumTextbook(result.data) : null;
   }
 
   async listCurriculumNodes(args: {
     textbookId: string;
+    catalogReleaseId?: string;
     parentId?: string | null;
     maxLevel?: number;
   }) {
     const maxLevel = Math.min(Math.max(args.maxLevel ?? 3, 1), 8);
-    let query = this.client
-      .from("curriculum_nodes")
-      .select("*")
-      .eq("textbook_id", args.textbookId)
-      .lte("level", maxLevel)
-      .order("level", { ascending: true })
-      .order("sort_no", { ascending: true });
+    let query = args.catalogReleaseId
+      ? this.client
+        .from("curriculum_node_revisions")
+        .select("*")
+        .eq("catalog_release_id", args.catalogReleaseId)
+        .eq("textbook_id", args.textbookId)
+        .lte("level", maxLevel)
+        .order("level", { ascending: true })
+        .order("sort_no", { ascending: true })
+      : this.client
+        .from("curriculum_nodes")
+        .select("*")
+        .eq("textbook_id", args.textbookId)
+        .is("retired_at", null)
+        .lte("level", maxLevel)
+        .order("level", { ascending: true })
+        .order("sort_no", { ascending: true });
 
     const result = await query;
     if (result.error) throw new Error(result.error.message);
@@ -982,6 +1645,7 @@ export class SupabaseLessonRepository implements LessonRepository {
       .from("curriculum_nodes")
       .select("*")
       .ilike("title", `%${normalizeCurriculumNodeQuery(args.query)}%`)
+      .is("retired_at", null)
       .order("title", { ascending: true })
       .limit(Math.max(limit * 10, 100));
     if (args.textbookId) nodeQuery = nodeQuery.eq("textbook_id", args.textbookId);
@@ -993,7 +1657,8 @@ export class SupabaseLessonRepository implements LessonRepository {
     const booksResult = await this.client
       .from("curriculum_textbooks")
       .select("*")
-      .in("id", textbookIds);
+      .in("id", textbookIds)
+      .is("retired_at", null);
     if (booksResult.error) throw new Error(booksResult.error.message);
     const textbooks = (booksResult.data ?? []).map(mapCurriculumTextbook);
     const topMatches = searchCurriculumNodeRecords({
@@ -1010,6 +1675,7 @@ export class SupabaseLessonRepository implements LessonRepository {
         .from("curriculum_nodes")
         .select("*")
         .eq("textbook_id", textbookId)
+        .is("retired_at", null)
         .order("level", { ascending: true })
         .order("sort_no", { ascending: true })
     )));
@@ -1024,5 +1690,104 @@ export class SupabaseLessonRepository implements LessonRepository {
       ...args,
       limit,
     });
+  }
+
+  async readCurriculumNodeSemantics(
+    args: Parameters<LessonRepository["readCurriculumNodeSemantics"]>[0],
+  ): Promise<CurriculumNodeSemanticsRecord> {
+    const result = await this.client.rpc("read_curriculum_node_semantics", {
+      p_textbook_id: args.textbookId,
+      p_node_id: args.nodeId,
+    });
+    if (result.error) throw new Error(result.error.message);
+    return (result.data ?? { release: null, mappings: [] }) as CurriculumNodeSemanticsRecord;
+  }
+
+  async getCurriculumSemanticEntity(entityId: string): Promise<CurriculumSemanticEntityRecord | null> {
+    const result = await this.client.rpc("get_curriculum_semantic_entity", {
+      p_entity_id: entityId,
+    });
+    if (result.error) throw new Error(result.error.message);
+    return (result.data as CurriculumSemanticEntityRecord | null) ?? null;
+  }
+
+  async traceCurriculumSemanticPath(
+    args: Parameters<LessonRepository["traceCurriculumSemanticPath"]>[0],
+  ): Promise<CurriculumSemanticPathStep[]> {
+    const result = await this.client.rpc("trace_curriculum_semantic_path", {
+      p_entity_id: args.entityId,
+      p_direction: args.direction,
+      p_relation_types: args.relationTypes ?? ["prerequisite", "develops_into", "supports"],
+      p_max_depth: Math.min(Math.max(args.maxDepth ?? 3, 1), 6),
+    });
+    if (result.error) throw new Error(result.error.message);
+    return (result.data ?? []) as CurriculumSemanticPathStep[];
+  }
+
+  async readCurriculumNodeKnowledgePoints(
+    args: Parameters<LessonRepository["readCurriculumNodeKnowledgePoints"]>[0],
+  ): Promise<CurriculumNodeKnowledgeRecord> {
+    const result = await this.client.rpc("read_curriculum_node_knowledge_points", {
+      p_textbook_id: args.textbookId,
+      p_node_id: args.nodeId,
+    });
+    if (result.error) throw new Error(result.error.message);
+    return (result.data ?? {
+      release: null,
+      points: [],
+      periodRecommendations: [],
+    }) as CurriculumNodeKnowledgeRecord;
+  }
+
+  async readCurriculumNodesKnowledgePoints(
+    args: Parameters<LessonRepository["readCurriculumNodesKnowledgePoints"]>[0],
+  ): Promise<Record<string, CurriculumNodeKnowledgeRecord>> {
+    const nodeIds = [...new Set(args.nodeIds)].slice(0, 100);
+    const result = await this.client.rpc("read_curriculum_nodes_knowledge_points", {
+      p_textbook_id: args.textbookId,
+      p_node_ids: nodeIds,
+    });
+    if (result.error) {
+      const batchFunctionUnavailable = result.error.code === "PGRST202"
+        || result.error.message.includes("read_curriculum_nodes_knowledge_points");
+      if (!batchFunctionUnavailable) throw new Error(result.error.message);
+
+      const records = await Promise.all(nodeIds.map(async (nodeId) => [
+        nodeId,
+        await this.readCurriculumNodeKnowledgePoints({ textbookId: args.textbookId, nodeId }),
+      ] as const));
+      return Object.fromEntries(records);
+    }
+    return (result.data ?? {}) as Record<string, CurriculumNodeKnowledgeRecord>;
+  }
+
+  async searchCurriculumKnowledgePoints(
+    args: Parameters<LessonRepository["searchCurriculumKnowledgePoints"]>[0],
+  ): Promise<CurriculumKnowledgeSearchResult[]> {
+    const result = await this.client.rpc("search_curriculum_knowledge_points", {
+      p_textbook_id: args.textbookId,
+      p_query: args.query,
+      p_query_embedding: args.embedding ?? null,
+      p_limit: Math.min(Math.max(args.limit ?? 12, 1), 30),
+    });
+    if (result.error) throw new Error(result.error.message);
+    return (result.data ?? []) as CurriculumKnowledgeSearchResult[];
+  }
+
+  async readCurriculumKnowledgeContinuity(
+    args: Parameters<LessonRepository["readCurriculumKnowledgeContinuity"]>[0],
+  ): Promise<CurriculumKnowledgeContinuityRecord> {
+    const result = await this.client.rpc("read_curriculum_knowledge_continuity", {
+      p_textbook_id: args.textbookId,
+      p_current_node_id: args.currentNodeId,
+      p_entity_id: args.entityId,
+      p_limit: Math.min(Math.max(args.limit ?? 12, 1), 30),
+    });
+    if (result.error) throw new Error(result.error.message);
+    return (result.data ?? {
+      status: "unavailable",
+      currentSequenceNo: null,
+      candidates: [],
+    }) as CurriculumKnowledgeContinuityRecord;
   }
 }

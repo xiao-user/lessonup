@@ -34,7 +34,9 @@ export function agentActivitySummary(activities, phase) {
   const failed = activities.filter((activity) => activity.state === "failed").length;
   const completed = activities.filter((activity) => activity.state === "completed").length;
   const running = activities.find((activity) => activity.state === "running");
-  if (running) return `正在执行：${running.label}`;
+  if (running) return running.attempts > 1
+    ? `正在修正：${running.label}`
+    : `正在执行：${running.label}`;
   if (failed) return `${failed} 项任务失败`;
   if (phase === agentTurnPhases.awaiting) return "任务完成，正在组织回复";
   return `已完成 ${completed} 项任务`;
@@ -62,11 +64,12 @@ export function presentAgentActivities(activities) {
     const previousIndex = seen.get(key);
     if (previousIndex === undefined) {
       seen.set(key, result.length);
-      result.push(activity);
+      result.push({ ...activity, attempts: 1 });
     } else {
       result[previousIndex] = {
         ...result[previousIndex],
-        state: mergedActivityState([result[previousIndex], activity]),
+        ...activity,
+        attempts: (result[previousIndex].attempts ?? 1) + 1,
       };
     }
   }
@@ -94,5 +97,37 @@ export function presentAgentActivities(activities) {
     result.splice(documentReadInsertIndex ?? 0, 0, ...visibleReads);
   }
 
+  return result;
+}
+
+export function presentConversationMessages(messages, approvals = []) {
+  const continuationById = new Map();
+  const approvalByOwnerId = new Map();
+  for (const approval of approvals) {
+    if (!approval.assistantMessageId || !approval.continuationMessageId) continue;
+    approvalByOwnerId.set(approval.assistantMessageId, approval);
+    continuationById.set(approval.continuationMessageId, approval);
+  }
+  const messageById = new Map(messages.map((message) => [message.id, message]));
+  const result = [];
+  for (const message of messages) {
+    if (continuationById.has(message.id)) continue;
+    const approval = approvalByOwnerId.get(message.id);
+    const continuation = approval?.continuationMessageId
+      ? messageById.get(approval.continuationMessageId)
+      : null;
+    if (!continuation) {
+      result.push(message);
+      continue;
+    }
+    result.push({
+      ...message,
+      content: [message.content, continuation.content].filter(Boolean).join("\n\n"),
+      status: continuation.status ?? message.status,
+      error: continuation.error ?? message.error,
+      sources: [...(message.sources ?? []), ...(continuation.sources ?? [])],
+      continuationMessageId: continuation.id,
+    });
+  }
   return result;
 }

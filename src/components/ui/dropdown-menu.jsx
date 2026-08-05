@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 
 const DropdownMenu = MenuPrimitive.Root;
 const DropdownMenuTrigger = MenuPrimitive.Trigger;
+const DropdownMenuGroup = MenuPrimitive.Group;
 
 function DropdownMenuContent({
   align = "end",
@@ -55,6 +56,7 @@ function DropdownMenuSeparator({ className, ...props }) {
 export {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,

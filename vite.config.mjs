@@ -4,6 +4,21 @@ import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath, URL } from "node:url";
 
 export default defineConfig({
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (id.includes("/gsap/") || id.includes("/@gsap/")) return "vendor-gsap";
+          if (id.includes("/@supabase/")) return "vendor-supabase";
+          if (id.includes("/react/") || id.includes("/react-dom/") || id.includes("/scheduler/")) {
+            return "vendor-react";
+          }
+          return undefined;
+        },
+      },
+    },
+  },
   optimizeDeps: {
     include: [
       "react",
