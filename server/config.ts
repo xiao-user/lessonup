@@ -37,12 +37,17 @@ const envSchema = z.object({
   if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY || !env.SUPABASE_SERVICE_ROLE_KEY) {
     context.addIssue({ code: "custom", path: ["SUPABASE_URL"], message: "production_requires_supabase" });
   }
-  if (env.DEEPSEEK_API_KEY && (!env.AGENT_STATE_ENCRYPTION_KEY || !env.MCP_TOKEN_SECRET)) {
+  if (!env.MCP_TOKEN_SECRET) {
+    context.addIssue({ code: "custom", path: ["MCP_TOKEN_SECRET"], message: "production_requires_mcp_token_secret" });
+  }
+  if (env.DEEPSEEK_API_KEY && !env.AGENT_STATE_ENCRYPTION_KEY) {
     context.addIssue({ code: "custom", path: ["AGENT_STATE_ENCRYPTION_KEY"], message: "production_agent_requires_runtime_secrets" });
   }
 });
 
-export const config = envSchema.parse(process.env);
+export const parseConfig = (env: NodeJS.ProcessEnv) => envSchema.parse(env);
+
+export const config = parseConfig(process.env);
 
 export const hasSupabase = Boolean(
   config.SUPABASE_URL && config.SUPABASE_SERVICE_ROLE_KEY && config.SUPABASE_ANON_KEY,

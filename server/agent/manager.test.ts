@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { agentsSdkVersion, managerModelSettings } from "./manager.js";
+import {
+  agentsSdkVersion,
+  managerModelSettings,
+  specialistRunTracingConfig,
+} from "./manager.js";
 
 describe("LessonPreparationManager model settings", () => {
   it("keeps tool orchestration on Flash with low reasoning effort", () => {
@@ -21,5 +25,12 @@ describe("LessonPreparationManager model settings", () => {
       readFileSync(join(dirname(entrypoint), "..", "package.json"), "utf8"),
     ) as { version: string };
     expect(agentsSdkVersion).toBe(installed.version);
+  });
+
+  it("keeps nested specialist traces free of model and tool payloads", () => {
+    expect(specialistRunTracingConfig).toEqual({
+      tracingDisabled: false,
+      traceIncludeSensitiveData: false,
+    });
   });
 });

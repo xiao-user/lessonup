@@ -33,10 +33,17 @@ const mcpScopeSchema = z.object({
   if (!valid) context.addIssue({ code: "custom", message: "mcp_resource_scope_invalid" });
 });
 
-const secret = () => new TextEncoder().encode(
-  config.MCP_TOKEN_SECRET
-    ?? createHash("sha256").update("lessonup-development-mcp-secret").digest("hex"),
-);
+const secret = () => {
+  if (config.MCP_TOKEN_SECRET) {
+    return new TextEncoder().encode(config.MCP_TOKEN_SECRET);
+  }
+  if (config.NODE_ENV === "production") {
+    throw new Error("mcp_token_secret_required");
+  }
+  return new TextEncoder().encode(
+    createHash("sha256").update("lessonup-development-mcp-secret").digest("hex"),
+  );
+};
 
 export async function createMcpScopeToken(scope: McpScope) {
   const validated = mcpScopeSchema.parse(scope);

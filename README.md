@@ -42,4 +42,4 @@ DeepSeek 协议按模型固定：`deepseek-v4-pro` 使用 Chat Completions，`de
 
 ## 生产启用
 
-本地无外部凭据时不会模拟模型或资料检索。生产启用前需先配置 Supabase、DeepSeek、BGE-M3 与可选 Tavily，应用数据库迁移，再运行真实账号隔离、模型工具循环、知识召回与审批恢复评测。`NODE_ENV=production` 会强制关闭开发身份，并拒绝缺少 Supabase 或 Agent 加密密钥的启动配置。
+本地无外部凭据时不会模拟模型或资料检索。生产启用前需先配置 Supabase、DeepSeek、BGE-M3 与可选 Tavily，应用数据库迁移，再运行真实账号隔离、模型工具循环、知识召回与审批恢复评测。`NODE_ENV=production` 会强制关闭开发身份，并始终要求 Supabase 与 MCP 签名密钥；启用 DeepSeek Agent 时还必须配置 RunState 加密密钥。

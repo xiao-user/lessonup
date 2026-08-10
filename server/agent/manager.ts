@@ -24,6 +24,11 @@ export const managerModelSettings = {
   store: false,
 } as const;
 
+export const specialistRunTracingConfig = {
+  tracingDisabled: false,
+  traceIncludeSensitiveData: false,
+} as const;
+
 const managerModelSettingsFor = (plan: CapabilityPlan) => ({
   ...managerModelSettings,
   ...(plan.writeMode === "explicit" ? { toolChoice: "required" as const } : {}),
@@ -240,7 +245,10 @@ export async function createManager(args: {
     return agent.asTool({
       toolName: id.replaceAll("-", "_"),
       toolDescription: definition.description,
-      runConfig: { modelProvider: args.modelProvider, tracingDisabled: false },
+      runConfig: {
+        modelProvider: args.modelProvider,
+        ...specialistRunTracingConfig,
+      },
     });
   });
 
