@@ -108,7 +108,93 @@ export function createDocumentTools(
     },
   });
 
-  const tools = [readDocumentMetadata, readDocument, readSection, readOutline];
+  const readLessonClassFeedback = tool({
+    name: "read_lesson_class_feedback",
+    description: "读取本课及同单元前序课时已记录的课堂反馈（观察、练习缺口、错因、衔接效果）。生成或修订后续教案时用于承接真实学情；不得把课堂反馈表述为平台已核验的教材先修关系。",
+    parameters: z.object({}),
+    execute: async (_input, runContext) => {
+      const context = requireContext(runContext);
+      const [currentRecords, designBasis] = await Promise.all([
+        repository.listLessonClassFeedback(context.userId, {
+          lessonFileId: context.lessonFileId,
+        }),
+        repository.getLessonDesignBasis(context.userId, context.lessonFileId),
+      ]);
+      const present = (record: {
+        kind: "observation" | "practice_gap" | "error_cause" | "continuity_outcome";
+        statement: string;
+        continuityOutcome: "worked" | "weak" | "skipped" | null;
+      }, scope: string) => ({
+        "类型": ({
+          observation: "课堂观察",
+          practice_gap: "练习缺口",
+          error_cause: "错因",
+          continuity_outcome: "衔接效果",
+        })[record.kind],
+        "说明": record.statement,
+        "所属": scope,
+        "衔接结果": record.continuityOutcome === "worked"
+          ? "有效"
+          : record.continuityOutcome === "weak"
+            ? "偏弱"
+            : record.continuityOutcome === "skipped"
+              ? "未落实"
+              : null,
+      });
+      const current = currentRecords.map((record) => present(record, "本课"));
+      let prior: ReturnType<typeof present>[] = [];
+      const frameworkId = designBasis?.basis.frameworkId;
+      const currentBlueprintId = designBasis?.basis.lessonBlueprintId;
+      if (frameworkId) {
+        const framework = await repository.getSemesterFramework(context.userId, frameworkId);
+        const currentBlueprint = framework?.blueprints.find((item) => item.id === currentBlueprintId);
+        const priorBlueprintIds = new Set(
+          (framework?.blueprints ?? [])
+            .filter((item) => (
+              currentBlueprint
+              && item.semesterUnitId === currentBlueprint.semesterUnitId
+              && item.plannedPeriod < currentBlueprint.plannedPeriod
+            ))
+            .map((item) => item.id),
+        );
+        if (priorBlueprintIds.size) {
+          const frameworkFeedback = await repository.listLessonClassFeedback(context.userId, {
+            semesterFrameworkId: frameworkId,
+          });
+          prior = frameworkFeedback
+            .filter((record) => (
+              record.lessonFileId !== context.lessonFileId
+              && priorBlueprintIds.has(record.lessonBlueprintId ?? "")
+            ))
+            .slice(0, 20)
+            .map((record) => present(record, "同单元前序课时"));
+        }
+      }
+      if (!current.length && !prior.length) {
+        return JSON.stringify({
+          "结论": "本课及同单元前序课时还没有课堂反馈记录。",
+          "本课记录": [],
+          "同单元前序记录": [],
+        });
+      }
+      return JSON.stringify({
+        "结论": prior.length
+          ? "以下包含本课与同单元前序课时的课堂事实，生成后续教案时应优先承接前序薄弱点与未落实衔接。"
+          : "以下是本课已记录的课堂事实与判断，可用于修订难点、评价或后续课时衔接。",
+        "本课记录": current,
+        "同单元前序记录": prior,
+        "使用边界": "课堂反馈只代表本班学情，不得表述为平台已核验先修关系。",
+      });
+    },
+  });
+
+  const tools = [
+    readDocumentMetadata,
+    readDocument,
+    readSection,
+    readOutline,
+    readLessonClassFeedback,
+  ];
   if (!allowWrite) return tools;
 
   tools.push(tool({

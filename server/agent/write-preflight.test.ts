@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { MemoryLessonRepository } from "../repositories/memory-repository.js";
-import { createSemesterFrameworkPatchPreflight } from "./write-preflight.js";
+import {
+  createDocumentPatchPreflight,
+  createSemesterFrameworkPatchPreflight,
+  isCommittedApprovalReplay,
+  toolCallIdOf,
+} from "./write-preflight.js";
 
 describe("semester framework write preflight", () => {
   it("rejects a chapter lesson that is lazily bound to the unit root", async () => {
@@ -127,5 +132,102 @@ describe("semester framework write preflight", () => {
     } as never);
 
     expect(JSON.stringify(result)).toContain("blueprint_period_recommendation_mismatch");
+  });
+});
+
+describe("committed approval replay preflight", () => {
+  it("reads call ids from either callId or id", () => {
+    expect(toolCallIdOf({ callId: "call-a" })).toBe("call-a");
+    expect(toolCallIdOf({ id: "call-b" })).toBe("call-b");
+    expect(isCommittedApprovalReplay(
+      { approvedToolReplayCallId: "call-b" } as never,
+      { id: "call-b" },
+    )).toBe(true);
+  });
+
+  it("allows the post-approval propose replay without revalidating the old snapshot", async () => {
+    const repository = new MemoryLessonRepository();
+    const ownerId = "00000000-0000-4000-8000-000000000001";
+    await repository.importNotebookGraph(ownerId, [{
+      id: "notebook-replay",
+      title: "备课本",
+      className: "一班",
+      year: "2026",
+      subject: "语文",
+      files: [{
+        id: "file-replay",
+        title: "课题",
+        type: "新授课",
+        pages: 1,
+        lessonPlan: {
+          unit: "",
+          period: "",
+          totalPeriods: "",
+          topic: "",
+          objectives: "可观察目标",
+          knowledgePoints: "",
+          continuity: "",
+          focus: "",
+          preparation: "",
+          process: "",
+          assessment: "",
+          homework: "",
+          board: "",
+          reflection: "",
+        },
+      }],
+    }]);
+    // Simulate the post-write snapshot: version advanced and old expectedText
+    // no longer matches. Replay must still allow via the committed call id.
+    await repository.saveLessonDocument({
+      ownerId,
+      fileId: "file-replay",
+      document: {
+        unit: "",
+        period: "",
+        totalPeriods: "",
+        topic: "",
+        objectives: "可观察目标",
+        knowledgePoints: "",
+        continuity: "",
+        focus: "",
+        preparation: "",
+        process: "",
+        assessment: "",
+        homework: "",
+        board: "",
+        reflection: "",
+      },
+      pageCount: 1,
+      baseVersion: 0,
+      idempotencyKey: "replay-save",
+    });
+    const guardrail = createDocumentPatchPreflight(repository);
+    const result = await guardrail.run({
+      context: {
+        context: {
+          resourceType: "lesson_file",
+          userId: ownerId,
+          notebookId: "notebook-replay",
+          lessonFileId: "file-replay",
+          // Stale relative to the committed write; replay token is the gate.
+          documentVersion: 0,
+          approvedToolReplayCallId: "propose-replay",
+        },
+      },
+      toolCall: {
+        callId: "propose-replay",
+        arguments: JSON.stringify({
+          summary: "让目标可观察",
+          operations: [{
+            field: "objectives",
+            expectedText: "目标",
+            replacement: "可观察目标",
+          }],
+        }),
+      },
+    } as never);
+
+    expect(result).toMatchObject({ behavior: { type: "allow" } });
   });
 });

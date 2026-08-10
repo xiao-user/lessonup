@@ -49,6 +49,9 @@ export function createLessonOutputGuardrails(
   repository: LessonRepository,
   plan: CapabilityPlan,
 ): OutputGuardrail<TextOutput, PreparationAgentContext>[] {
+  // Output-guardrail tripwires halt the run. Teacher-facing language is enforced
+  // by semantic tool results + manager instructions instead, so the model can
+  // recover inside the turn rather than failing the teacher-visible conversation.
   return [{
     name: "observed-evidence-required",
     execute: async ({ context }) => validateObservedEvidence({

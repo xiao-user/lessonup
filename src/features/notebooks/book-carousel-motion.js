@@ -177,14 +177,19 @@ export function advanceCarouselMotion(state, elapsedSeconds, maxPosition) {
   return next;
 }
 
+export const BOOK_OPEN_SIZE_RATIO = 1.32;
+
 export function carouselBookPose(offset) {
   const direction = Math.sign(offset);
   const distance = Math.abs(offset);
   const travel = 48 * Math.tanh(distance * 1.35) + Math.max(0, distance - 1) * 7.5;
   const focus = Math.exp(-distance * distance * 3.25);
+  // Keep resting books visually the same size as before, but open at scale 1 so
+  // page/cover type stays sharp instead of being upscaled by --book-open-scale.
+  const restScale = (0.56 + 0.44 * focus) / BOOK_OPEN_SIZE_RATIO;
   return {
     y: 47.57 + direction * travel,
-    scale: 0.56 + 0.44 * focus,
+    scale: restScale,
     rotationOffset: direction < 0
       ? 10 * (1 - focus)
       : 2.5 * (1 - focus),

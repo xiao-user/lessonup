@@ -1475,6 +1475,12 @@ describe("real OpenAI Agents SDK harness path", () => {
     expect(secondApproval).toBeDefined();
     expect(secondApproval.id).not.toBe(firstApproval.id);
     expect(secondApproval.patch).toMatchObject({ baseFrameworkVersion: 1 });
+    expect(await repository.getRun(userId, secondApproval.runId)).toMatchObject({
+      status: "awaiting_approval",
+    });
+    expect(await repository.getThread(userId, thread.id)).toMatchObject({
+      status: "awaiting_approval",
+    });
 
     await harness.resumeApproval({
       userId,

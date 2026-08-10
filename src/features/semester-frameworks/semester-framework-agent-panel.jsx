@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, GitBranch, History, MoreHorizontal, Plus } from "lucide-react";
 import { toast } from "sonner";
 
@@ -51,6 +51,8 @@ export function SemesterFrameworkAgentPanel({
   unitTitleById,
   onCanonicalFramework,
   onNavigateToUnit,
+  initialPrompt = null,
+  onInitialPromptConsumed,
 }) {
   const chat = useAgentChat({
     notebookId: notebook.id,
@@ -61,6 +63,7 @@ export function SemesterFrameworkAgentPanel({
     onCanonicalFramework,
   });
   const [actionsOpen, setActionsOpen] = useState(false);
+  const initialPromptSentRef = useRef(null);
   const activeThread = chat.threads.find((thread) => thread.id === chat.activeThreadId);
   const starterSuggestions = activeThread?.starterSuggestions ?? [];
   const presentedMessages = useMemo(() => (
@@ -81,6 +84,26 @@ export function SemesterFrameworkAgentPanel({
     blueprint.id,
     blueprint,
   ])), [aggregate.blueprints]);
+
+  useEffect(() => {
+    if (!initialPrompt) return;
+    if (initialPromptSentRef.current === initialPrompt) return;
+    if (!chat.runtime?.agent || !chat.activeThreadId || !chat.activeBranchId) return;
+    if (chat.status === "loading" || chat.status === "streaming" || chat.status === "awaiting_approval") {
+      return;
+    }
+    initialPromptSentRef.current = initialPrompt;
+    onInitialPromptConsumed?.();
+    void chat.send(initialPrompt);
+  }, [
+    chat.activeBranchId,
+    chat.activeThreadId,
+    chat.runtime?.agent,
+    chat.send,
+    chat.status,
+    initialPrompt,
+    onInitialPromptConsumed,
+  ]);
   const suggestions = useMemo(() => starterSuggestions.slice(0, 3), [starterSuggestions]);
 
   const createThread = async () => {
@@ -132,7 +155,7 @@ export function SemesterFrameworkAgentPanel({
 
       {chat.branches.length > 1 ? (
         <Select value={chat.activeBranchId ?? undefined} onValueChange={chat.switchBranch}>
-          <SelectTrigger className="framework-agent-branch" size="sm" aria-label="切换消息分支">
+          <SelectTrigger className="framework-agent-branch w-auto" size="sm" aria-label="切换消息分支">
             <GitBranch />
             <SelectValue>{(value) => {
               const index = chat.branches.findIndex((branch) => branch.id === value);

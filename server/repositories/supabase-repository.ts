@@ -1,5 +1,6 @@
 import type { AgentInputItem } from "@openai/agents";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { defaultClassFeedbackWritebackStatus } from "../curriculum/continuity-adoption.js";
 import type {
   AgentApprovalRecord,
   AgentBranchRecord,
@@ -20,9 +21,11 @@ import type {
   CreateSemesterFrameworkInput,
   CreateLessonBlueprintInput,
   DeleteLessonBlueprintInput,
+  CreateLessonClassFeedbackInput,
   FrameworkOutcomeSelectionRecord,
   FrameworkContinuityCandidateRecord,
   KnowledgeResult,
+  LessonClassFeedbackRecord,
   LessonDesignBasisAggregate,
   LessonDesignBasisEntryRecord,
   LessonDesignBasisPatch,
@@ -30,6 +33,7 @@ import type {
   LessonBlueprintRecord,
   LessonFileRecord,
   NotebookRecord,
+  SetFrameworkContinuityDecisionInput,
   SourceRef,
   NormalizedAgentEvent,
   SemesterFrameworkAggregate,
@@ -46,6 +50,10 @@ import {
   searchCurriculumNodeRecords,
   type CurriculumTextbookFilter,
 } from "../curriculum/catalog.js";
+import {
+  applyContinuityDecisions,
+  continuityFingerprintFromCandidateId,
+} from "../curriculum/continuity-adoption.js";
 import { deriveFrameworkContinuity } from "../curriculum/framework-continuity.js";
 import type { CreateThreadInput, ImportedNotebook, LessonRepository } from "../repository.js";
 import { createLessonPlanPreview } from "../../src/lib/lesson-preview.js";
@@ -246,6 +254,7 @@ const mapFrameworkContinuityCandidate = (
   confidence: Number(row.confidence),
   rationale: row.rationale,
   evidence: row.evidence ?? {},
+  fingerprint: String(row.fingerprint),
   decision: row.decision,
   active: Boolean(row.active),
   createdAt: row.created_at,
@@ -420,7 +429,7 @@ export class SupabaseLessonRepository implements LessonRepository {
       this.client.from("notebooks").select("*")
         .eq("owner_id", ownerId).order("updated_at", { ascending: false }),
       this.client.from("lesson_files")
-        .select("id,owner_id,notebook_id,title,type,image,document,document_version,page_count,updated_at")
+        .select("id,owner_id,notebook_id,lesson_blueprint_id,title,type,image,document,document_version,page_count,updated_at")
         .eq("owner_id", ownerId).order("updated_at", { ascending: false }),
     ]);
     if (notebooks.error) throw new Error(notebooks.error.message);
@@ -429,6 +438,7 @@ export class SupabaseLessonRepository implements LessonRepository {
       id: row.id,
       ownerId: row.owner_id,
       notebookId: row.notebook_id,
+      lessonBlueprintId: row.lesson_blueprint_id ?? undefined,
       title: row.title,
       type: row.type,
       image: row.image ?? undefined,
@@ -1473,8 +1483,8 @@ export class SupabaseLessonRepository implements LessonRepository {
       relations: [],
       includeLexicalCandidates: true,
     }).filter((draft) => draft.evidenceKind === "lexical_similarity")
-      .map(({ fingerprint, ...draft }) => ({
-        id: `lexical-${fingerprint}`,
+      .map((draft) => ({
+        id: `lexical-${draft.fingerprint}`,
         frameworkId: aggregate.framework.id,
         derivedFromFrameworkVersion: aggregate.framework.version,
         ...draft,
@@ -1483,6 +1493,30 @@ export class SupabaseLessonRepository implements LessonRepository {
         createdAt: timestamp,
         updatedAt: timestamp,
       }));
+  }
+
+  private async loadContinuityDecisions(ownerId: string, frameworkId: string) {
+    const result = await this.client
+      .from("framework_continuity_decisions")
+      .select("fingerprint, decision")
+      .eq("owner_id", ownerId)
+      .eq("framework_id", frameworkId);
+    if (result.error) throw new Error(result.error.message);
+    return new Map(
+      (result.data ?? []).map((row) => [
+        String(row.fingerprint),
+        row.decision as FrameworkContinuityCandidateRecord["decision"],
+      ]),
+    );
+  }
+
+  private async withContinuityDecisions(
+    ownerId: string,
+    frameworkId: string,
+    candidates: FrameworkContinuityCandidateRecord[],
+  ) {
+    const decisions = await this.loadContinuityDecisions(ownerId, frameworkId);
+    return applyContinuityDecisions(candidates, decisions);
   }
 
   async getSemesterFrameworkContinuity(ownerId: string, frameworkId: string) {
@@ -1500,12 +1534,17 @@ export class SupabaseLessonRepository implements LessonRepository {
     if (result.error) throw new Error(result.error.message);
     const verified = (result.data ?? []).map(mapFrameworkContinuityCandidate);
     const suggested = await this.deriveSuggestedFrameworkContinuity(framework);
+    const candidates = await this.withContinuityDecisions(
+      ownerId,
+      frameworkId,
+      mergeFrameworkContinuityCandidates(verified, suggested),
+    );
     return {
       status: framework.framework.semanticReleaseId
         ? "available" as const
         : "semantic_release_unavailable" as const,
       frameworkVersion: framework.framework.version,
-      candidates: mergeFrameworkContinuityCandidates(verified, suggested),
+      candidates,
     };
   }
 
@@ -1520,11 +1559,147 @@ export class SupabaseLessonRepository implements LessonRepository {
     if (!framework) throw new Error("semester_framework_not_found");
     const verified = (payload.candidates ?? []).map(mapFrameworkContinuityCandidate);
     const suggested = await this.deriveSuggestedFrameworkContinuity(framework);
+    const candidates = await this.withContinuityDecisions(
+      ownerId,
+      frameworkId,
+      mergeFrameworkContinuityCandidates(verified, suggested),
+    );
     return {
       status: payload.status,
       frameworkVersion: Number(payload.frameworkVersion),
-      candidates: mergeFrameworkContinuityCandidates(verified, suggested),
+      candidates,
     };
+  }
+
+  async setSemesterFrameworkContinuityDecision(
+    ownerId: string,
+    frameworkId: string,
+    input: SetFrameworkContinuityDecisionInput,
+  ) {
+    const continuity = await this.getSemesterFrameworkContinuity(ownerId, frameworkId);
+    const fingerprint = input.fingerprint
+      ?? continuityFingerprintFromCandidateId(input.candidateId ?? "")
+      ?? continuity.candidates.find((candidate) => candidate.id === input.candidateId)?.fingerprint;
+    if (!fingerprint) throw new Error("continuity_candidate_not_found");
+    const candidate = continuity.candidates.find((item) => item.fingerprint === fingerprint);
+    if (!candidate) throw new Error("continuity_candidate_not_found");
+
+    const upsert = await this.client.from("framework_continuity_decisions").upsert({
+      owner_id: ownerId,
+      framework_id: frameworkId,
+      fingerprint,
+      decision: input.decision,
+      note: input.note?.trim() ?? "",
+      target_unit_id: candidate.targetUnitId,
+      direction: candidate.direction,
+      current_entity_id: candidate.currentEntityId,
+      related_entity_id: candidate.relatedEntityId,
+      related_unit_id: candidate.relatedUnitId,
+      evidence_kind: candidate.evidenceKind,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "owner_id,framework_id,fingerprint" });
+    if (upsert.error) throw new Error(upsert.error.message);
+
+    if (!candidate.id.startsWith("lexical-")) {
+      const sync = await this.client
+        .from("framework_continuity_candidates")
+        .update({ decision: input.decision, updated_at: new Date().toISOString() })
+        .eq("owner_id", ownerId)
+        .eq("framework_id", frameworkId)
+        .eq("fingerprint", fingerprint);
+      if (sync.error) throw new Error(sync.error.message);
+    }
+
+    return this.getSemesterFrameworkContinuity(ownerId, frameworkId);
+  }
+
+  private mapClassFeedback(row: Record<string, any>): LessonClassFeedbackRecord {
+    return {
+      id: row.id,
+      notebookId: row.notebook_id,
+      lessonFileId: row.lesson_file_id,
+      lessonBlueprintId: row.lesson_blueprint_id ?? null,
+      semesterFrameworkId: row.semester_framework_id ?? null,
+      kind: row.kind,
+      statement: row.statement,
+      relatedEntityId: row.related_entity_id ?? null,
+      continuityFingerprint: row.continuity_fingerprint ?? null,
+      continuityDirection: row.continuity_direction ?? null,
+      continuityOutcome: row.continuity_outcome ?? null,
+      writebackStatus: row.writeback_status ?? null,
+      evidence: row.evidence ?? {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async createLessonClassFeedback(
+    ownerId: string,
+    input: CreateLessonClassFeedbackInput,
+  ) {
+    const file = await this.getLessonFile(ownerId, input.lessonFileId);
+    if (!file) throw new Error("lesson_file_not_found");
+    const writebackStatus = input.writebackStatus
+      ?? defaultClassFeedbackWritebackStatus({
+        kind: input.kind,
+        continuityOutcome: input.continuityOutcome ?? null,
+      });
+    const insert = await this.client.from("lesson_class_feedback").insert({
+      owner_id: ownerId,
+      notebook_id: file.notebookId,
+      lesson_file_id: file.id,
+      lesson_blueprint_id: input.lessonBlueprintId ?? file.lessonBlueprintId ?? null,
+      semester_framework_id: input.semesterFrameworkId ?? null,
+      kind: input.kind,
+      statement: input.statement.trim(),
+      related_entity_id: input.relatedEntityId ?? null,
+      continuity_fingerprint: input.continuityFingerprint ?? null,
+      continuity_direction: input.continuityDirection ?? null,
+      continuity_outcome: input.continuityOutcome ?? null,
+      writeback_status: writebackStatus,
+      evidence: input.evidence ?? {},
+    }).select("*").single();
+    if (insert.error) throw new Error(insert.error.message);
+    return this.mapClassFeedback(insert.data);
+  }
+
+  async markLessonClassFeedbackWriteback(
+    ownerId: string,
+    feedbackId: string,
+    status: "pending" | "applied" | "not_applicable",
+  ) {
+    const update = await this.client.from("lesson_class_feedback").update({
+      writeback_status: status,
+      updated_at: new Date().toISOString(),
+    }).eq("owner_id", ownerId).eq("id", feedbackId).select("*").maybeSingle();
+    if (update.error) throw new Error(update.error.message);
+    if (!update.data) throw new Error("lesson_class_feedback_not_found");
+    return this.mapClassFeedback(update.data);
+  }
+
+  async listLessonClassFeedback(
+    ownerId: string,
+    filter: {
+      lessonFileId?: string;
+      lessonBlueprintId?: string;
+      semesterFrameworkId?: string;
+    },
+  ) {
+    let query = this.client
+      .from("lesson_class_feedback")
+      .select("*")
+      .eq("owner_id", ownerId)
+      .order("created_at", { ascending: false });
+    if (filter.lessonFileId) query = query.eq("lesson_file_id", filter.lessonFileId);
+    if (filter.lessonBlueprintId) {
+      query = query.eq("lesson_blueprint_id", filter.lessonBlueprintId);
+    }
+    if (filter.semesterFrameworkId) {
+      query = query.eq("semester_framework_id", filter.semesterFrameworkId);
+    }
+    const result = await query;
+    if (result.error) throw new Error(result.error.message);
+    return (result.data ?? []).map((row) => this.mapClassFeedback(row));
   }
 
   async getCurrentCurriculumCatalogRelease() {

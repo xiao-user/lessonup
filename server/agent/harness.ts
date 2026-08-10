@@ -63,9 +63,14 @@ import { SkillRegistry } from "./skill-registry.js";
 import { extractSources } from "./source-extraction.js";
 import { publicAgentError } from "./public-error.js";
 import { safeToolPresentation, type SafeToolPresentation } from "./tool-presentation.js";
+import {
+  toolCompletionLabelForOutcome,
+  toolCompletionOutcomeOf,
+} from "./tool-completion-outcome.js";
 import { bindPatchToObservedEvidence } from "./evidence.js";
 import { validateObservedEvidence } from "./output-guardrails.js";
 import { materializeSemesterFrameworkPatch } from "../semester-framework-patch.js";
+import { resolveScopedWritebackFeedbackId } from "../curriculum/continuity-adoption.js";
 import { materializeLessonDesignBasisPatch } from "../lesson-design-basis-patch.js";
 import {
   DesignBasisProjectionError,
@@ -191,7 +196,11 @@ function mergeContinuationPlan(
       || false,
     continuityRequested: previous.continuityRequested
       || current.continuityRequested
+      || Boolean(current.continuityWritebackFeedbackId)
+      || Boolean(previous.continuityWritebackFeedbackId)
       || false,
+    continuityWritebackFeedbackId: current.continuityWritebackFeedbackId
+      ?? previous.continuityWritebackFeedbackId,
     requiredEvidenceKinds: requiredEvidenceKinds.length ? requiredEvidenceKinds : undefined,
   };
 }
@@ -551,8 +560,8 @@ export class LessonAgentHarness {
           ? "本轮明确要求维护结构化设计依据。只生成一次必要的修改确认项；不要拆成连续审批，也不要向教师展示工具名、参数名、校验码或内部重试过程。"
           : plan.fullRewriteRequested
             ? plan.designBasisRequested
-              ? "本轮要求基于上游备课上下文完整生成 A4 教案。先读取当前整份教案、教学情境、一次教案设计依据和一次当前章节知识点；使用设计依据中已经限定到本课的单元目标、课时蓝图和教学衔接候选，不另行遍历教材或开放搜索。重点知识、目标、活动、学生产出、评价和必要的复习/铺垫必须彼此对应；随后直接生成一次整栏修改确认项，不要先展示草案或询问是否继续。"
-              : "本轮要求整份重编 A4 教案。只读取当前整份教案、教学情境和当前章节已发布知识点；当前章节知识点工具不需要参数，最多调用一次。不要扩展为教材目录遍历、前后衔接检索、专业 Agent 审查或开放式资料搜索。随后只提交实际发生变化的栏目，直接生成一次整栏修改确认项，不要先展示草案或询问是否继续。"
+              ? "本轮要求基于上游备课上下文完整生成 A4 教案。先读取当前整份教案、教学情境、一次教案设计依据和一次当前章节知识点；使用设计依据中已经限定到本课的单元目标、课时蓝图、教学衔接候选和同单元前序课堂反馈，不另行遍历教材或开放搜索，也不再重复读取课堂反馈工具。重点知识、目标、活动、学生产出、评价和必要的复习/铺垫必须彼此对应；前序薄弱衔接要落到具体任务或证据。随后直接生成一次整栏修改确认项，不要先展示草案或询问是否继续。"
+              : "本轮要求整份重编 A4 教案。只读取当前整份教案、教学情境、当前章节已发布知识点，以及一次本课/前序课堂反馈（若有）；当前章节知识点工具不需要参数，最多调用一次。不要扩展为教材目录遍历、前后衔接检索、专业 Agent 审查或开放式资料搜索。随后只提交实际发生变化的栏目，直接生成一次整栏修改确认项，不要先展示草案或询问是否继续。"
             : plan.minimalWriteRequested
               ? "本轮只允许一处最小修改。只调用一次 read_document 读取必要栏目，再调用一次无需参数的 read_curriculum_knowledge_points 核对当前课题；随后下一次工具调用必须是 propose_document_patch。选择对教师目标影响最大的一处，只提交一个栏目操作并直接生成一次确认项；不要检索其他教材或设计依据，不要顺带修改其他栏目。"
               : "本轮明确要求修改 A4 教案。完成必要读取后直接生成一次教案修改确认项；知识点、教学依据、学生困难和评价证据直接写入合适栏目，不要先建立结构化设计依据，不要再次口头询问是否提交，也不要展示工具名、参数名、校验码或内部重试过程。"
@@ -564,7 +573,7 @@ export class LessonAgentHarness {
       : "";
     const continuityBoundary = isSemesterFrameworkAgentContext(context)
       && plan.continuityRequested
-      ? "本轮涉及学期、单元或课时蓝图规划。提出规划前必须读取目标单元的教材章节、章节课时建议和教学衔接候选。一个蓝图只能代表一节真实课堂；使用蓝图自身 plannedMinutes（默认继承框架课时制、允许教师在 20–60 分钟内调整），不能把章节总分钟写成单课时，后续生成教案也必须沿用该蓝图时长。用 curriculumNodeId + chapterPeriodNo 表示同一章节第 1、第 2……课时：已有同课次会被更新，缺少课次才新增。教师只说补充时保留已有课次；教师明确说按当前建议重新调整、对齐或重建时，还要显式删除超出建议且不再需要的旧课次，不要把调整结果叠加成重复蓝图，也不要凭模糊措辞删除教师额外课次。让前一课时的学生产出成为后一课时起点。已审核关系可作为明确依据；词法召回只用于发现待判断关联，必须结合单元目标、教材顺序和本班学情取舍。选中的复习或铺垫不能停留在标签或说明里，要落实到某一课时的主要活动、学生可观察产出或达成证据；没有合适候选时如实跳过，不要硬塞。"
+      ? "本轮涉及学期、单元、课时蓝图规划或课堂反馈回写。提出规划前必须读取目标单元的教材章节、章节课时建议和教学衔接候选；若任务涉及后续课时调整，还要读取课堂反馈。一个蓝图只能代表一节真实课堂；使用蓝图自身 plannedMinutes（默认继承框架课时制、允许教师在 20–60 分钟内调整），不能把章节总分钟写成单课时，后续生成教案也必须沿用该蓝图时长。用 curriculumNodeId + chapterPeriodNo 表示同一章节第 1、第 2……课时：已有同课次会被更新，缺少课次才新增。教师只说补充时保留已有课次；教师明确说按当前建议重新调整、对齐或重建时，还要显式删除超出建议且不再需要的旧课次，不要把调整结果叠加成重复蓝图，也不要凭模糊措辞删除教师额外课次。让前一课时的学生产出成为后一课时起点。已审核关系可作为明确依据；词法召回只用于发现待判断关联，必须结合单元目标、教材顺序和本班学情取舍。选中的复习或铺垫不能停留在标签或说明里，要落实到某一课时的主要活动、学生可观察产出或达成证据；没有合适候选时如实跳过，不要硬塞。对偏弱或未落实的衔接效果，优先按反馈工具给出的同单元下一课时建议提出一次蓝图修改确认，不要静默写入。"
       : "";
     return [baseInput, executionBoundary, actionBoundary, continuityBoundary]
       .filter(Boolean)
@@ -766,7 +775,7 @@ export class LessonAgentHarness {
       contextForMemory = context;
       await this.repository.createRun({
         id: runId, ownerId: input.userId, threadId: input.threadId, branchId: input.branchId,
-        model: deepSeekModels.pro, status: "queued",
+        model: deepSeekModels.flash, status: "queued",
         agentDefinitionVersion,
         assistantMessageId,
         leaseToken,
@@ -865,12 +874,31 @@ export class LessonAgentHarness {
           : undefined,
         attachments.length > 0,
       );
-      const plan = attachments.length && !continuedPlan.mcpServers.includes("knowledge")
+      let plan = attachments.length && !continuedPlan.mcpServers.includes("knowledge")
         ? {
             ...continuedPlan,
             mcpServers: [...continuedPlan.mcpServers, "knowledge"],
           }
         : continuedPlan;
+      if (
+        plan.continuityWritebackFeedbackId
+        && isSemesterFrameworkAgentContext(context)
+      ) {
+        const feedbackRecords = await this.repository.listLessonClassFeedback(input.userId, {
+          semesterFrameworkId: context.semesterFrameworkId,
+        });
+        const scopedFeedbackId = resolveScopedWritebackFeedbackId(
+          plan.continuityWritebackFeedbackId,
+          feedbackRecords,
+          context.semesterFrameworkId,
+        );
+        if (scopedFeedbackId !== plan.continuityWritebackFeedbackId) {
+          plan = {
+            ...plan,
+            continuityWritebackFeedbackId: scopedFeedbackId,
+          };
+        }
+      }
       const skills = this.registry.resolve(plan.skillIds);
       const managerStartedAt = performance.now();
       const runtime = await createManager({
@@ -1190,14 +1218,30 @@ export class LessonAgentHarness {
             sources.set(source.id, source);
             await args.emit({ type: "source.added", runId, source });
           }
+          // After decideApproval commits, the SDK replays the same propose_*
+          // call. A stale preflight on that acknowledgement must not surface as
+          // a teacher-visible write failure — the resource is already updated.
+          const committedReplay = Boolean(
+            args.context.approvedToolReplayCallId
+            && toolCallId === args.context.approvedToolReplayCallId
+            && resolvedName.startsWith("propose_"),
+          );
+          const revisionCode = committedReplay
+            ? undefined
+            : proposalRevisionCodeOf(output);
+          const ok = committedReplay ? true : toolOutputSucceeded(event);
+          const outcome = toolCompletionOutcomeOf({ ok, revisionCode });
           await args.emit({
             type: "tool.completed",
             runId,
             toolCallId,
             name: resolvedName,
-            ok: toolOutputSucceeded(event),
-            revisionCode: proposalRevisionCodeOf(output),
+            ok,
+            revisionCode,
+            outcome,
             ...presentation,
+            label: toolCompletionLabelForOutcome(presentation.label, outcome),
+            groupKey: presentation.groupKey,
           });
           toolCallsById.delete(toolCallId);
         }
@@ -1497,11 +1541,28 @@ export class LessonAgentHarness {
         });
         const sessionCursor = await currentSessionCursor();
         if (args.continuation) {
+          // A chained interruption during approval continuation only owns the
+          // continuation lease, not the original run lease. Pause the previous
+          // continuation, then explicitly park the run/thread on the new pending
+          // approval. Leaving status=running with a cleared lease created
+          // unrecovered zombies that blocked later teacher turns.
           await this.repository.updateMessage(args.userId, args.assistant.id, {
             content,
             status: "completed",
             sources: [...sources.values()],
             sessionCursor,
+          });
+          await settleContinuation("paused");
+          await this.repository.updateRun(args.userId, runId, {
+            status: "awaiting_approval",
+            tokenUsage: metrics(),
+            completedAt: undefined,
+            leaseToken: undefined,
+            leaseExpiresAt: undefined,
+            heartbeatAt: new Date().toISOString(),
+          });
+          await this.repository.updateThread(args.userId, args.context.threadId, {
+            status: "awaiting_approval",
           });
         } else if (args.runLeaseToken) {
           await this.repository.settleRun({
@@ -1518,9 +1579,6 @@ export class LessonAgentHarness {
         }
         const message = await this.repository.getMessage(args.userId, args.assistant.id)
           ?? { ...args.assistant, content, status: "completed", sources: [...sources.values()] };
-        if (args.continuation) {
-          await settleContinuation("paused");
-        }
         await args.emit({ type: "message.completed", runId, message });
         await args.emit({
           type: "approval.required",
@@ -1753,6 +1811,32 @@ export class LessonAgentHarness {
             resourceType: "semester_framework",
             framework: decision.framework,
           });
+          const writebackFeedbackId = run.capabilityPlan?.continuityWritebackFeedbackId;
+          if (
+            args.approved
+            && writebackFeedbackId
+            && isSemesterFrameworkPatch(approvalPatch)
+          ) {
+            try {
+              const feedbackRecords = await this.repository.listLessonClassFeedback(args.userId, {
+                semesterFrameworkId: approvalPatch.frameworkId,
+              });
+              const scopedFeedbackId = resolveScopedWritebackFeedbackId(
+                writebackFeedbackId,
+                feedbackRecords,
+                approvalPatch.frameworkId,
+              );
+              if (scopedFeedbackId) {
+                await this.repository.markLessonClassFeedbackWriteback(
+                  args.userId,
+                  scopedFeedbackId,
+                  "applied",
+                );
+              }
+            } catch {
+              // Writeback marker must not roll back an already-approved framework patch.
+            }
+          }
         }
         if (decision.basis) {
           await args.emit({
@@ -1779,31 +1863,38 @@ export class LessonAgentHarness {
             context.designBasisVersion = decision.basis.basis.version;
           }
         }
-        if (args.approved && "callId" in interruption.rawItem) {
-          // Agents SDK intentionally runs tool input guardrails both before the
-          // approval interruption and again before approved execution. LessonUp
-          // has already committed the teacher-approved transaction atomically at
-          // this point, so rerunning the old proposal against the new snapshot
-          // would falsely report it as stale. Rehydrate the approved RunState
-          // with a narrowly scoped replay token for this exact call only.
-          context.approvedToolReplayCallId = interruption.rawItem.callId;
-          state = await RunState.fromStringWithContext(
-            runtime.manager,
-            state.toString(),
-            new RunContext<PreparationAgentContext>(context),
-            { contextStrategy: "replace" },
-          );
-          const replayInterruption = state.getInterruptions().find((item) => (
-            "callId" in item.rawItem
-            && item.rawItem.callId === context.approvedToolReplayCallId
-          ));
-          if (!replayInterruption) throw new Error("approval_interruption_missing_after_context_refresh");
-          // Approval decisions live in RunContext rather than the serialized
-          // step, so replacing the context requires applying the same decision
-          // to the rehydrated interruption once more. This does not touch the
-          // database transaction; it only lets the SDK execute its post-approval
-          // acknowledgement path.
-          state.approve(replayInterruption);
+        if (args.approved) {
+          const replayCallId = "callId" in interruption.rawItem
+            ? interruption.rawItem.callId
+            : undefined;
+          if (typeof replayCallId === "string" && replayCallId.trim()) {
+            // Agents SDK intentionally runs tool input guardrails both before
+            // the approval interruption and again before approved execution.
+            // LessonUp has already committed the teacher-approved transaction
+            // atomically, so rerunning the old proposal against the new
+            // snapshot would falsely report it as stale. Rehydrate the approved
+            // RunState with a narrowly scoped replay token for this call only.
+            context.approvedToolReplayCallId = replayCallId;
+            state = await RunState.fromStringWithContext(
+              runtime.manager,
+              state.toString(),
+              new RunContext<PreparationAgentContext>(context),
+              { contextStrategy: "replace" },
+            );
+            const replayInterruption = state.getInterruptions().find((item) => (
+              "callId" in item.rawItem
+              && item.rawItem.callId === context.approvedToolReplayCallId
+            ));
+            if (!replayInterruption) {
+              throw new Error("approval_interruption_missing_after_context_refresh");
+            }
+            // Approval decisions live in RunContext rather than the serialized
+            // step, so replacing the context requires applying the same decision
+            // to the rehydrated interruption once more. This does not touch the
+            // database transaction; it only lets the SDK execute its
+            // post-approval acknowledgement path.
+            state.approve(replayInterruption);
+          }
         }
       } else if (approval.state === "pending") {
         throw new Error("approval_interruption_missing");

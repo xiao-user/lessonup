@@ -202,10 +202,38 @@ describe("LessonUp API scope", () => {
       { method: "POST", headers: { "x-lessonup-user": userA } },
     );
     expect(continuityResponse.status).toBe(200);
-    await expect(continuityResponse.json()).resolves.toMatchObject({
+    const continuity = await continuityResponse.json() as {
+      status: string;
+      frameworkVersion: number;
+      candidates: Array<{ fingerprint: string; decision: string }>;
+    };
+    expect(continuity).toMatchObject({
       status: "available",
       frameworkVersion: 0,
     });
+    if (continuity.candidates[0]) {
+      const decideResponse = await app.request(
+        `/api/semester-frameworks/${created.framework.id}/continuity/decisions`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-lessonup-user": userA,
+          },
+          body: JSON.stringify({
+            fingerprint: continuity.candidates[0].fingerprint,
+            decision: "accepted",
+          }),
+        },
+      );
+      expect(decideResponse.status).toBe(200);
+      const decided = await decideResponse.json() as {
+        candidates: Array<{ fingerprint: string; decision: string }>;
+      };
+      expect(decided.candidates.find((item) => (
+        item.fingerprint === continuity.candidates[0]!.fingerprint
+      ))?.decision).toBe("accepted");
+    }
 
     const repeatedResponse = await app.request(
       "/api/notebooks/n-semester/semester-frameworks",

@@ -7,11 +7,11 @@ describe("resolveEvalGraderConfig", () => {
     expect(resolveEvalGraderConfig({
       DEEPSEEK_API_KEY: "deepseek-key",
       DEEPSEEK_BASE_URL: "https://deepseek.example/v1",
-      DEEPSEEK_PRO_MODEL: "deepseek-v4-pro",
+      DEEPSEEK_FLASH_MODEL: "deepseek-v4-flash",
     })).toEqual({
       apiKey: "deepseek-key",
       baseURL: "https://deepseek.example/v1",
-      model: "deepseek-v4-pro",
+      model: "deepseek-v4-flash",
     });
   });
 

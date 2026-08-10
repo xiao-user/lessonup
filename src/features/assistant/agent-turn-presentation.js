@@ -32,19 +32,28 @@ export function shouldShowAgentThinking(phase) {
 
 export function agentActivitySummary(activities, phase) {
   const failed = activities.filter((activity) => activity.state === "failed").length;
+  const needsRevision = activities.filter((activity) => activity.state === "needs_revision").length;
+  const unchanged = activities.filter((activity) => activity.state === "unchanged").length;
   const completed = activities.filter((activity) => activity.state === "completed").length;
   const running = activities.find((activity) => activity.state === "running");
-  if (running) return running.attempts > 1
-    ? `正在修正：${running.label}`
-    : `正在执行：${running.label}`;
+  if (running) {
+    if (running.attempts > 1 && running.name?.startsWith("propose_")) {
+      return `正在调整：${running.label}`;
+    }
+    return `正在执行：${running.label}`;
+  }
   if (failed) return `${failed} 项任务失败`;
+  if (needsRevision) return `${needsRevision} 项建议需调整`;
+  if (unchanged && !completed) return "现稿已符合要求，无需修改";
   if (phase === agentTurnPhases.awaiting) return "任务完成，正在组织回复";
-  return `已完成 ${completed} 项任务`;
+  return `已完成 ${completed + unchanged} 项任务`;
 }
 
 const mergedActivityState = (activities) => {
   if (activities.some((activity) => activity.state === "failed")) return "failed";
+  if (activities.some((activity) => activity.state === "needs_revision")) return "needs_revision";
   if (activities.some((activity) => activity.state === "running")) return "running";
+  if (activities.some((activity) => activity.state === "unchanged")) return "unchanged";
   return "completed";
 };
 

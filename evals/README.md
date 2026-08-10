@@ -17,7 +17,7 @@ Optional:
 
 - `LESSONUP_EVAL_BASE_URL` (defaults to `http://127.0.0.1:8787`)
 - `DEEPSEEK_BASE_URL` (defaults to `https://api.deepseek.com`)
-- `DEEPSEEK_PRO_MODEL` (defaults to `deepseek-v4-pro`)
+- `DEEPSEEK_FLASH_MODEL` (defaults to `deepseek-v4-flash`)
 - `LESSONUP_EVAL_GRADER_API_KEY`, `LESSONUP_EVAL_GRADER_BASE_URL` and
   `LESSONUP_EVAL_GRADER_MODEL` only when the grader must use a separate
   credential, endpoint, or model. Otherwise the evaluation runner reuses the

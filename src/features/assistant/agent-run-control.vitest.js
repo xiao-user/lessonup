@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   activitiesFromEvents,
+  activityStateForToolCompletion,
   canRetryApprovalDecision,
   deriveBranchRuntimeState,
   presentAgentError,
@@ -32,6 +33,81 @@ describe("activitiesFromEvents", () => {
       }),
     ]);
   });
+
+  it("treats a post-decision propose acknowledgement as successful during live completion", () => {
+    expect(activityStateForToolCompletion({
+      name: "propose_document_patch",
+      ok: false,
+      revisionCode: "document_context_stale",
+    }, {
+      approvalCreated: true,
+      approvalDecided: true,
+    })).toBe("completed");
+  });
+
+  it("presents no-effect proposals as unchanged instead of failed", () => {
+    expect(activityStateForToolCompletion({
+      name: "propose_document_patch",
+      ok: false,
+      revisionCode: "no_effect_patch",
+      outcome: "no_change",
+    })).toBe("unchanged");
+    expect(activitiesFromEvents([
+      {
+        type: "tool.started",
+        toolCallId: "proposal-noop",
+        name: "propose_document_patch",
+        label: "准备修改建议",
+      },
+      {
+        type: "tool.completed",
+        toolCallId: "proposal-noop",
+        name: "propose_document_patch",
+        label: "现稿已符合要求，将复用当前内容",
+        ok: false,
+        revisionCode: "no_effect_patch",
+        outcome: "no_change",
+      },
+    ])).toEqual([
+      expect.objectContaining({
+        state: "unchanged",
+        outcome: "no_change",
+        label: "现稿已符合要求，将复用当前内容",
+      }),
+    ]);
+  });
+
+  it("presents recoverable proposal revisions as needs_revision", () => {
+    expect(activityStateForToolCompletion({
+      name: "propose_document_patch",
+      ok: false,
+      revisionCode: "semantic_quality_rejected",
+    })).toBe("needs_revision");
+  });
+
+  it("keeps a proposal successful after approval.decided even without approval.required in the same batch", () => {
+    expect(activitiesFromEvents([
+      {
+        type: "tool.started",
+        toolCallId: "proposal-2",
+        name: "propose_document_patch",
+        label: "准备修改建议",
+      },
+      { type: "approval.decided", approvalId: "approval-2", decision: "approved" },
+      {
+        type: "tool.completed",
+        toolCallId: "proposal-2",
+        name: "propose_document_patch",
+        ok: false,
+        revisionCode: "proposal_needs_revision",
+      },
+    ])).toEqual([
+      expect.objectContaining({
+        name: "propose_document_patch",
+        state: "completed",
+      }),
+    ]);
+  });
 });
 
 describe("canRetryApprovalDecision", () => {
@@ -48,6 +124,13 @@ describe("canRetryApprovalDecision", () => {
 });
 
 describe("presentAgentError", () => {
+  it("explains a post-write continuation failure without claiming the patch was lost", () => {
+    expect(presentAgentError("approval_resume_failed")).toEqual({
+      message: "你的确认已写入；后续说明未能完成，可直接继续提问，不会重复写入。",
+      retryLabel: "继续新一轮",
+    });
+  });
+
   it("explains an unavailable attachment without exposing an internal id", () => {
     expect(presentAgentError("knowledge_attachment_unavailable")).toEqual({
       message: "附带资料已被删除、尚未解析完成，或已随另一条消息发送。请重新选择资料。",

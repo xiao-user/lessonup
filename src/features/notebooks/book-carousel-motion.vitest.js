@@ -107,7 +107,7 @@ describe("book carousel motion", () => {
   });
 
   it("maps books and titles continuously around the shared focus coordinate", () => {
-    expect(carouselBookPose(0)).toMatchObject({ y: 47.57, scale: 1 });
+    expect(carouselBookPose(0)).toMatchObject({ y: 47.57, scale: 1 / 1.32 });
     expect(carouselBookPose(-0.5).y).toBeLessThan(47.57);
     expect(carouselBookPose(0.5).y).toBeGreaterThan(47.57);
     expect(carouselBookPose(0.99).scale).toBeCloseTo(carouselBookPose(1.01).scale, 1);

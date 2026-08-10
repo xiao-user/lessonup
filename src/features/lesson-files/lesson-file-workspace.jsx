@@ -495,6 +495,9 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
   const scrollRef = useRef(null);
   const documentPagesRef = useRef(null);
   const firstSheetRef = useRef(null);
+  const documentPaneRef = useRef(null);
+  const agentDockRef = useRef(null);
+  const agentDockWidthRef = useRef(0);
   const closingRef = useRef(false);
   const openingTimelineRef = useRef(null);
   const sectionScrollRef = useRef(null);
@@ -560,6 +563,55 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
   const proposedFields = useMemo(() => new Set(
     agentPresentation?.approval?.patch?.operations?.map((operation) => operation.field) ?? [],
   ), [agentPresentation?.approval]);
+  const agentDockMode = approvalPreview
+    ? "approval"
+    : agentPresentation?.status === "streaming" && !agentPresentation.approval
+      ? "streaming"
+      : null;
+  const agentDockLabel = agentDockMode === "approval"
+    ? "预览中 · 未写入"
+    : agentPresentation?.activities?.find((activity) => activity.state === "running")?.label
+      ?? "正在形成修改";
+
+  useGSAP(() => {
+    const dock = agentDockRef.current;
+    if (!dock || !agentDockMode) {
+      agentDockWidthRef.current = 0;
+      return undefined;
+    }
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    gsap.set(dock, { clearProps: "width" });
+    const nextWidth = dock.getBoundingClientRect().width;
+    const previousWidth = agentDockWidthRef.current;
+    agentDockWidthRef.current = nextWidth;
+    if (!previousWidth || reduceMotion) {
+      gsap.fromTo(dock, {
+        autoAlpha: previousWidth ? 1 : 0,
+        y: previousWidth ? 0 : 10,
+      }, {
+        autoAlpha: 1,
+        y: 0,
+        duration: reduceMotion ? 0 : 0.28,
+        ease: "power2.out",
+        overwrite: "auto",
+      });
+      return undefined;
+    }
+    const tween = gsap.fromTo(dock, {
+      width: previousWidth,
+      overflow: "hidden",
+    }, {
+      width: nextWidth,
+      duration: 0.32,
+      ease: "power2.inOut",
+      overwrite: "auto",
+      onComplete: () => {
+        gsap.set(dock, { clearProps: "width,overflow" });
+        agentDockWidthRef.current = dock.getBoundingClientRect().width;
+      },
+    });
+    return () => tween.kill();
+  }, { dependencies: [agentDockMode, agentDockLabel], scope: documentPaneRef });
 
   useLayoutEffect(() => {
     rootRef.current?.focus({ preventScroll: true });
@@ -1291,99 +1343,126 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
         </nav>
       </aside>
 
-      <main
-        className={`lesson-document-scroll ${approvalPreview ? "is-agent-preview" : ""}`}
-        ref={scrollRef}
-        aria-label="A4教案编辑区"
-        onPointerUp={captureSelection}
-        onKeyUp={captureSelection}
-      >
-        <p className="lesson-mobile-document-hint">上下滚动查看完整教案</p>
-        {agentPresentation?.status === "streaming" && !agentPresentation.approval ? (
-          <div className="lesson-document-agent-state" role="status">
-            <Sparkles aria-hidden="true" />
-            <div><strong>{agentPresentation.activities?.find((activity) => activity.state === "running")?.label ?? "正在形成教案修改"}</strong><span>完成读取与校验后，修改会直接在 A4 中预览。</span></div>
-          </div>
-        ) : null}
-        {approvalPreview ? (
-          <div className="lesson-document-approval-bar" role="status">
-            <div><strong>正在预览助手修改</strong><span>{agentPresentation.approval.patch.summary} · 尚未写入</span></div>
-            <div>
-              <Button type="button" size="sm" variant="outline" disabled={agentPresentation.approval.state === "responding"} onClick={agentPresentation.reject}>保留原文</Button>
-              <Button type="button" size="sm" disabled={agentPresentation.approval.state === "responding"} onClick={agentPresentation.approve}>{agentPresentation.approval.state === "responding" ? "正在应用…" : "接受修改"}</Button>
-            </div>
-          </div>
-        ) : null}
-        <div className="lesson-document-pages" ref={documentPagesRef}>
-          {renderedPages.map((pageEntries, pageIndex) => (
-            <div
-              className="lesson-sheet-frame"
-              ref={pageIndex === 0 ? firstSheetRef : undefined}
-              key={`page-${pageIndex}`}
-            >
-              <article className="lesson-sheet" data-page-index={pageIndex}>
-                <div className="lesson-sheet-content">
-                  <table className="lesson-plan-table">
-                    <LessonTableColumns />
-                    <tbody>
-                      {pageEntries.map((entry) => {
-                        if (entry.kind === "basics") {
+      <div className="lesson-document-pane" ref={documentPaneRef}>
+        <main
+          className={`lesson-document-scroll ${approvalPreview ? "is-agent-preview" : ""}`}
+          ref={scrollRef}
+          aria-label="A4教案编辑区"
+          onPointerUp={captureSelection}
+          onKeyUp={captureSelection}
+        >
+          <p className="lesson-mobile-document-hint">上下滚动查看完整教案</p>
+          <div className="lesson-document-pages" ref={documentPagesRef}>
+            {renderedPages.map((pageEntries, pageIndex) => (
+              <div
+                className="lesson-sheet-frame"
+                ref={pageIndex === 0 ? firstSheetRef : undefined}
+                key={`page-${pageIndex}`}
+              >
+                <article className="lesson-sheet" data-page-index={pageIndex}>
+                  <div className="lesson-sheet-content">
+                    <table className="lesson-plan-table">
+                      <LessonTableColumns />
+                      <tbody>
+                        {pageEntries.map((entry) => {
+                          if (entry.kind === "basics") {
+                            return (
+                              <BasicsRow
+                                plan={renderedPlan}
+                                onChange={commitField}
+                                onFocus={() => setActiveSection("basics")}
+                                syncVersion={editorSyncVersion}
+                                onHistoryAction={handleHistoryAction}
+                                proposedFields={proposedFields}
+                                key={entry.key}
+                              />
+                            );
+                          }
+
+                          if (entry.kind === "topic") {
+                            return (
+                              <tr className="lesson-row-topic" key={entry.key}>
+                                <th scope="row">课题</th>
+                                <td colSpan={5}>
+                                  <EditableCell
+                                    value={renderedPlan.topic}
+                                    onChange={(...change) => commitField("topic", ...change)}
+                                    onFocus={() => setActiveSection("basics")}
+                                    field="topic"
+                                    syncVersion={editorSyncVersion}
+                                    onHistoryAction={handleHistoryAction}
+                                    label="课题"
+                                    proposed={proposedFields.has("topic")}
+                                  />
+                                </td>
+                              </tr>
+                            );
+                          }
+
                           return (
-                            <BasicsRow
-                              plan={renderedPlan}
-                              onChange={commitField}
-                              onFocus={() => setActiveSection("basics")}
+                            <SectionRow
+                              entry={entry}
+                              onChange={commitSegment}
+                              onFocus={setActiveSection}
                               syncVersion={editorSyncVersion}
                               onHistoryAction={handleHistoryAction}
-                              proposedFields={proposedFields}
+                              proposed={proposedFields.has(entry.field)}
                               key={entry.key}
                             />
                           );
-                        }
-
-                        if (entry.kind === "topic") {
-                          return (
-                            <tr className="lesson-row-topic" key={entry.key}>
-                              <th scope="row">课题</th>
-                              <td colSpan={5}>
-                                <EditableCell
-                                  value={renderedPlan.topic}
-                                  onChange={(...change) => commitField("topic", ...change)}
-                                  onFocus={() => setActiveSection("basics")}
-                                  field="topic"
-                                  syncVersion={editorSyncVersion}
-                                  onHistoryAction={handleHistoryAction}
-                                  label="课题"
-                                  proposed={proposedFields.has("topic")}
-                                />
-                              </td>
-                            </tr>
-                          );
-                        }
-
-                        return (
-                          <SectionRow
-                            entry={entry}
-                            onChange={commitSegment}
-                            onFocus={setActiveSection}
-                            syncVersion={editorSyncVersion}
-                            onHistoryAction={handleHistoryAction}
-                            proposed={proposedFields.has(entry.field)}
-                            key={entry.key}
-                          />
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-                <span className="lesson-page-number" aria-label={`第${pageIndex + 1}页，共${renderedPages.length}页`}>
-                  {pageIndex + 1} / {renderedPages.length}
-                </span>
-              </article>
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  <span className="lesson-page-number" aria-label={`第${pageIndex + 1}页，共${renderedPages.length}页`}>
+                    {pageIndex + 1} / {renderedPages.length}
+                  </span>
+                </article>
+              </div>
+            ))}
+          </div>
+        </main>
+        {agentDockMode ? (
+          <div className="lesson-document-agent-dock-slot">
+            <div
+              className={`lesson-document-agent-dock is-${agentDockMode}`}
+              ref={agentDockRef}
+              role="status"
+              aria-live="polite"
+            >
+              {agentDockMode === "streaming" ? (
+                <>
+                  <Sparkles aria-hidden="true" />
+                  <strong>{agentDockLabel}</strong>
+                </>
+              ) : (
+                <>
+                  <strong>{agentDockLabel}</strong>
+                  <div className="lesson-document-agent-dock-actions">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={agentPresentation.approval.state === "responding"}
+                      onClick={agentPresentation.reject}
+                    >
+                      保留原文
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={agentPresentation.approval.state === "responding"}
+                      onClick={agentPresentation.approve}
+                    >
+                      {agentPresentation.approval.state === "responding" ? "应用中…" : "接受"}
+                    </Button>
+                  </div>
+                </>
+              )}
             </div>
-          ))}
-        </div>
-      </main>
+          </div>
+        ) : null}
+      </div>
 
       <aside id="lesson-assistant-panel" className={`lesson-side-rail lesson-assistant-rail ${mobileRail === "assistant" ? "is-mobile-open" : ""}`}>
         <Suspense fallback={<p className="lesson-agent-status">正在加载备课助手…</p>}>

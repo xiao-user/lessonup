@@ -24,8 +24,10 @@ import type {
   CreateLessonBlueprintInput,
   DeleteLessonBlueprintInput,
   DocumentPatch,
+  CreateLessonClassFeedbackInput,
   FrameworkContinuityResult,
   KnowledgeResult,
+  LessonClassFeedbackRecord,
   LessonDesignBasisAggregate,
   LessonDesignBasisPatch,
   LessonFileRecord,
@@ -33,6 +35,7 @@ import type {
   LessonPlan,
   NotebookGraphRecord,
   NotebookRecord,
+  SetFrameworkContinuityDecisionInput,
   SourceRef,
   NormalizedAgentEvent,
   SemesterFrameworkAggregate,
@@ -320,6 +323,28 @@ export interface LessonRepository {
     ownerId: string,
     frameworkId: string,
   ): Promise<FrameworkContinuityResult>;
+  setSemesterFrameworkContinuityDecision(
+    ownerId: string,
+    frameworkId: string,
+    input: SetFrameworkContinuityDecisionInput,
+  ): Promise<FrameworkContinuityResult>;
+  createLessonClassFeedback(
+    ownerId: string,
+    input: CreateLessonClassFeedbackInput,
+  ): Promise<LessonClassFeedbackRecord>;
+  markLessonClassFeedbackWriteback(
+    ownerId: string,
+    feedbackId: string,
+    status: "pending" | "applied" | "not_applicable",
+  ): Promise<LessonClassFeedbackRecord>;
+  listLessonClassFeedback(
+    ownerId: string,
+    filter: {
+      lessonFileId?: string;
+      lessonBlueprintId?: string;
+      semesterFrameworkId?: string;
+    },
+  ): Promise<LessonClassFeedbackRecord[]>;
 
   getCurrentCurriculumCatalogRelease(): Promise<CurriculumCatalogReleaseRecord | null>;
   getCurriculumCatalogRelease(releaseId: string): Promise<CurriculumCatalogReleaseRecord | null>;

@@ -35,6 +35,8 @@ const fallbackLabels: Record<string, string> = {
   read_semester_framework: "读取学期框架",
   read_semester_unit: "读取单元计划",
   read_semester_framework_continuity: "核对学期教学连续性",
+  read_framework_class_feedback: "读取课堂反馈",
+  read_lesson_class_feedback: "读取本课与前序课堂反馈",
   get_semester_framework_version: "核对框架版本",
   propose_semester_framework_patch: "准备框架修改建议",
   lookup_curriculum_textbooks: "查找教材书目",
@@ -130,6 +132,8 @@ export function safeToolPresentation(
     name === "read_semester_framework"
     || name === "read_semester_unit"
     || name === "read_semester_framework_continuity"
+    || name === "read_framework_class_feedback"
+    || name === "read_lesson_class_feedback"
     || name === "get_semester_framework_version"
   ) {
     return { label: fallbackLabels[name], groupKey: "framework-read" };

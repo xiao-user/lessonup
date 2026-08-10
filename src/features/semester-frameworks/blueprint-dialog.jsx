@@ -133,7 +133,7 @@ export function BlueprintDialog({ unit, unitTitle, nodes, blueprint, lessonDurat
             {!editing && <Field>
               <FieldLabel htmlFor="blueprint-node">教材章节</FieldLabel>
               <Select value={curriculumNodeId} onValueChange={setCurriculumNodeId}>
-                <SelectTrigger id="blueprint-node" className="w-full"><SelectValue placeholder="选择具体章节">
+                <SelectTrigger id="blueprint-node"><SelectValue placeholder="选择具体章节">
                   {(value) => options.find((node) => node.nodeId === value)?.label || "选择具体章节"}
                 </SelectValue></SelectTrigger>
                 <SelectContent><SelectGroup>{options.map((node) => (

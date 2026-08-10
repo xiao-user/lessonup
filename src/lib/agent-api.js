@@ -112,6 +112,20 @@ export const agentApi = {
     `/api/semester-frameworks/${encodeURIComponent(frameworkId)}/continuity/refresh`,
     { method: "POST" },
   ),
+  setSemesterFrameworkContinuityDecision: (frameworkId, input) => request(
+    `/api/semester-frameworks/${encodeURIComponent(frameworkId)}/continuity/decisions`,
+    { method: "POST", body: JSON.stringify(input) },
+  ),
+  listLessonClassFeedback: (lessonFileId) => request(
+    `/api/lesson-files/${encodeURIComponent(lessonFileId)}/class-feedback`,
+  ),
+  createLessonClassFeedback: (lessonFileId, input) => request(
+    `/api/lesson-files/${encodeURIComponent(lessonFileId)}/class-feedback`,
+    { method: "POST", body: JSON.stringify(input) },
+  ),
+  listFrameworkClassFeedback: (frameworkId) => request(
+    `/api/semester-frameworks/${encodeURIComponent(frameworkId)}/class-feedback`,
+  ),
   createLessonFile: (input, idempotencyKey = crypto.randomUUID()) => request("/api/lesson-files", {
     method: "POST",
     headers: { "idempotency-key": idempotencyKey },

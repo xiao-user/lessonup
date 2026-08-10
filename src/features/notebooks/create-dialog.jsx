@@ -335,7 +335,7 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
                       }}
                       disabled={loadingCurriculum}
                     >
-                      <SelectTrigger id="stage" className="w-full">
+                      <SelectTrigger id="stage">
                         <SelectValue placeholder="选择学段" />
                       </SelectTrigger>
                       <SelectContent>
@@ -350,7 +350,7 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
                   <Field>
                     <FieldLabel htmlFor="grade">年级</FieldLabel>
                     <Select value={grade} onValueChange={setGrade} disabled={loadingCurriculum}>
-                      <SelectTrigger id="grade" className="w-full">
+                      <SelectTrigger id="grade">
                         <SelectValue placeholder="选择年级" />
                       </SelectTrigger>
                       <SelectContent>
@@ -367,7 +367,7 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
                   <Field>
                     <FieldLabel htmlFor="subject">科目</FieldLabel>
                     <Select value={subject} onValueChange={setSubject} disabled={loadingCurriculum}>
-                      <SelectTrigger id="subject" className="w-full">
+                      <SelectTrigger id="subject">
                         <SelectValue placeholder={loadingCurriculum ? "加载科目…" : "选择科目"} />
                       </SelectTrigger>
                       <SelectContent>
@@ -382,7 +382,7 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
                   <Field>
                     <FieldLabel htmlFor="notebook-edition">教材版本</FieldLabel>
                     <Select value={edition} onValueChange={setEdition} disabled={!editions.length}>
-                      <SelectTrigger id="notebook-edition" className="w-full">
+                      <SelectTrigger id="notebook-edition">
                         <SelectValue placeholder="选择版本">
                           {(value) => value === NONE ? "暂不指定" : value}
                         </SelectValue>
@@ -404,7 +404,7 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
                 <Field>
                   <FieldLabel htmlFor="notebook-select">所属备课本</FieldLabel>
                   <Select value={notebookId} onValueChange={setNotebookId}>
-                    <SelectTrigger id="notebook-select" className="w-full">
+                    <SelectTrigger id="notebook-select">
                       <SelectValue>
                         {(value) => {
                           const notebook = notebooks.find((item) => item.id === value);
@@ -441,7 +441,7 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
                       }}
                       disabled={!textbooks.length}
                     >
-                      <SelectTrigger id="edition-select" className="w-full">
+                      <SelectTrigger id="edition-select">
                         <SelectValue placeholder={textbooks.length ? "可选版本" : "暂无匹配教材"}>
                           {(value) => value === NONE ? "暂不指定" : value}
                         </SelectValue>
@@ -468,7 +468,7 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
                       }}
                       disabled={!textbooksForEdition.length}
                     >
-                      <SelectTrigger id="textbook-select" className="w-full">
+                      <SelectTrigger id="textbook-select">
                         <SelectValue placeholder="可选册次">
                           {(value) => {
                             if (value === NONE) return "暂不指定";
@@ -502,7 +502,7 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
                     }}
                     disabled={textbookId === NONE || loadingUnits}
                   >
-                    <SelectTrigger id="unit-select" className="w-full">
+                    <SelectTrigger id="unit-select">
                       <SelectValue placeholder={
                           textbookId === NONE
                             ? "先选择教材册次"
@@ -543,7 +543,7 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
                     }}
                     disabled={unitNodeId === NONE || loadingLessonNodes}
                   >
-                    <SelectTrigger id="lesson-node-select" className="w-full">
+                    <SelectTrigger id="lesson-node-select">
                       <SelectValue placeholder={
                           unitNodeId === NONE
                             ? "先选择教材单元"

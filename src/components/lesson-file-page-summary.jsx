@@ -30,3 +30,21 @@ export function LessonFilePageSummary({ file, pageIndex, fileCount }) {
     </span>
   );
 }
+
+export function LessonFilePageBackSummary({ file }) {
+  const meta = [file.type, file.pages ? `${file.pages} 页` : null]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <span className="book-volume-title-page-copy book-volume-file-page-back">
+      <i aria-hidden="true" />
+      <span className="book-volume-title-page-center">
+        <strong>{file.title}</strong>
+        {meta ? <span>{meta}</span> : null}
+        {file.updated ? <small>{file.updated}</small> : null}
+      </span>
+      <i aria-hidden="true" />
+    </span>
+  );
+}

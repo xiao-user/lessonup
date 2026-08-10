@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { agentApi, consumeAgentStream } from "@/lib/agent-api";
 import {
   activitiesFromEvents,
+  activityStateForToolCompletion,
   canRetryApprovalDecision,
   deriveBranchRuntimeState,
   lastRetryableUserMessage,
@@ -98,20 +99,29 @@ export function useAgentChat({
   const runtimeRef = useRef(null);
   const statusRef = useRef(status);
   const messagesRef = useRef([]);
+  const approvalsRef = useRef([]);
   const runScopesRef = useRef(new Map());
   const streamControllersRef = useRef(new Map());
   const starterRequestsRef = useRef(new Set());
   const uploadsRef = useRef([]);
   const threadCreationRef = useRef(null);
+  // Keep canonical callbacks in refs so an unstable parent identity (e.g. inline
+  // onCanonicalFramework) cannot invalidate loadMessages → selectThread and
+  // re-run the mount effect, which briefly clears approvals and yanks StickToBottom.
+  const onCanonicalDocumentRef = useRef(onCanonicalDocument);
+  const onCanonicalFrameworkRef = useRef(onCanonicalFramework);
   const approval = activeApprovalFrom(approvals);
   resourceVersionRef.current = resourceVersion;
   statusRef.current = status;
+  onCanonicalDocumentRef.current = onCanonicalDocument;
+  onCanonicalFrameworkRef.current = onCanonicalFramework;
 
   useEffect(() => { activeThreadRef.current = activeThreadId; }, [activeThreadId]);
   useEffect(() => { activeBranchRef.current = activeBranchId; }, [activeBranchId]);
   useEffect(() => { threadsRef.current = threads; }, [threads]);
   useEffect(() => { runtimeRef.current = runtime; }, [runtime]);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
+  useEffect(() => { approvalsRef.current = approvals; }, [approvals]);
 
   const replaceUploads = useCallback((nextOrUpdater) => {
     setUploads((current) => {
@@ -197,18 +207,18 @@ export function useAgentChat({
         const framework = await agentApi.getSemesterFramework(resourceId);
         if (framework.framework.version > resourceVersionRef.current) {
           resourceVersionRef.current = framework.framework.version;
-          onCanonicalFramework?.(framework);
+          onCanonicalFrameworkRef.current?.(framework);
         }
       } else {
         const file = await agentApi.getLessonFile(resourceId);
         if (file.documentVersion > resourceVersionRef.current) {
           resourceVersionRef.current = file.documentVersion;
-          onCanonicalDocument?.(file);
+          onCanonicalDocumentRef.current?.(file);
         }
       }
     }
     return { records, approvals: presentedApprovals, presentation };
-  }, [onCanonicalDocument, onCanonicalFramework, resourceId, resourceType]);
+  }, [resourceId, resourceType]);
 
   const ensureThreadStarters = useCallback(async (thread, hasMessages, { force = false } = {}) => {
     if (
@@ -463,7 +473,7 @@ export function useAgentChat({
         && event.file.documentVersion > resourceVersionRef.current
       ) {
         resourceVersionRef.current = event.file.documentVersion;
-        onCanonicalDocument?.(event.file);
+        onCanonicalDocumentRef.current?.(event.file);
       }
     }
     if (
@@ -474,7 +484,7 @@ export function useAgentChat({
       && event.framework.framework.version > resourceVersionRef.current
     ) {
       resourceVersionRef.current = event.framework.framework.version;
-      onCanonicalFramework?.(event.framework);
+      onCanonicalFrameworkRef.current?.(event.framework);
     }
     if (event.type === "message.delta") {
       if (!isActive) return;
@@ -498,14 +508,33 @@ export function useAgentChat({
     }
     if (event.type === "tool.completed") {
       if (!isActive) return;
-      setActivities((current) => current.map((activity) => activity.id === event.toolCallId
-        ? {
-          ...activity,
-          state: event.ok ? "completed" : "failed",
-          label: event.label,
-          groupKey: event.groupKey ?? activity.groupKey,
-        }
-        : activity));
+      setActivities((current) => {
+        const approvalCreated = approvalsRef.current.some((item) => (
+          item.runId === event.runId
+        ));
+        const approvalDecided = approvalsRef.current.some((item) => (
+          item.runId === event.runId
+          && (item.decision === "approved"
+            || item.decision === "rejected"
+            || item.state === "responding"
+            || item.state === "approved"
+            || item.state === "rejected"
+            || item.state === "continuation")
+        ));
+        return current.map((activity) => activity.id === event.toolCallId
+          ? {
+            ...activity,
+            state: activityStateForToolCompletion(event, {
+              approvalCreated,
+              approvalDecided,
+            }),
+            label: event.label,
+            groupKey: event.groupKey ?? activity.groupKey,
+            outcome: event.outcome,
+            revisionCode: event.revisionCode,
+          }
+          : activity);
+      });
     }
     if (event.type === "source.added") {
       if (!isActive) return;
@@ -596,7 +625,7 @@ export function useAgentChat({
       }
       runScopesRef.current.delete(event.runId);
     }
-  }, [onCanonicalDocument, onCanonicalFramework, resourceId, resourceType]);
+  }, [resourceId, resourceType]);
 
   useEffect(() => {
     if (

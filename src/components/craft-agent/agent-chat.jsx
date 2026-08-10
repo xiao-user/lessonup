@@ -93,17 +93,26 @@ const CraftMarkdown = memo(function CraftMarkdown({ children, isAnimating = fals
 });
 
 function ActivityStatusIcon({ state }) {
-  if (state === "completed") return <Check aria-hidden="true" />;
+  if (state === "completed" || state === "unchanged") return <Check aria-hidden="true" />;
   if (state === "failed") return <X aria-hidden="true" />;
+  if (state === "needs_revision") return <Circle aria-hidden="true" />;
   if (state === "running") return <LoaderCircle className="animate-spin" aria-hidden="true" />;
   return <Circle aria-hidden="true" />;
+}
+
+function activityStateLabel(state) {
+  if (state === "completed") return "完成";
+  if (state === "unchanged") return "无需修改";
+  if (state === "needs_revision") return "需调整";
+  if (state === "failed") return "失败";
+  return "进行中";
 }
 
 function ThinkingState({ preparing = false, revising = false }) {
   return (
     <div className="craft-thinking-state" role="status">
       <LoaderCircle className="animate-spin" aria-hidden="true" />
-      <span>{revising ? "正在修正修改建议…" : preparing ? "正在生成下一步…" : "思考中…"}</span>
+      <span>{revising ? "正在调整修改建议…" : preparing ? "正在生成下一步…" : "思考中…"}</span>
     </div>
   );
 }
@@ -114,7 +123,11 @@ function CraftActivityGroup({ activities, phase }) {
   const summary = agentActivitySummary(visibleActivities, phase);
   const revising = visibleActivities.some((activity) => (
     activity.name?.startsWith("propose_")
-    && (activity.state === "failed" || activity.attempts > 1)
+    && activity.state === "needs_revision"
+  )) || visibleActivities.some((activity) => (
+    activity.name?.startsWith("propose_")
+    && activity.state === "running"
+    && activity.attempts > 1
   ));
 
   return (
@@ -133,7 +146,7 @@ function CraftActivityGroup({ activities, phase }) {
           <div className="craft-activity-row" data-state={activity.state} key={activity.id}>
             <ActivityStatusIcon state={activity.state} />
             <span>{activity.label}</span>
-            <small>{activity.state === "completed" ? "完成" : activity.state === "failed" ? "失败" : "进行中"}</small>
+            <small>{activityStateLabel(activity.state)}</small>
           </div>
         ))}
         {shouldShowAgentThinking(phase) ? <ThinkingState preparing revising={revising} /> : null}
@@ -383,7 +396,7 @@ export function CraftApproval({
         <>
           {showContinuationNotice ? (
             <p className="craft-approval-result">
-              修改决定已经保存，但后续回复未能恢复。{resourceLabel}状态不会被重复写入。
+              你的确认已写入{resourceLabel}；后续说明未能完成，可直接继续提问，不会重复写入。
             </p>
           ) : null}
           <div className="craft-approval-actions">

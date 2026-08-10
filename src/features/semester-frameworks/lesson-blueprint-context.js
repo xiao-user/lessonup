@@ -95,9 +95,26 @@ export function withinChapterContinuityDraft(periodContext) {
   return lines.join("\n");
 }
 
+export function selectContinuityForDraft(candidates = [], limitPerDirection = 2) {
+  const usable = candidates.filter((item) => item.decision !== "dismissed");
+  const pick = (direction) => {
+    const inDirection = usable.filter((item) => item.direction === direction);
+    const accepted = inDirection.filter((item) => item.decision === "accepted");
+    const pool = accepted.length
+      ? accepted
+      : [...inDirection].sort((left, right) => (
+        (left.evidenceKind === "lexical_similarity" ? 1 : 0)
+          - (right.evidenceKind === "lexical_similarity" ? 1 : 0)
+      ));
+    return pool.slice(0, limitPerDirection);
+  };
+  return [...pick("review"), ...pick("prepare")];
+}
+
 export function continuityDraft(candidates = [], periodContext = null) {
-  const reviews = candidates.filter((item) => item.direction === "review").slice(0, 2);
-  const preparations = candidates.filter((item) => item.direction === "prepare").slice(0, 2);
+  const selected = selectContinuityForDraft(candidates);
+  const reviews = selected.filter((item) => item.direction === "review");
+  const preparations = selected.filter((item) => item.direction === "prepare");
   return [
     periodContext ? withinChapterContinuityDraft(periodContext) : null,
     reviews.length

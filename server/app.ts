@@ -30,6 +30,11 @@ import { publicApiError } from "./public-api-error.js";
 import { shouldPersistRunEvent } from "./run-event-persistence.js";
 import { generateThreadStarters } from "./agent/thread-starters.js";
 import { canonicalizeLessonContextProfile } from "./curriculum/context-profile.js";
+import {
+  buildContinuityWritebackHints,
+  buildContinuityWritebackSeed,
+  needsContinuityWriteback,
+} from "./curriculum/continuity-adoption.js";
 
 let tracingConfigured = false;
 
@@ -650,6 +655,112 @@ export function createApp(
       c.get("userId"),
       frameworkId,
     ));
+  });
+
+  app.post("/api/semester-frameworks/:id/continuity/decisions", async (c) => {
+    const frameworkId = z.string().uuid().parse(c.req.param("id"));
+    const framework = await repository.getSemesterFramework(c.get("userId"), frameworkId);
+    if (!framework) return c.json({ error: "semester_framework_not_found" }, 404);
+    const input = z.object({
+      fingerprint: z.string().min(1).optional(),
+      candidateId: z.string().min(1).optional(),
+      decision: z.enum(["accepted", "dismissed", "candidate"]),
+      note: z.string().max(500).optional(),
+    }).refine((value) => Boolean(value.fingerprint || value.candidateId), {
+      message: "continuity_candidate_required",
+    }).parse(await c.req.json());
+    try {
+      return c.json(await repository.setSemesterFrameworkContinuityDecision(
+        c.get("userId"),
+        frameworkId,
+        input,
+      ));
+    } catch (error) {
+      if (error instanceof Error && error.message === "continuity_candidate_not_found") {
+        return c.json({ error: error.message }, 404);
+      }
+      throw error;
+    }
+  });
+
+  app.get("/api/lesson-files/:id/class-feedback", async (c) => {
+    const lessonFileId = c.req.param("id");
+    const file = await repository.getLessonFile(c.get("userId"), lessonFileId);
+    if (!file) return c.json({ error: "lesson_file_not_found" }, 404);
+    return c.json({
+      records: await repository.listLessonClassFeedback(c.get("userId"), { lessonFileId }),
+    });
+  });
+
+  app.post("/api/lesson-files/:id/class-feedback", async (c) => {
+    const lessonFileId = c.req.param("id");
+    const file = await repository.getLessonFile(c.get("userId"), lessonFileId);
+    if (!file) return c.json({ error: "lesson_file_not_found" }, 404);
+    const input = z.object({
+      kind: z.enum(["observation", "practice_gap", "error_cause", "continuity_outcome"]),
+      statement: z.string().trim().min(1).max(2000),
+      lessonBlueprintId: z.string().uuid().nullable().optional(),
+      semesterFrameworkId: z.string().uuid().nullable().optional(),
+      relatedEntityId: z.string().uuid().nullable().optional(),
+      continuityFingerprint: z.string().min(1).nullable().optional(),
+      continuityDirection: z.enum(["review", "prepare"]).nullable().optional(),
+      continuityOutcome: z.enum(["worked", "weak", "skipped"]).nullable().optional(),
+      evidence: z.record(z.string(), z.unknown()).optional(),
+    }).superRefine((value, ctx) => {
+      if (value.kind !== "continuity_outcome") return;
+      if (!value.continuityFingerprint?.trim()) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["continuityFingerprint"],
+          message: "衔接效果反馈必须绑定具体衔接候选",
+        });
+      }
+      if (!value.continuityDirection) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["continuityDirection"],
+          message: "衔接效果反馈必须标明复习或铺垫方向",
+        });
+      }
+      if (!value.continuityOutcome) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["continuityOutcome"],
+          message: "衔接效果反馈必须标明有效、偏弱或未落实",
+        });
+      }
+    }).parse(await c.req.json());
+    const record = await repository.createLessonClassFeedback(c.get("userId"), {
+      lessonFileId,
+      ...input,
+    });
+    let writebackSeed: string | null = null;
+    if (
+      needsContinuityWriteback(record)
+      && record.semesterFrameworkId
+    ) {
+      const aggregate = await repository.getSemesterFramework(
+        c.get("userId"),
+        record.semesterFrameworkId,
+      );
+      const hint = buildContinuityWritebackHints(
+        [record],
+        aggregate?.blueprints ?? [],
+      )[0];
+      if (hint) writebackSeed = buildContinuityWritebackSeed(hint);
+    }
+    return c.json({ ...record, writebackSeed }, 201);
+  });
+
+  app.get("/api/semester-frameworks/:id/class-feedback", async (c) => {
+    const frameworkId = z.string().uuid().parse(c.req.param("id"));
+    const framework = await repository.getSemesterFramework(c.get("userId"), frameworkId);
+    if (!framework) return c.json({ error: "semester_framework_not_found" }, 404);
+    return c.json({
+      records: await repository.listLessonClassFeedback(c.get("userId"), {
+        semesterFrameworkId: frameworkId,
+      }),
+    });
   });
 
   app.get("/api/lesson-files/:id", async (c) => {

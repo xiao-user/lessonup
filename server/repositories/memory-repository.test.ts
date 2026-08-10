@@ -26,6 +26,35 @@ describe("memory repository isolation", () => {
     expect(notebook.files[0]).not.toHaveProperty("contextProfile");
   });
 
+  it("preserves lessonBlueprintId on notebook file summaries after create", async () => {
+    const repository = new MemoryLessonRepository();
+    const notebook = await repository.createNotebook("user-a", {
+      title: "备课本",
+      className: "一班",
+      year: "2026",
+      subject: "语文",
+      stage: "初中",
+      grade: "七年级",
+      edition: "统编版",
+      tone: "teal",
+    });
+    const blueprintId = crypto.randomUUID();
+    // Seed a minimal framework/blueprint binding through createLessonFile's optional id.
+    // Memory repo stores the id on the file even without a live framework aggregate.
+    const file = await repository.createLessonFile("user-a", {
+      notebookId: notebook.id,
+      title: "蓝图教案",
+      type: "课时蓝图教案",
+      document,
+      contextProfile: {},
+      lessonBlueprintId: blueprintId,
+      pageCount: 1,
+    }, "blueprint-link-1");
+    expect(file.lessonBlueprintId).toBe(blueprintId);
+    const [listed] = await repository.listNotebooks("user-a");
+    expect(listed.files[0]?.lessonBlueprintId).toBe(blueprintId);
+  });
+
   it("never returns another owner's file even when client ids collide", async () => {
     const repository = new MemoryLessonRepository();
     await importFor(repository, "user-a");
@@ -722,6 +751,45 @@ describe("memory repository isolation", () => {
       error: "run_interrupted",
     });
     expect(await repository.getMessage("user-a", assistant.id)).toMatchObject({
+      status: "failed",
+      error: "run_interrupted",
+    });
+    expect(await repository.getThread("user-a", thread.id)).toMatchObject({
+      status: "failed",
+    });
+  });
+
+  it("recovers lease-less zombie running runs after a stale heartbeat", async () => {
+    const repository = new MemoryLessonRepository();
+    await importFor(repository, "user-a");
+    const { thread, branch } = await repository.createThread("user-a", {
+      notebookId: "n1",
+      lessonFileId: "f1",
+    });
+    const assistant = await repository.appendMessage({
+      id: "assistant-leaseless-zombie",
+      ownerId: "user-a",
+      threadId: thread.id,
+      branchId: branch.id,
+      role: "assistant",
+      content: "等待下一张确认卡",
+      status: "completed",
+    });
+    await repository.createRun({
+      id: "leaseless-zombie-run",
+      ownerId: "user-a",
+      threadId: thread.id,
+      branchId: branch.id,
+      model: "test",
+      status: "running",
+      assistantMessageId: assistant.id,
+      heartbeatAt: new Date(Date.now() - 3 * 60_000).toISOString(),
+      startedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+    });
+    await repository.updateThread("user-a", thread.id, { status: "running" });
+
+    await expect(repository.recoverExpiredRuns("user-a", thread.id)).resolves.toBe(1);
+    expect(await repository.getRun("user-a", "leaseless-zombie-run")).toMatchObject({
       status: "failed",
       error: "run_interrupted",
     });

@@ -178,6 +178,23 @@ describe("enforceRequiredCapabilities", () => {
     )).toMatchObject({
       continuityRequested: true,
     });
+    expect(deterministicCapabilityPlan(
+      "根据课堂反馈调整下一课时的衔接效果",
+    )).toMatchObject({
+      continuityRequested: true,
+    });
+    expect(deterministicCapabilityPlan(
+      [
+        "【衔接回写】",
+        "feedbackId:11111111-1111-4111-8111-111111111111",
+        "请基于刚保存的课堂反馈，提出一次学期框架修改审批。",
+      ].join("\n"),
+    )).toMatchObject({
+      writeMode: "explicit",
+      continuityRequested: true,
+      classroomActionRequired: true,
+      continuityWritebackFeedbackId: "11111111-1111-4111-8111-111111111111",
+    });
   });
 
   it("does not mistake A4 business content for an external research request", () => {

@@ -95,7 +95,7 @@ const recoveryGuidance = (code: string) => {
     return "学期框架快照已经变化。请重新读取目标单元或蓝图，只重做受影响的操作。";
   }
   if (code === "no_effect_patch") {
-    return "提案没有产生实际变化。请删除无效操作；如果当前内容已经合适，直接向教师说明无需修改。";
+    return "提案相对现稿没有产生实际变化。若现稿已满足教师本次要求，请直接向教师说明将复用当前内容、无需再提交相同修改；只有确实需要改写时，才提交与现稿有实质差异的栏目内容。";
   }
   if (code === "too_many_document_operations") {
     return "教师本轮只要求一处最小修改。请保留对当前目标影响最大的一处栏目修改，删除其余操作后重新提交。";
@@ -140,13 +140,26 @@ const reject = (error: unknown) => {
 
 const allow = () => ToolGuardrailFunctionOutputFactory.allow();
 
-const isCommittedApprovalReplay = (
+export const toolCallIdOf = (toolCall: {
+  callId?: string | null;
+  id?: string | null;
+} | null | undefined) => {
+  if (!toolCall) return undefined;
+  if (typeof toolCall.callId === "string" && toolCall.callId.trim()) {
+    return toolCall.callId;
+  }
+  if (typeof toolCall.id === "string" && toolCall.id.trim()) return toolCall.id;
+  return undefined;
+};
+
+export const isCommittedApprovalReplay = (
   context: PreparationAgentContext,
-  toolCall: { callId?: string },
-) => Boolean(
-  context.approvedToolReplayCallId
-  && toolCall.callId === context.approvedToolReplayCallId
-);
+  toolCall: { callId?: string | null; id?: string | null },
+) => {
+  const replayCallId = context.approvedToolReplayCallId?.trim();
+  const toolCallId = toolCallIdOf(toolCall);
+  return Boolean(replayCallId && toolCallId && replayCallId === toolCallId);
+};
 
 const normalizeBlueprintTitle = (value: string) => value
   .toLocaleLowerCase("zh-CN")

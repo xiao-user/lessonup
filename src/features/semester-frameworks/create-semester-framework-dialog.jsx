@@ -111,7 +111,7 @@ export function CreateSemesterFrameworkDialog({ notebook, onClose, onCreate }) {
             <Field>
               <FieldLabel htmlFor="framework-textbook">教材</FieldLabel>
               <Select value={textbookId} onValueChange={setTextbookId} disabled={loading || !textbooks.length}>
-                <SelectTrigger id="framework-textbook" className="w-full">
+                <SelectTrigger id="framework-textbook">
                   <SelectValue placeholder={loading ? "正在匹配教材…" : "选择教材册次"}>
                     {(value) => formatTextbookOptionLabel(
                       textbooks.find((book) => book.id === value),
@@ -145,8 +145,17 @@ export function CreateSemesterFrameworkDialog({ notebook, onClose, onCreate }) {
               <Field>
                 <FieldLabel htmlFor="framework-duration">每课时分钟</FieldLabel>
                 <Select value={String(lessonDurationMinutes)} onValueChange={(value) => setLessonDurationMinutes(Number(value))}>
-                  <SelectTrigger id="framework-duration" className="w-full"><SelectValue /></SelectTrigger>
-                  <SelectContent><SelectGroup><SelectItem value="40">40 分钟</SelectItem><SelectItem value="45">45 分钟</SelectItem></SelectGroup></SelectContent>
+                  <SelectTrigger id="framework-duration">
+                    <SelectValue>
+                      {(value) => (value ? `${value} 分钟` : "选择课时分钟")}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value="40">40 分钟</SelectItem>
+                      <SelectItem value="45">45 分钟</SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
                 </Select>
               </Field>
             </FieldGroup>

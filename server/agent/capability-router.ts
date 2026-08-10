@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { parseContinuityWritebackFeedbackId } from "../curriculum/continuity-adoption.js";
 import type { CapabilityPlan, LessonPlan } from "../domain.js";
 
 export const capabilityPlanSchema = z.object({
@@ -24,6 +25,7 @@ export const capabilityPlanSchema = z.object({
   fullRewriteRequested: z.boolean().default(false),
   classroomActionRequired: z.boolean().default(false),
   continuityRequested: z.boolean().default(false),
+  continuityWritebackFeedbackId: z.string().uuid().optional(),
   lightweightConversation: z.boolean().default(false),
   curriculumRequested: z.boolean().default(false),
   requiredEvidenceKinds: z.array(z.enum([
@@ -70,14 +72,17 @@ export const deterministicCapabilityPlan = (
 ): CapabilityPlan => {
   const fullRewriteRequested = fullRewritePattern.test(message);
   const designBasisDenied = designBasisDeniedPattern.test(message);
-  const lightweightConversation = isConversationalControlMessage(message);
+  const writebackFeedbackId = parseContinuityWritebackFeedbackId(message);
+  const lightweightConversation = !writebackFeedbackId && isConversationalControlMessage(message);
   const plan: CapabilityPlan = {
     skillIds: [],
     toolGroups: ["document-read", "document-write"],
     mcpServers: [],
     specialistAgents: [],
     evidenceRequired: false,
-    writeMode: lightweightConversation ? "consultative" : documentWriteMode(message),
+    writeMode: writebackFeedbackId
+      ? "explicit"
+      : lightweightConversation ? "consultative" : documentWriteMode(message),
     designBasisRequested: !designBasisDenied && (
       /设计依据|上游备课上下文/.test(message)
       || (fullRewriteRequested && options.hasUpstreamPlanningContext === true)
@@ -85,11 +90,14 @@ export const deterministicCapabilityPlan = (
     designBasisWriteRequested: !designBasisDenied && designBasisWritePattern.test(message),
     minimalWriteRequested: !fullRewriteRequested && minimalWritePattern.test(message),
     fullRewriteRequested,
-    classroomActionRequired: classroomActionPattern.test(message),
-    continuityRequested: /复习|铺垫|连续性|前后衔接/.test(message)
+    classroomActionRequired: Boolean(writebackFeedbackId) || classroomActionPattern.test(message),
+    continuityRequested: Boolean(writebackFeedbackId)
+      || /复习|铺垫|连续性|前后衔接|课堂反馈|衔接效果|练习缺口|错因/.test(message)
       || semesterPlanningContinuityPattern.test(message),
+    continuityWritebackFeedbackId: writebackFeedbackId ?? undefined,
     lightweightConversation,
-    curriculumRequested: /教材|章节|目录|知识点|学习要点|课时蓝图|复习|铺垫|连续性|前后衔接/.test(message),
+    curriculumRequested: Boolean(writebackFeedbackId)
+      || /教材|章节|目录|知识点|学习要点|课时蓝图|复习|铺垫|连续性|前后衔接|课堂反馈|衔接效果/.test(message),
   };
   if (lightweightConversation) {
     return capabilityPlanSchema.parse({

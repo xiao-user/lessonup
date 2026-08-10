@@ -5,6 +5,7 @@ import {
   rebaseDocumentPatch,
 } from "../document-patch.js";
 import { assertDesignBasisProjectionCurrent } from "../design-basis-projection.js";
+import { defaultClassFeedbackWritebackStatus } from "../curriculum/continuity-adoption.js";
 import type {
   AgentApprovalRecord,
   AgentBranchRecord,
@@ -21,13 +22,16 @@ import type {
   CurriculumTextbookRecord,
   CreateSemesterFrameworkInput,
   CreateLessonBlueprintInput,
+  CreateLessonClassFeedbackInput,
   DeleteLessonBlueprintInput,
   FrameworkContinuityCandidateRecord,
   KnowledgeResult,
+  LessonClassFeedbackRecord,
   LessonDesignBasisAggregate,
   LessonDesignBasisPatch,
   LessonFileRecord,
   NotebookRecord,
+  SetFrameworkContinuityDecisionInput,
   SourceRef,
   NormalizedAgentEvent,
   SemesterFrameworkAggregate,
@@ -61,6 +65,10 @@ import {
 import type { CreateThreadInput, ImportedNotebook, LessonRepository } from "../repository.js";
 import { createLessonPlanPreview } from "../../src/lib/lesson-preview.js";
 import { applySemesterFrameworkPatch } from "../semester-framework-patch.js";
+import {
+  applyContinuityDecisions,
+  continuityFingerprintFromCandidateId,
+} from "../curriculum/continuity-adoption.js";
 import {
   deriveFrameworkContinuity,
   type ReviewedProgressionRelation,
@@ -114,6 +122,11 @@ export class MemoryLessonRepository implements LessonRepository {
     string,
     Map<string, FrameworkContinuityCandidateRecord>
   >();
+  private frameworkContinuityDecisions = new Map<
+    string,
+    Map<string, FrameworkContinuityCandidateRecord["decision"]>
+  >();
+  private lessonClassFeedback: LessonClassFeedbackRecord[] = [];
   private semesterFrameworkCreateRequests = new Map<string, {
     signature: string;
     frameworkId: string;
@@ -968,17 +981,23 @@ export class MemoryLessonRepository implements LessonRepository {
   }
 
   async recoverExpiredRuns(ownerId: string, threadId?: string) {
+    const staleBefore = Date.now() - 2 * 60_000;
     let recovered = 0;
     for (const run of [...this.runs.values()]) {
       if (
         run.ownerId !== ownerId
         || (threadId && run.threadId !== threadId)
         || (run.status !== "queued" && run.status !== "running")
-        || !run.leaseExpiresAt
-        || new Date(run.leaseExpiresAt).getTime() > Date.now()
       ) {
         continue;
       }
+      const leaseExpired = Boolean(
+        run.leaseExpiresAt && new Date(run.leaseExpiresAt).getTime() <= Date.now(),
+      );
+      const leaseLessZombie = !run.leaseExpiresAt && new Date(
+        run.heartbeatAt ?? run.startedAt ?? 0,
+      ).getTime() <= staleBefore;
+      if (!leaseExpired && !leaseLessZombie) continue;
       const cancelled = Boolean(run.cancelRequestedAt);
       await this.updateRun(ownerId, run.id, {
         status: cancelled ? "cancelled" : "failed",
@@ -1654,13 +1673,17 @@ export class MemoryLessonRepository implements LessonRepository {
   async getSemesterFrameworkContinuity(ownerId: string, frameworkId: string) {
     const aggregate = await this.getSemesterFramework(ownerId, frameworkId);
     if (!aggregate) throw new Error("semester_framework_not_found");
-    const candidates = [...(this.frameworkContinuity.get(key(ownerId, frameworkId))?.values() ?? [])]
-      .filter((candidate) => candidate.active)
-      .sort((left, right) => (
-        left.targetUnitId.localeCompare(right.targetUnitId)
-        || left.direction.localeCompare(right.direction)
-        || right.confidence - left.confidence
-      ));
+    const decisions = this.frameworkContinuityDecisions.get(key(ownerId, frameworkId)) ?? new Map();
+    const candidates = applyContinuityDecisions(
+      [...(this.frameworkContinuity.get(key(ownerId, frameworkId))?.values() ?? [])]
+        .filter((candidate) => candidate.active)
+        .sort((left, right) => (
+          left.targetUnitId.localeCompare(right.targetUnitId)
+          || left.direction.localeCompare(right.direction)
+          || right.confidence - left.confidence
+        )),
+      decisions,
+    );
     return structuredClone({
       status: aggregate.framework.semanticReleaseId
         ? "available" as const
@@ -1728,17 +1751,23 @@ export class MemoryLessonRepository implements LessonRepository {
     const drafts = deriveFrameworkContinuity({ occurrences, relations });
     const storageKey = key(ownerId, frameworkId);
     const existing = this.frameworkContinuity.get(storageKey) ?? new Map();
+    const decisions = this.frameworkContinuityDecisions.get(storageKey) ?? new Map();
     for (const record of existing.values()) record.active = false;
     const timestamp = now();
     for (const draft of drafts) {
       const prior = existing.get(draft.fingerprint);
-      const { fingerprint, ...candidate } = draft;
-      existing.set(fingerprint, {
-        id: prior?.id ?? crypto.randomUUID(),
+      existing.set(draft.fingerprint, {
+        id: prior?.id ?? (
+          draft.evidenceKind === "lexical_similarity"
+            ? `lexical-${draft.fingerprint}`
+            : crypto.randomUUID()
+        ),
         frameworkId,
         derivedFromFrameworkVersion: aggregate.framework.version,
-        ...candidate,
-        decision: prior?.decision ?? "candidate",
+        ...draft,
+        decision: decisions.get(draft.fingerprint)
+          ?? prior?.decision
+          ?? "candidate",
         active: true,
         createdAt: prior?.createdAt ?? timestamp,
         updatedAt: timestamp,
@@ -1746,6 +1775,92 @@ export class MemoryLessonRepository implements LessonRepository {
     }
     this.frameworkContinuity.set(storageKey, existing);
     return this.getSemesterFrameworkContinuity(ownerId, frameworkId);
+  }
+
+  async setSemesterFrameworkContinuityDecision(
+    ownerId: string,
+    frameworkId: string,
+    input: SetFrameworkContinuityDecisionInput,
+  ) {
+    const continuity = await this.getSemesterFrameworkContinuity(ownerId, frameworkId);
+    const fingerprint = input.fingerprint
+      ?? continuityFingerprintFromCandidateId(input.candidateId ?? "")
+      ?? continuity.candidates.find((candidate) => candidate.id === input.candidateId)?.fingerprint;
+    if (!fingerprint) throw new Error("continuity_candidate_not_found");
+    const storageKey = key(ownerId, frameworkId);
+    const decisions = this.frameworkContinuityDecisions.get(storageKey) ?? new Map();
+    decisions.set(fingerprint, input.decision);
+    this.frameworkContinuityDecisions.set(storageKey, decisions);
+    const stored = this.frameworkContinuity.get(storageKey)?.get(fingerprint);
+    if (stored) stored.decision = input.decision;
+    return this.getSemesterFrameworkContinuity(ownerId, frameworkId);
+  }
+
+  async createLessonClassFeedback(
+    ownerId: string,
+    input: CreateLessonClassFeedbackInput,
+  ) {
+    const file = await this.getLessonFile(ownerId, input.lessonFileId);
+    if (!file) throw new Error("lesson_file_not_found");
+    const timestamp = now();
+    const writebackStatus = input.writebackStatus
+      ?? defaultClassFeedbackWritebackStatus({
+        kind: input.kind,
+        continuityOutcome: input.continuityOutcome ?? null,
+      });
+    const record: LessonClassFeedbackRecord = {
+      id: crypto.randomUUID(),
+      notebookId: file.notebookId,
+      lessonFileId: file.id,
+      lessonBlueprintId: input.lessonBlueprintId ?? file.lessonBlueprintId ?? null,
+      semesterFrameworkId: input.semesterFrameworkId ?? null,
+      kind: input.kind,
+      statement: input.statement.trim(),
+      relatedEntityId: input.relatedEntityId ?? null,
+      continuityFingerprint: input.continuityFingerprint ?? null,
+      continuityDirection: input.continuityDirection ?? null,
+      continuityOutcome: input.continuityOutcome ?? null,
+      writebackStatus,
+      evidence: input.evidence ?? {},
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    this.lessonClassFeedback.unshift(record);
+    return structuredClone(record);
+  }
+
+  async markLessonClassFeedbackWriteback(
+    ownerId: string,
+    feedbackId: string,
+    status: "pending" | "applied" | "not_applicable",
+  ) {
+    void ownerId;
+    const index = this.lessonClassFeedback.findIndex((item) => item.id === feedbackId);
+    if (index < 0) throw new Error("lesson_class_feedback_not_found");
+    const current = this.lessonClassFeedback[index]!;
+    const updated = {
+      ...current,
+      writebackStatus: status,
+      updatedAt: now(),
+    };
+    this.lessonClassFeedback[index] = updated;
+    return structuredClone(updated);
+  }
+
+  async listLessonClassFeedback(
+    ownerId: string,
+    filter: {
+      lessonFileId?: string;
+      lessonBlueprintId?: string;
+      semesterFrameworkId?: string;
+    },
+  ) {
+    void ownerId;
+    return structuredClone(this.lessonClassFeedback.filter((item) => (
+      (!filter.lessonFileId || item.lessonFileId === filter.lessonFileId)
+      && (!filter.lessonBlueprintId || item.lessonBlueprintId === filter.lessonBlueprintId)
+      && (!filter.semesterFrameworkId || item.semesterFrameworkId === filter.semesterFrameworkId)
+    )));
   }
 
   async getCurrentCurriculumCatalogRelease() {

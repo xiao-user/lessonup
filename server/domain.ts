@@ -113,13 +113,14 @@ const documentPatchToolOperationSchema = z.object({
   // the current full-field snapshot so ordinary rewrites do not depend on the
   // model reproducing a unique substring. Keep expectedText only for a genuine
   // local edit inside a field.
+  //
+  // Identity ops (expectedText === replacement, or a whole-field rewrite that
+  // matches the current snapshot) are accepted here. materializeDocumentPatch
+  // strips them so a full rewrite that re-echoes stable unit/period/topic does
+  // not reject the useful instructional fields in the same proposal.
   expectedText: z.string().nullable().optional(),
   replacement: z.string(),
-}).refine(
-  (operation) => operation.expectedText === undefined
-    || operation.expectedText !== operation.replacement,
-  { message: "no_effect_patch" },
-);
+});
 
 export const documentPatchToolSchema = z.object({
   summary: z.string().min(1).max(500),
@@ -736,7 +737,9 @@ export type AgentActivityRecord = {
   name: string;
   label: string;
   groupKey?: string;
-  state: "running" | "completed" | "failed";
+  state: "running" | "completed" | "unchanged" | "needs_revision" | "failed";
+  outcome?: "completed" | "no_change" | "needs_revision" | "failed";
+  revisionCode?: string;
 };
 
 export type AgentRunRecord = {
@@ -802,6 +805,7 @@ export type CapabilityPlan = {
   fullRewriteRequested?: boolean;
   classroomActionRequired?: boolean;
   continuityRequested?: boolean;
+  continuityWritebackFeedbackId?: string;
   lightweightConversation?: boolean;
   curriculumRequested?: boolean;
   requiredEvidenceKinds?: AgentRunEvidenceKind[];
@@ -1075,10 +1079,56 @@ export type FrameworkContinuityCandidateRecord = {
   confidence: number;
   rationale: string;
   evidence: Record<string, unknown>;
+  fingerprint: string;
   decision: "candidate" | "accepted" | "dismissed";
   active: boolean;
   createdAt: string;
   updatedAt: string;
+};
+
+export type SetFrameworkContinuityDecisionInput = {
+  fingerprint?: string;
+  candidateId?: string;
+  decision: "accepted" | "dismissed" | "candidate";
+  note?: string;
+};
+
+export type LessonClassFeedbackKind =
+  | "observation"
+  | "practice_gap"
+  | "error_cause"
+  | "continuity_outcome";
+
+export type LessonClassFeedbackRecord = {
+  id: string;
+  notebookId: string;
+  lessonFileId: string;
+  lessonBlueprintId: string | null;
+  semesterFrameworkId: string | null;
+  kind: LessonClassFeedbackKind;
+  statement: string;
+  relatedEntityId: string | null;
+  continuityFingerprint: string | null;
+  continuityDirection: "review" | "prepare" | null;
+  continuityOutcome: "worked" | "weak" | "skipped" | null;
+  writebackStatus: "pending" | "applied" | "not_applicable" | null;
+  evidence: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateLessonClassFeedbackInput = {
+  lessonFileId: string;
+  kind: LessonClassFeedbackKind;
+  statement: string;
+  lessonBlueprintId?: string | null;
+  semesterFrameworkId?: string | null;
+  relatedEntityId?: string | null;
+  continuityFingerprint?: string | null;
+  continuityDirection?: "review" | "prepare" | null;
+  continuityOutcome?: "worked" | "weak" | "skipped" | null;
+  writebackStatus?: "pending" | "applied" | "not_applicable" | null;
+  evidence?: Record<string, unknown>;
 };
 
 export type FrameworkContinuityResult = {
@@ -1253,7 +1303,18 @@ export type NormalizedAgentEvent =
   | { type: "resource.updated"; runId: string; resourceType: "semester_framework"; framework: SemesterFrameworkAggregate }
   | { type: "message.delta"; runId: string; delta: string }
   | { type: "tool.started"; runId: string; toolCallId: string; name: string; label: string; groupKey?: string }
-  | { type: "tool.completed"; runId: string; toolCallId: string; name: string; ok: boolean; label: string; groupKey?: string; revisionCode?: string }
+  | {
+    type: "tool.completed";
+    runId: string;
+    toolCallId: string;
+    name: string;
+    ok: boolean;
+    label: string;
+    groupKey?: string;
+    revisionCode?: string;
+    /** Teacher-facing outcome; distinct from model-recoverable ok=false. */
+    outcome?: "completed" | "no_change" | "needs_revision" | "failed";
+  }
   | { type: "source.added"; runId: string; source: SourceRef }
   | { type: "approval.required"; runId: string; approvalId: string; assistantMessageId?: string; patch: ResourcePatch }
   | { type: "approval.decided"; runId: string; approvalId: string; decision: "approved" | "rejected" }

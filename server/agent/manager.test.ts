@@ -6,10 +6,11 @@ import { describe, expect, it } from "vitest";
 import { agentsSdkVersion, managerModelSettings } from "./manager.js";
 
 describe("LessonPreparationManager model settings", () => {
-  it("keeps tool orchestration on Pro without long provider-native thinking", () => {
+  it("keeps tool orchestration on Flash with low reasoning effort", () => {
     expect(managerModelSettings).toEqual({
       temperature: 0.3,
-      providerData: { thinking: { type: "disabled" } },
+      reasoning: { effort: "low" },
+      store: false,
     });
   });
 

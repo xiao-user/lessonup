@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import gsap from "gsap";
 import { toast } from "sonner";
 
@@ -45,24 +45,24 @@ const CreateSemesterFrameworkDialog = lazy(async () => {
 const notebookTones = ["teal", "sage", "amber", "coral"];
 const blueprintGenerationPrompt = (blueprint, unitTitle, periodContext, lessonDurationMinutes) => [
   `请基于当前课时蓝图完整编写“${blueprint.title}”教案。`,
-  "先读取当前整份教案、教学情境、上游备课上下文（如有）和已发布章节知识点，再一次性提交可确认的完整教案修改。",
+  "先读取当前整份教案、教学情境、上游备课上下文（含同单元前序课堂反馈，如有）和已发布章节知识点，再一次性提交可确认的完整教案修改。",
   `本课属于“${unitTitle}”，是该章节第 ${periodContext.periodNo} / ${periodContext.periodCount} 课时，每课时 ${lessonDurationMinutes} 分钟。只完成当前课时目标，不要把整篇课文的全部内容压进一节课。`,
   periodContext.periodNo > 1
-    ? `必须承接第 ${periodContext.periodNo - 1} 课时已经形成的学生产出，避免重新从整篇课文起点讲起。`
+    ? `必须承接第 ${periodContext.periodNo - 1} 课时已经形成的学生产出；若上游上下文中有前序课堂反馈（观察、练习缺口、错因或衔接偏弱），必须落实到本课复习任务、过程支架或评价证据，避免重新从整篇课文起点讲起。`
     : null,
   periodContext.periodNo < periodContext.periodCount
     ? `必须为第 ${periodContext.periodNo + 1} 课时保留明确的认知或学习产出起点，不要提前讲完后续内容。`
     : null,
   "必须继承单元目标、当前课时蓝图中的主要活动、学生可观察产出和达成证据。",
-  "把本课真正处理的知识写入“重点知识”，并判断上游规划中的复习旧知或后续铺垫是否适用；采用时必须落实到具体教学活动、学生任务或评价证据，不要只写标签。",
+  "把本课真正处理的知识写入“重点知识”，并判断上游规划中的复习旧知或后续铺垫是否适用；采用时必须落实到具体教学活动、学生任务或评价证据，不要只写标签。没有前序课堂反馈时不要编造学情。",
   "内容要可直接上课、语言精简、各栏目互相对应；禁止使用可替换到任何课题的通用表述。",
 ].filter(Boolean).join("\n");
 
 const directLessonGenerationPrompt = (title) => [
   `请基于当前已绑定的科目、教材、单元、章节、课时长度和班级信息，完整编写“${title}”教案。`,
-  "先读取当前整份教案、教学情境、上游备课上下文（如有）和已发布章节知识点，再一次性提交可确认的完整教案修改。",
-  "把本课真正处理的知识写入“重点知识”；如果上游学期框架存在对应课时蓝图或复习/铺垫信息，必须继承并落实到具体教学活动、学生任务或评价证据。",
-  "信息不足时基于现有可靠信息完成可用版本，并明确保留需要教师补充的真实学情条件；不要填入通用占位文案。",
+  "先读取当前整份教案、教学情境、上游备课上下文（含同单元前序课堂反馈，如有）和已发布章节知识点，再一次性提交可确认的完整教案修改。",
+  "把本课真正处理的知识写入“重点知识”；如果上游学期框架存在对应课时蓝图、复习/铺垫或前序课堂反馈，必须继承并落实到具体教学活动、学生任务或评价证据。",
+  "信息不足时基于现有可靠信息完成可用版本，并明确保留需要教师补充的真实学情条件；不要填入通用占位文案，也不要编造课堂反馈。",
 ].join("\n");
 const formatUpdatedAt = (updatedAt) => new Intl.DateTimeFormat("zh-CN", {
   month: "2-digit",
@@ -171,6 +171,7 @@ export function App() {
   const [activeFramework, setActiveFramework] = useState(null);
   const [frameworkDialogNotebookId, setFrameworkDialogNotebookId] = useState(null);
   const [pendingLessonGeneration, setPendingLessonGeneration] = useState(null);
+  const collectionRef = useRef(null);
 
   const activeNotebook = notebooks.find((notebook) => notebook.id === activeFile?.notebookId);
   const activeFileData = activeNotebook?.files.find((file) => file.id === activeFile?.fileId);
@@ -362,7 +363,10 @@ export function App() {
     )));
   };
 
-  const openLessonFile = async (nextActiveFile, { historyMode = "push" } = {}) => {
+  const openLessonFile = async (
+    nextActiveFile,
+    { historyMode = "push", dismissFramework = false } = {},
+  ) => {
     const sourceElement = nextActiveFile.sourceElement;
     if (sourceElement?.dataset.detailTransition === "pending") return false;
     if (sourceElement) {
@@ -380,12 +384,18 @@ export function App() {
         nextActiveFile.fileId,
         remoteFile,
       ));
+      // Fade paper copy in parallel with the A4 morph — do not wait for the
+      // fade to finish before mounting the workspace.
       if (sourceElement?.isConnected) {
-        await animatePageCopy(sourceElement, 0);
+        void animatePageCopy(sourceElement, 0);
       }
+      // Keep the notebook open across framework → lesson. Clear the framework in
+      // the same state batch as mounting the lesson so the collection never
+      // flashes underneath as a closed/resting shelf.
       setSelectedId(nextActiveFile.notebookId);
       setRouteCloseRequest(0);
       setActiveFile(nextActiveFile);
+      if (dismissFramework) setActiveFramework(null);
       if (historyMode) {
         window.history[`${historyMode}State`]({}, "", lessonFileRoute(nextActiveFile.fileId));
       }
@@ -439,15 +449,23 @@ export function App() {
 
   const closeLessonFile = ({ historyMode = "push" } = {}) => {
     const sourceElement = activeFile?.sourceElement;
+    const fileId = activeFile?.fileId;
+    // Leave selectedId alone so exit returns to the already-open notebook,
+    // not the resting closed-shelf carousel.
     setActiveFile(null);
     if (historyMode && !routeCloseRequest) window.history[`${historyMode}State`]({}, "", "/");
     setRouteCloseRequest(0);
     window.requestAnimationFrame(() => {
-      if (!sourceElement?.isConnected) return;
-      delete sourceElement.dataset.detailTransition;
-      sourceElement.removeAttribute("aria-busy");
-      restorePageCopy(sourceElement);
-      sourceElement.focus({ preventScroll: true });
+      const paper = sourceElement?.isConnected
+        ? sourceElement
+        : fileId
+          ? document.querySelector(`.book-volume-file[data-file-id="${CSS.escape(fileId)}"]`)
+          : null;
+      if (!paper?.isConnected) return;
+      delete paper.dataset.detailTransition;
+      paper.removeAttribute("aria-busy");
+      restorePageCopy(paper);
+      paper.focus({ preventScroll: true });
     });
   };
 
@@ -457,6 +475,8 @@ export function App() {
       const routedFrameworkId = getSemesterFrameworkRouteId();
       if (routedFrameworkId) {
         if (activeFramework?.id === routedFrameworkId) return;
+        // Keep the open notebook; only swap the overlay back to the framework.
+        setActiveFile(null);
         agentApi.getSemesterFramework(routedFrameworkId).then((framework) => {
           void openSemesterFramework(
             framework.framework.notebookId,
@@ -475,6 +495,7 @@ export function App() {
           setRouteCloseRequest((request) => request + 1);
           return;
         }
+        // Only collapse to the resting shelf when nothing keeps the notebook open.
         setSelectedId(null);
         return;
       }
@@ -483,6 +504,7 @@ export function App() {
         notebook.files.some((file) => file.id === routedFileId)
       ));
       if (!routedNotebook) return;
+      setActiveFramework(null);
       openLessonFile({
         notebookId: routedNotebook.id,
         fileId: routedFileId,
@@ -528,6 +550,19 @@ export function App() {
   }) => {
     const notebook = notebooks.find((candidate) => candidate.id === framework.notebookId);
     if (!notebook) throw new Error("notebook_not_found");
+    // Framework already sits on an open notebook. Keep that open-book stage and
+    // only swap the overlay: framework stays up until the lesson workspace is
+    // ready, then both state updates land in one render.
+    const openFromFramework = (fileId) => openLessonFile({
+      notebookId: notebook.id,
+      fileId,
+      sourceElement: null,
+      originRect: null,
+    }, {
+      historyMode: "replace",
+      dismissFramework: true,
+    });
+
     const existingFile = notebook.files.find((file) => (
       file.lessonBlueprintId === blueprint.id
     ));
@@ -545,13 +580,7 @@ export function App() {
         });
         toast.success(`助手将按最新蓝图重新生成“${blueprint.title}”`);
       }
-      setActiveFramework(null);
-      await openLessonFile({
-        notebookId: notebook.id,
-        fileId: existingFile.id,
-        sourceElement: null,
-        originRect: null,
-      });
+      await openFromFramework(existingFile.id);
       return;
     }
     const image = coverAssets[notebook.files.length % coverAssets.length];
@@ -611,14 +640,8 @@ export function App() {
         blueprint.plannedMinutes ?? framework.lessonDurationMinutes,
       ),
     });
-    setActiveFramework(null);
-    toast.success(`已建立“${blueprint.title}”，助手正在生成教案`);
-    await openLessonFile({
-      notebookId: notebook.id,
-      fileId: file.id,
-      sourceElement: null,
-      originRect: null,
-    });
+    const opened = await openFromFramework(file.id);
+    if (opened) toast.success(`已建立“${blueprint.title}”，助手正在生成教案`);
   };
 
   const deleteBlueprintLesson = ({ blueprint, framework }) => {
@@ -662,6 +685,7 @@ export function App() {
     if (!deleteTarget || deletingFile) return;
     setDeletingFile(true);
     try {
+      await collectionRef.current?.prepareRemoveFile?.(deleteTarget.notebookId, deleteTarget.id);
       await agentApi.deleteLessonFile(deleteTarget.id);
       setNotebooks((current) => current.map((notebook) => (
         notebook.id === deleteTarget.notebookId
@@ -704,6 +728,7 @@ export function App() {
   return (
     <main id="top">
       <NotebookCollection
+        ref={collectionRef}
         notebooks={notebooks}
         loading={loading}
         selectedId={selectedId}

@@ -555,7 +555,7 @@ export function LessonAgentPanel({
                   }
                 }}
               >
-                <SelectTrigger id="lesson-textbook" className="w-full">
+                <SelectTrigger id="lesson-textbook">
                   <SelectValue placeholder={loadingContextCatalog ? "加载教材…" : "选择教材"}>
                     {(value) => {
                       if (value === CONTEXT_NONE) return "暂不指定";
@@ -602,7 +602,7 @@ export function LessonAgentPanel({
                   }
                 }}
               >
-                <SelectTrigger id="lesson-unit" className="w-full">
+                <SelectTrigger id="lesson-unit">
                   <SelectValue placeholder={
                       selectedContextTextbookId === CONTEXT_NONE ? "先选择教材" : "可选单元"
                     }
@@ -637,7 +637,7 @@ export function LessonAgentPanel({
                   }));
                 }}
               >
-                <SelectTrigger id="lesson-curriculum-node" className="w-full">
+                <SelectTrigger id="lesson-curriculum-node">
                   <SelectValue placeholder={
                       selectedContextUnitId === CONTEXT_NONE
                         ? "先选择单元"

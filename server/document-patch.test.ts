@@ -92,6 +92,40 @@ describe("document patch", () => {
     expect(patch.operations[0]).toMatchObject({ field: "process" });
   });
 
+  it("accepts echoed unchanged metadata with matching expectedText in a full rewrite", () => {
+    const patch = materializeDocumentPatchProposal({
+      proposal: documentPatchToolSchema.parse({
+        summary: "完整编写教案",
+        operations: [
+          { field: "unit", expectedText: plan.unit, replacement: plan.unit },
+          { field: "period", expectedText: plan.period, replacement: plan.period },
+          { field: "topic", expectedText: plan.topic, replacement: plan.topic },
+          {
+            field: "objectives",
+            expectedText: "",
+            replacement: "学生能说出轴对称图形的判断依据。",
+          },
+          {
+            field: "process",
+            expectedText: null,
+            replacement: "学生比较两组图形并说明判定依据。",
+          },
+        ],
+      }),
+      fileId: "m1",
+      documentVersion: 7,
+      plan: {
+        ...plan,
+        objectives: "",
+      },
+    });
+
+    expect(patch.operations.map((operation) => operation.field)).toEqual([
+      "objectives",
+      "process",
+    ]);
+  });
+
   it("rejects semantic proposals whose source text is not unique", () => {
     expect(() => materializeDocumentPatchProposal({
       proposal: {

@@ -29,8 +29,7 @@ const EASE = {
 };
 
 const OPEN_DURATION = 0.9;
-const OPEN_TITLE_DELAY = 0.28;
-const OPEN_TITLE_DURATION = OPEN_DURATION - OPEN_TITLE_DELAY;
+const OPEN_FIRST_PAGE_DELAY = 0.28;
 const CLOSE_DURATION = 1.02;
 const BASE_ROTATIONS = [-3, -2.8, 3.1, -7.5, 2, -4];
 const POINTER_DRAG_THRESHOLD = 3;
@@ -114,28 +113,30 @@ function applyOpenBookPose(book, root) {
   const height = root?.clientHeight ?? 0;
   const outer = height * 0.0055;
   const inner = height * 0.0045;
-  const openScale = Number.parseFloat(getComputedStyle(book).getPropertyValue("--book-open-scale")) || 1.32;
-  const cover = book.querySelector(".book-volume-cover");
-  const titleLeaf = book.querySelector('.book-volume-leaf[data-page-kind="title"]');
-  const unit = book.querySelector(".book-volume-unit");
+  const openScale = Number.parseFloat(getComputedStyle(book).getPropertyValue("--book-open-scale")) || 1;
   const pages = book.querySelector(".book-volume-pages");
-  const page = book.querySelector(".book-volume-leaf.is-current, .book-volume-empty-page");
+  const page = book.querySelector(".book-volume-leaf.is-current");
   const coverBack = book.querySelector(".book-volume-cover-back");
+  const leaves = gsap.utils.toArray(".book-volume-leaf", book);
 
   gsap.set(book, {
     zIndex: 40,
     "--book-scale": openScale,
     "--book-rotation": "0deg",
-    "--book-shadow-alpha": 0,
+    "--cover-angle": "-180deg",
+    "--book-spread-x": "50%",
   });
-  gsap.set(cover, { "--cover-angle": "-180deg" });
-  if (titleLeaf && book.querySelector('.book-volume-leaf[data-page-kind="file"]')) {
-    gsap.set(titleLeaf, { "--leaf-angle": "-180deg" });
-  }
-  gsap.set(unit, { xPercent: 50 });
+  // Match leaf angles to is-turned / is-current classes (CSS owns resting state).
+  gsap.set(leaves, { clearProps: "--leaf-angle" });
   gsap.set(pages, { borderRadius: `0px ${outer}px ${outer}px 0px` });
   gsap.set(page, { borderRadius: `0px ${inner}px ${inner}px 0px` });
   gsap.set(coverBack, { borderRadius: `${outer}px 0px 0px ${outer}px` });
+}
+
+function pageTurnDuration(fromAngle, toAngle, reduceMotion) {
+  if (reduceMotion) return 0;
+  const distance = Math.abs(toAngle - fromAngle);
+  return gsap.utils.clamp(0.2, 0.6, 0.18 + (distance / 180) * 0.42);
 }
 
 function placeCarousel({ position, bookRefs, nameRefs, metaRefs, scrollbarRef }) {
@@ -180,6 +181,7 @@ export const BookCarousel = forwardRef(function BookCarousel({
   notebooks,
   selectedId,
   activeFileId,
+  dismissible = true,
   onSelect,
   onActiveChange,
   onOpenFile,
@@ -199,6 +201,7 @@ export const BookCarousel = forwardRef(function BookCarousel({
   const motionRef = useRef(createCarouselMotion(0));
   const motionTickerRef = useRef(null);
   const selectedIdRef = useRef(selectedId);
+  const dismissibleRef = useRef(dismissible);
   const pageIndexesRef = useRef({});
   const pointerIdRef = useRef(null);
   const pointerStartYRef = useRef(null);
@@ -211,11 +214,17 @@ export const BookCarousel = forwardRef(function BookCarousel({
   const [pageIndexes, setPageIndexes] = useState({});
   const [pageAnimating, setPageAnimating] = useState(false);
   const [bookAnimating, setBookAnimating] = useState(false);
+  const [closingId, setClosingId] = useState(null);
   const activeNotebook = notebooks[activeIndex];
   const preparedNotebook = notebooks[preparedIndex];
+  const selectedFileSignature = selectedId
+    ? `${selectedId}:${notebooks.find((notebook) => notebook.id === selectedId)?.files.map((file) => file.id).join(",") ?? ""}`
+    : "";
+  const openNotebookId = selectedId ?? closingId;
 
   activeIndexRef.current = activeIndex;
   selectedIdRef.current = selectedId;
+  dismissibleRef.current = dismissible;
   pageIndexesRef.current = pageIndexes;
 
   const commitPageIndex = (notebookId, pageIndex, synchronous = false) => {
@@ -300,7 +309,7 @@ export const BookCarousel = forwardRef(function BookCarousel({
   });
 
   const goTo = contextSafe((nextIndex) => {
-    if (!notebooks.length || selectedIdRef.current || isAnimatingRef.current) return;
+    if (!notebooks.length || selectedIdRef.current || closingId || isAnimatingRef.current) return;
     const clamped = clampPosition(nextIndex);
     if (motionRef.current.settled && Math.abs(clamped - positionRef.current) < 0.001) return;
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -327,6 +336,8 @@ export const BookCarousel = forwardRef(function BookCarousel({
     const names = root.querySelectorAll(".book-carousel-index button");
     const scrollbar = root.querySelector(".book-carousel-scrollbar");
     if (!selectedId) {
+      // While a close timeline owns the book, leave chrome/pose to that timeline.
+      if (isAnimatingRef.current || closingId) return;
       gsap.set(bookRefs.current.filter(Boolean), { autoAlpha: 1 });
       gsap.set(meta, { x: 0, autoAlpha: 1 });
       gsap.set(names, { clearProps: "transform", "--name-x": "0px" });
@@ -334,7 +345,7 @@ export const BookCarousel = forwardRef(function BookCarousel({
       placeCarousel({ position: positionRef.current, bookRefs, nameRefs, metaRefs, scrollbarRef });
       return;
     }
-    if (isAnimatingRef.current) return;
+    if (isAnimatingRef.current || pageAnimatingRef.current) return;
     const selectedIndex = notebooks.findIndex((notebook) => notebook.id === selectedId);
     if (selectedIndex < 0) return;
     activeIndexRef.current = selectedIndex;
@@ -342,7 +353,8 @@ export const BookCarousel = forwardRef(function BookCarousel({
     setActiveIndex(selectedIndex);
     const fileIndex = notebooks[selectedIndex].files.findIndex((file) => file.id === activeFileId);
     if (fileIndex >= 0) {
-      commitPageIndex(selectedId, fileIndex);
+      // Leaf 0 is the title page; lesson files start at leaf 1.
+      commitPageIndex(selectedId, fileIndex + 1);
     }
     gsap.set(bookRefs.current.filter(Boolean), {
       autoAlpha: (index) => index === selectedIndex ? 1 : 0,
@@ -353,7 +365,7 @@ export const BookCarousel = forwardRef(function BookCarousel({
     gsap.set(names, { clearProps: "transform", "--name-x": "64px", autoAlpha: 0 });
     gsap.set(scrollbar, { x: 10, autoAlpha: 0 });
     setMotionState("idle");
-  }, { scope: rootRef, dependencies: [selectedId, activeFileId] });
+  }, { scope: rootRef, dependencies: [selectedId, activeFileId, selectedFileSignature, closingId] });
 
   useEffect(() => {
     onActiveChange?.(activeNotebook?.id ?? null);
@@ -364,7 +376,8 @@ export const BookCarousel = forwardRef(function BookCarousel({
     let changed = false;
     for (const notebook of notebooks) {
       const currentIndex = pageIndexesRef.current[notebook.id] ?? 0;
-      const nextIndex = Math.min(currentIndex, Math.max(0, notebook.files.length - 1));
+      // Leaf indices: 0 = title … files.length = last lesson file.
+      const nextIndex = Math.min(currentIndex, notebook.files.length);
       nextIndexes[notebook.id] = nextIndex;
       if (nextIndex !== currentIndex) changed = true;
     }
@@ -552,6 +565,60 @@ export const BookCarousel = forwardRef(function BookCarousel({
       }, position);
   };
 
+  const changePage = contextSafe((notebookId, nextIndex, options = {}) => {
+    const { bypassBookLock = false } = options;
+    const notebook = notebooks.find((item) => item.id === notebookId);
+    const currentIndex = pageIndexesRef.current[notebookId] ?? 0;
+    const maxLeaf = notebook?.files.length ?? 0;
+    if (
+      !notebook
+      || (isAnimatingRef.current && !bypassBookLock)
+      || nextIndex === currentIndex
+      || nextIndex < 0
+      || nextIndex > maxLeaf
+    ) {
+      return Promise.resolve(false);
+    }
+    const book = bookRefs.current[notebooks.findIndex((item) => item.id === notebookId)];
+    // Turning forward flips the current leaf left; turning back unflips the target leaf.
+    const movingIndex = nextIndex > currentIndex ? currentIndex : nextIndex;
+    const leaf = book?.querySelector(`.book-volume-leaf[data-page-index="${movingIndex}"]`);
+    if (!leaf) return Promise.resolve(false);
+
+    const currentRotation = readPageAngle(leaf);
+    const nextPageIndexes = { ...pageIndexesRef.current, [notebookId]: nextIndex };
+    pageIndexesRef.current = nextPageIndexes;
+    flushSync(() => {
+      setPageAnimating(true);
+      setPageIndexes(nextPageIndexes);
+    });
+    pageAnimatingRef.current = true;
+    pageTimelinesRef.current.get(leaf)?.kill();
+    gsap.set(leaf, {
+      "--leaf-angle": `${currentRotation}deg`,
+    });
+    const targetRotation = nextIndex > currentIndex ? -180 : 0;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const duration = pageTurnDuration(currentRotation, targetRotation, reduceMotion);
+    return new Promise((resolve) => {
+      const timeline = gsap.timeline({
+        onComplete: () => {
+          if (pageTimelinesRef.current.get(leaf) !== timeline) {
+            resolve(false);
+            return;
+          }
+          pageTimelinesRef.current.delete(leaf);
+          gsap.set(leaf, { clearProps: "--leaf-angle" });
+          pageAnimatingRef.current = pageTimelinesRef.current.size > 0;
+          setPageAnimating(pageAnimatingRef.current);
+          resolve(true);
+        },
+      });
+      pageTimelinesRef.current.set(leaf, timeline);
+      addPageTurn(timeline, leaf, { rotationY: targetRotation, duration });
+    });
+  });
+
   const openNotebook = contextSafe((notebookId) => {
     const index = notebooks.findIndex((notebook) => notebook.id === notebookId);
     if (index < 0 || isAnimatingRef.current) return;
@@ -565,46 +632,35 @@ export const BookCarousel = forwardRef(function BookCarousel({
     stopPositionMotion(index);
     isAnimatingRef.current = true;
     setBookAnimating(true);
-    const cover = book.querySelector(".book-volume-cover");
-    const titleLeaf = book.querySelector('.book-volume-leaf[data-page-kind="title"]');
-    const unit = book.querySelector(".book-volume-unit");
     const pages = book.querySelector(".book-volume-pages");
-    const page = book.querySelector(".book-volume-leaf.is-current, .book-volume-empty-page");
+    const page = book.querySelector(".book-volume-leaf.is-current");
     const coverBack = book.querySelector(".book-volume-cover-back");
     const { outer, inner } = pageRadii();
-    const openScale = Number.parseFloat(getComputedStyle(book).getPropertyValue("--book-open-scale")) || 1.32;
-    const hasFiles = notebooks[index].files.length > 0;
+    const openScale = Number.parseFloat(getComputedStyle(book).getPropertyValue("--book-open-scale")) || 1;
+    const fileCount = notebooks[index].files.length;
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const openDuration = reduceMotion ? 0 : OPEN_DURATION;
-    const titleDelay = reduceMotion ? 0 : OPEN_TITLE_DELAY;
-    const titleDuration = reduceMotion ? 0 : OPEN_TITLE_DURATION;
+    const firstPageDelay = reduceMotion ? 0 : OPEN_FIRST_PAGE_DELAY;
     gsap.set(book, { zIndex: 40 });
-    if (hasFiles) gsap.set(titleLeaf, {
-      "--leaf-angle": "0deg",
-    });
+    commitPageIndex(notebookId, 0, true);
     const timeline = gsap.timeline({
       onComplete: () => {
         isAnimatingRef.current = false;
         setBookAnimating(false);
       },
     });
-    timeline
-      .addLabel("coverTurn", 0)
-      .addLabel("titleTurn", titleDelay);
     animateChrome(timeline, true, 0);
-    if (hasFiles) {
-      addPageTurn(timeline, titleLeaf, {
-        rotationY: -180,
-        duration: titleDuration,
-        position: "titleTurn",
-      });
+    // Same page-turn path as lesson leaves: land on title, then turn to first file.
+    if (fileCount > 0) {
+      timeline.call(() => {
+        void changePage(notebookId, 1, { bypassBookLock: true });
+      }, [], firstPageDelay);
     }
     timeline
       .call(() => onSelect(notebookId), [], 0.23)
-      .to(cover, { "--cover-angle": "-180deg", duration: openDuration, ease: EASE.swing }, "coverTurn")
-      .to(unit, { xPercent: 50, duration: openDuration * 0.88, ease: EASE.drift }, 0)
+      .to(book, { "--cover-angle": "-180deg", duration: openDuration, ease: EASE.swing }, 0)
+      .to(book, { "--book-spread-x": "50%", duration: openDuration * 0.88, ease: EASE.drift }, 0)
       .to(book, { "--book-scale": openScale, duration: openDuration * 0.86, ease: EASE.settle }, 0)
-      .to(book, { "--book-shadow-alpha": 0, duration: openDuration * 0.62, ease: EASE.fade }, 0)
       .to(book, { "--book-rotation": "0deg", duration: openDuration * 0.82, ease: EASE.tilt }, 0)
       .fromTo(pages, { borderRadius: outer }, {
         borderRadius: `0px ${outer}px ${outer}px 0px`, duration: openDuration * 0.78, ease: EASE.soft,
@@ -628,16 +684,18 @@ export const BookCarousel = forwardRef(function BookCarousel({
     }
     isAnimatingRef.current = true;
     setBookAnimating(true);
+    // Keep the open-book pose via closingId while clearing selectedId immediately so
+    // collection chrome (title, actions, page controls) syncs with the close motion.
+    setClosingId(selectedNotebookId);
+    onSelect(null);
     pageTimelinesRef.current.forEach((timeline) => timeline.kill());
     pageTimelinesRef.current.clear();
     pageAnimatingRef.current = false;
     setPageAnimating(false);
-    const cover = book.querySelector(".book-volume-cover");
-    const titleLeaf = book.querySelector('.book-volume-leaf[data-page-kind="title"]');
-    const unit = book.querySelector(".book-volume-unit");
     const pages = book.querySelector(".book-volume-pages");
-    const page = book.querySelector(".book-volume-leaf.is-current, .book-volume-empty-page");
+    const page = book.querySelector(".book-volume-leaf.is-current");
     const coverBack = book.querySelector(".book-volume-cover-back");
+    const controls = book.querySelector(".book-volume-controls");
     const slot = carouselBookPose(index - activeIndexRef.current);
     const restingRotation = baseRotation(index) + slot.rotationOffset;
     const { outer, inner } = pageRadii();
@@ -649,113 +707,108 @@ export const BookCarousel = forwardRef(function BookCarousel({
         rotation: readPageAngle(leaf),
       }))
       .filter(({ rotation }) => rotation < -0.5)
-      .filter(({ leaf }) => leaf !== titleLeaf)
       .sort((left, right) => right.index - left.index);
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     const timeline = gsap.timeline({
       onComplete: () => {
         gsap.set(leaves, { "--leaf-angle": "0deg" });
-        gsap.set(cover, { "--cover-angle": "0deg" });
         commitPageIndex(selectedNotebookId, 0, true);
         gsap.set([pages, page, coverBack], { clearProps: "borderRadius" });
-        gsap.set(unit, { clearProps: "transform" });
-        gsap.set(book, { zIndex: slot.zIndex, clearProps: "--book-shadow-alpha" });
+        gsap.set(book, {
+          zIndex: slot.zIndex,
+          "--cover-angle": "0deg",
+          "--book-spread-x": "0%",
+        });
+        if (controls) gsap.set(controls, { clearProps: "opacity,visibility" });
         isAnimatingRef.current = false;
         setBookAnimating(false);
-        onSelect(null);
+        setClosingId(null);
         window.requestAnimationFrame(() => {
           if (!book.isConnected) return;
           gsap.set(leaves, { clearProps: "--leaf-angle" });
-          gsap.set(cover, { clearProps: "--cover-angle" });
         });
       },
     });
 
     turnedLeaves.forEach(({ leaf }, order) => {
       const start = reduceMotion ? 0 : order * 0.075;
-      timeline.to(leaf, {
-        "--leaf-angle": "0deg",
+      addPageTurn(timeline, leaf, {
+        rotationY: 0,
         duration: reduceMotion ? 0 : 0.54,
+        position: start,
         ease: "power3.inOut",
-      }, start);
+      });
     });
 
-    animateChrome(timeline, false, reduceMotion ? 0 : 0.3);
-    if (titleLeaf) {
-      timeline.to(titleLeaf, {
-        "--leaf-angle": "0deg",
-        duration: reduceMotion ? 0 : CLOSE_DURATION,
-        ease: "power3.inOut",
-        overwrite: "auto",
+    animateChrome(timeline, false, 0);
+    if (controls) {
+      timeline.to(controls, {
+        autoAlpha: 0,
+        duration: reduceMotion ? 0 : 0.28,
+        ease: EASE.fade,
       }, 0);
     }
     timeline
-      .to(cover, { "--cover-angle": "0deg", duration: reduceMotion ? 0 : CLOSE_DURATION, ease: "power3.inOut" }, 0)
-      .to(unit, { xPercent: 0, duration: reduceMotion ? 0 : CLOSE_DURATION, ease: "power3.inOut" }, 0)
+      .to(book, { "--cover-angle": "0deg", duration: reduceMotion ? 0 : CLOSE_DURATION, ease: "power3.inOut" }, 0)
+      .to(book, { "--book-spread-x": "0%", duration: reduceMotion ? 0 : CLOSE_DURATION, ease: "power3.inOut" }, 0)
       .to(book, { "--book-scale": slot.scale, duration: reduceMotion ? 0 : CLOSE_DURATION, ease: "power3.inOut" }, 0)
-      .to(book, { "--book-shadow-alpha": 0.28, duration: reduceMotion ? 0 : CLOSE_DURATION * 0.72, ease: EASE.fade }, CLOSE_DURATION * 0.2)
       .to(book, { "--book-rotation": `${restingRotation}deg`, duration: reduceMotion ? 0 : CLOSE_DURATION * 0.66, ease: "power2.inOut" }, CLOSE_DURATION * 0.34)
       .to(pages, { borderRadius: outer, duration: reduceMotion ? 0 : CLOSE_DURATION * 0.74, ease: EASE.soft }, 0)
       .to(page, { borderRadius: inner, duration: reduceMotion ? 0 : CLOSE_DURATION * 0.74, ease: EASE.soft }, 0)
       .to(coverBack, { borderRadius: outer, duration: reduceMotion ? 0 : CLOSE_DURATION * 0.74, ease: EASE.soft }, 0);
   });
 
-  useImperativeHandle(ref, () => ({ close: closeNotebook }));
-
   useEffect(() => {
     const dismiss = (event) => {
-      if (!selectedIdRef.current || activeFileId) return;
+      // Framework / lesson overlays keep the notebook open underneath. Do not
+      // treat their pointer events as "click outside" and close the book.
+      if (!dismissibleRef.current || !selectedIdRef.current || activeFileId) return;
       if (event.target.closest(".book-volume, .page-heading, [data-slot^=dialog-]")) return;
       closeNotebook();
     };
+    const onKeyDown = (event) => {
+      if (event.key !== "Escape") return;
+      if (!dismissibleRef.current || !selectedIdRef.current || activeFileId) return;
+      if (event.target.closest?.("[data-slot^=dialog-]")) return;
+      event.preventDefault();
+      closeNotebook();
+    };
     document.addEventListener("pointerdown", dismiss, true);
-    return () => document.removeEventListener("pointerdown", dismiss, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
   }, [activeFileId, notebooks.length]);
 
-  const changePage = contextSafe((notebookId, nextIndex) => {
+  const prepareRemoveFile = (notebookId, fileId) => {
     const notebook = notebooks.find((item) => item.id === notebookId);
+    if (!notebook) return Promise.resolve(false);
+    const fileIndex = notebook.files.findIndex((file) => file.id === fileId);
+    if (fileIndex < 0) return Promise.resolve(false);
+    const leafIndex = fileIndex + 1;
     const currentIndex = pageIndexesRef.current[notebookId] ?? 0;
-    if (!notebook || isAnimatingRef.current || nextIndex === currentIndex || nextIndex < 0 || nextIndex >= notebook.files.length) return;
-    const book = bookRefs.current[notebooks.findIndex((item) => item.id === notebookId)];
-    const currentPageIndex = currentIndex + 1;
-    const nextPageIndex = nextIndex + 1;
-    const movingIndex = nextPageIndex > currentPageIndex ? currentPageIndex : nextPageIndex;
-    const leaf = book?.querySelector(`.book-volume-leaf[data-page-index="${movingIndex}"]`);
-    if (!leaf) return;
+    if (currentIndex !== leafIndex) {
+      // Viewing a later leaf: shift index after delete via notebooks sync.
+      // Viewing an earlier leaf: no turn needed before removal.
+      if (currentIndex > leafIndex) {
+        commitPageIndex(notebookId, currentIndex - 1, true);
+      }
+      return Promise.resolve(true);
+    }
+    // Flip the previous leaf (title or prior file) back to the right first.
+    return changePage(notebookId, leafIndex - 1);
+  };
 
-    const currentRotation = readPageAngle(leaf);
-    const nextPageIndexes = { ...pageIndexesRef.current, [notebookId]: nextIndex };
-    pageIndexesRef.current = nextPageIndexes;
-    flushSync(() => {
-      setPageAnimating(true);
-      setPageIndexes(nextPageIndexes);
-    });
-    pageAnimatingRef.current = true;
-    pageTimelinesRef.current.get(leaf)?.kill();
-    gsap.set(leaf, {
-      "--leaf-angle": `${currentRotation}deg`,
-    });
-    const targetRotation = nextPageIndex > currentPageIndex ? -180 : 0;
-    const distance = Math.abs(targetRotation - currentRotation);
-    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const duration = reduceMotion ? 0 : gsap.utils.clamp(0.2, 0.6, 0.18 + (distance / 180) * 0.42);
-    const timeline = gsap.timeline({
-      onComplete: () => {
-        if (pageTimelinesRef.current.get(leaf) !== timeline) return;
-        pageTimelinesRef.current.delete(leaf);
-        gsap.set(leaf, { clearProps: "--leaf-angle" });
-        pageAnimatingRef.current = pageTimelinesRef.current.size > 0;
-        setPageAnimating(pageAnimatingRef.current);
-      },
-    });
-    pageTimelinesRef.current.set(leaf, timeline);
-    addPageTurn(timeline, leaf, { rotationY: targetRotation, duration });
-  });
+  useImperativeHandle(ref, () => ({
+    close: closeNotebook,
+    prepareRemoveFile,
+  }));
 
   return (
     <div
-      className={`book-carousel ${selectedId ? "is-open" : ""}`}
+      className={`book-carousel ${openNotebookId ? "is-open" : ""}`}
       data-carousel-position="0.0000"
       data-motion-state="idle"
       role="region"
@@ -769,6 +822,11 @@ export const BookCarousel = forwardRef(function BookCarousel({
           : ""}
       </span>
       <div className="book-carousel-scrollbar" aria-hidden="true" ref={scrollbarRef} />
+      {notebooks.length > 1 ? (
+        <span className="book-carousel-position-cue" aria-hidden="true">
+          {preparedIndex + 1} / {notebooks.length}
+        </span>
+      ) : null}
       {activeNotebook && <>
         <span
           className="book-carousel-meta book-carousel-meta-left"
@@ -788,13 +846,13 @@ export const BookCarousel = forwardRef(function BookCarousel({
         {notebooks.map((notebook, index) => (
           <BookVolume
             notebook={notebook}
-            isOpen={notebook.id === selectedId}
+            isOpen={notebook.id === openNotebookId}
             activeFileId={activeFileId}
-            pageIndex={Math.min(pageIndexes[notebook.id] ?? 0, Math.max(0, notebook.files.length - 1))}
-            pageAnimating={pageAnimating && notebook.id === selectedId}
-            bookAnimating={bookAnimating && notebook.id === selectedId}
-            renderPages={notebook.id === selectedId || index === preparedIndex}
-            onToggle={() => notebook.id === selectedId ? closeNotebook() : openNotebook(notebook.id)}
+            pageIndex={Math.min(pageIndexes[notebook.id] ?? 0, notebook.files.length)}
+            pageAnimating={pageAnimating && notebook.id === openNotebookId}
+            bookAnimating={bookAnimating && notebook.id === openNotebookId}
+            renderPages={notebook.id === openNotebookId || index === preparedIndex}
+            onToggle={() => notebook.id === openNotebookId ? closeNotebook() : openNotebook(notebook.id)}
             onOpenFile={onOpenFile}
             onDeleteFile={(file) => onDeleteFile({ ...file, notebookId: notebook.id })}
             onPageChange={(nextIndex) => changePage(notebook.id, nextIndex)}
@@ -804,7 +862,11 @@ export const BookCarousel = forwardRef(function BookCarousel({
         ))}
       </div>
 
-      <nav className="book-carousel-index" aria-label="切换备课本">
+      <nav
+        className="book-carousel-index"
+        aria-label="切换备课本"
+        inert={openNotebookId ? true : undefined}
+      >
         {notebooks.map((notebook, index) => (
           <Fragment key={notebook.id}>
             <button
@@ -812,7 +874,7 @@ export const BookCarousel = forwardRef(function BookCarousel({
               type="button"
               aria-current={index === activeIndex ? "true" : undefined}
               aria-describedby={`book-carousel-index-description-${notebook.id}`}
-              tabIndex={index === activeIndex ? 0 : -1}
+              tabIndex={openNotebookId ? -1 : (index === activeIndex ? 0 : -1)}
               onClick={() => goTo(index)}
               onKeyDown={(event) => handleIndexKeyDown(event, index)}
               ref={(element) => { nameRefs.current[index] = element; }}

@@ -14,7 +14,7 @@ export function resolveEvalGraderConfig(
       ?? environment.DEEPSEEK_BASE_URL
       ?? "https://api.deepseek.com",
     model: environment.LESSONUP_EVAL_GRADER_MODEL
-      ?? environment.DEEPSEEK_PRO_MODEL
-      ?? "deepseek-v4-pro",
+      ?? environment.DEEPSEEK_FLASH_MODEL
+      ?? "deepseek-v4-flash",
   };
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { ArrowLeft, FilePlus2, FolderPlus, LoaderCircle, LogOut, Milestone, Search, Trash2, UserRound } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -20,7 +20,7 @@ import {
 } from "@/components/ui/empty";
 import { BookCarousel } from "@/features/notebooks/book-carousel";
 
-export function NotebookCollection({
+export const NotebookCollection = forwardRef(function NotebookCollection({
   notebooks,
   loading,
   selectedId,
@@ -35,10 +35,17 @@ export function NotebookCollection({
   onOpenFramework,
   onOpenProfile,
   onSignOut,
-}) {
+}, ref) {
   const carouselRef = useRef(null);
   const [activeNotebookId, setActiveNotebookId] = useState(notebooks[0]?.id ?? null);
   const focusedNotebook = notebooks.find((notebook) => notebook.id === selectedId);
+
+  useImperativeHandle(ref, () => ({
+    close: () => carouselRef.current?.close(),
+    prepareRemoveFile: (notebookId, fileId) => (
+      carouselRef.current?.prepareRemoveFile?.(notebookId, fileId) ?? Promise.resolve(false)
+    ),
+  }));
 
   useEffect(() => {
     if (notebooks.some((notebook) => notebook.id === activeNotebookId)) return;
@@ -67,7 +74,9 @@ export function NotebookCollection({
             aria-hidden={focusedNotebook ? undefined : "true"}
             onClick={() => carouselRef.current?.close()}
           >
-            <ArrowLeft data-icon="inline-start" /> 返回全部备课本
+            <ArrowLeft data-icon="inline-start" />
+            <span className="collection-back-label-full">返回全部备课本</span>
+            <span className="collection-back-label-short">返回</span>
           </Button>
         </div>
         <div className="create-actions">
@@ -98,39 +107,49 @@ export function NotebookCollection({
             </DropdownMenuContent>
           </DropdownMenu>
           <Button
-            className="collection-context-action"
+            className="collection-context-action collection-create-notebook-action"
             variant="outline"
             type="button"
             tabIndex={focusedNotebook ? -1 : 0}
             aria-hidden={focusedNotebook ? "true" : undefined}
+            aria-label="新增备课本"
             onClick={onCreateNotebook}
           >
-            <FolderPlus data-icon="inline-start" /> 新增备课本
+            <FolderPlus data-icon="inline-start" />
+            <span className="collection-action-label">新增备课本</span>
           </Button>
           {focusedNotebook && (
             <Button
+              className="collection-focused-action"
               variant="outline"
               type="button"
+              aria-label="打开学期框架"
               onClick={() => onOpenFramework(focusedNotebook.id)}
             >
-              <Milestone data-icon="inline-start" /> 学期框架
+              <Milestone data-icon="inline-start" />
+              <span className="collection-action-label">学期框架</span>
             </Button>
           )}
           {focusedNotebook && (
             <Button
+              className="collection-focused-action"
               variant="outline"
               type="button"
               aria-label={`删除备课本${focusedNotebook.title}`}
               onClick={() => onDeleteNotebook(focusedNotebook)}
             >
-              <Trash2 data-icon="inline-start" /> 删除备课本
+              <Trash2 data-icon="inline-start" />
+              <span className="collection-action-label">删除备课本</span>
             </Button>
           )}
           <Button
+            className="collection-create-file-action"
             type="button"
             onClick={() => onCreateFile(focusedNotebook?.id ?? activeNotebookId ?? notebooks[0]?.id)}
           >
-            <FilePlus2 data-icon="inline-start" /> 新增备课文件
+            <FilePlus2 data-icon="inline-start" />
+            <span className="collection-action-label-full">新增备课文件</span>
+            <span className="collection-action-label-short">新增文件</span>
           </Button>
         </div>
       </header>
@@ -140,6 +159,7 @@ export function NotebookCollection({
           notebooks={notebooks}
           selectedId={selectedId}
           activeFileId={activeFileId}
+          dismissible={!inert}
           onSelect={onSelect}
           onActiveChange={setActiveNotebookId}
           onOpenFile={onOpenFile}
@@ -162,4 +182,4 @@ export function NotebookCollection({
       )}
     </section>
   );
-}
+});

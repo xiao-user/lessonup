@@ -4,11 +4,46 @@ export async function stopAgentRun({ runId, cancelRun, controller, reloadMessage
   await reloadMessages();
 }
 
+export function isApprovalBackedProposeActivity(activityName, {
+  approvalCreated = false,
+  approvalDecided = false,
+} = {}) {
+  return Boolean(
+    typeof activityName === "string"
+    && activityName.startsWith("propose_")
+    && (approvalCreated || approvalDecided),
+  );
+}
+
+/** Mirror of server/agent/tool-completion-outcome.ts for browser event projection. */
+export function toolCompletionOutcomeOf(event) {
+  if (event?.outcome) return event.outcome;
+  if (event?.ok) return "completed";
+  if (event?.revisionCode === "no_effect_patch") return "no_change";
+  if (event?.revisionCode) return "needs_revision";
+  return "failed";
+}
+
+export function activityStateForToolCompletion(event, {
+  approvalCreated = false,
+  approvalDecided = false,
+} = {}) {
+  if (isApprovalBackedProposeActivity(event?.name, { approvalCreated, approvalDecided })) {
+    return "completed";
+  }
+  const outcome = toolCompletionOutcomeOf(event);
+  if (outcome === "completed") return "completed";
+  if (outcome === "no_change") return "unchanged";
+  if (outcome === "needs_revision") return "needs_revision";
+  return "failed";
+}
+
 export function activitiesFromEvents(events, runStatus = null) {
   const activities = [];
   let failed = runStatus === "failed";
   let completed = runStatus === "completed";
   let approvalCreated = false;
+  let approvalDecided = false;
   for (const event of events) {
     if (event.type === "tool.started") {
       activities.push({
@@ -22,15 +57,19 @@ export function activitiesFromEvents(events, runStatus = null) {
     if (event.type === "tool.completed") {
       const index = activities.findIndex((activity) => activity.id === event.toolCallId);
       if (index >= 0) {
+        const outcome = toolCompletionOutcomeOf(event);
         activities[index] = {
           ...activities[index],
-          state: event.ok ? "completed" : "failed",
+          state: activityStateForToolCompletion(event, { approvalCreated, approvalDecided }),
           label: event.label,
           groupKey: event.groupKey ?? activities[index].groupKey,
+          outcome,
+          revisionCode: event.revisionCode,
         };
       }
     }
     if (event.type === "approval.required") approvalCreated = true;
+    if (event.type === "approval.decided") approvalDecided = true;
     if (event.type === "run.failed") failed = true;
     if (event.type === "run.completed") completed = true;
   }
@@ -38,12 +77,12 @@ export function activitiesFromEvents(events, runStatus = null) {
     // A confirmation item proves that the proposal was successfully
     // materialized and passed preflight. Older runs could later emit a false
     // stale failure when the SDK acknowledged that same call after approval.
-    if (approvalCreated && activity.name?.startsWith("propose_")) {
-      return { ...activity, state: "completed" };
+    if (isApprovalBackedProposeActivity(activity.name, { approvalCreated, approvalDecided })) {
+      return { ...activity, state: "completed", outcome: "completed" };
     }
     if (activity.state !== "running") return activity;
-    if (failed) return { ...activity, state: "failed" };
-    if (completed) return { ...activity, state: "completed" };
+    if (failed) return { ...activity, state: "failed", outcome: "failed" };
+    if (completed) return { ...activity, state: "completed", outcome: "completed" };
     return activity;
   });
 }
@@ -119,7 +158,7 @@ export function presentAgentError(error) {
       retryLabel: "基于最新内容重新生成",
     },
     approval_resume_failed: {
-      message: "修改决定已经保存，但后续回复未能恢复。教案状态不会被重复写入。",
+      message: "你的确认已写入；后续说明未能完成，可直接继续提问，不会重复写入。",
       retryLabel: "继续新一轮",
     },
     agent_rate_limited: {

@@ -126,7 +126,7 @@ export class DeepSeekModelProvider implements ModelProvider {
     });
   }
 
-  async getModel(modelName: string = deepSeekModels.pro): Promise<Model> {
+  async getModel(modelName: string = deepSeekModels.flash): Promise<Model> {
     const protocol = deepSeekApiProtocolForModel(modelName);
     const provider = protocol === "responses"
       ? this.responsesProvider

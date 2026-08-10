@@ -93,11 +93,15 @@ describe("presentAgentActivities", () => {
   });
 
   it("shows a proposal retry as correction instead of a generic reply wait", () => {
-    const activities = presentAgentActivities([
-      { id: "1", name: "propose_document_patch", label: "准备修改建议", state: "failed" },
+    expect(agentActivitySummary([
+      { id: "1", name: "propose_document_patch", label: "现稿已符合要求，将复用当前内容", state: "unchanged" },
+    ], agentTurnPhases.awaiting)).toBe("现稿已符合要求，无需修改");
+
+    const revising = presentAgentActivities([
+      { id: "1", name: "propose_document_patch", label: "准备修改建议", state: "needs_revision" },
       { id: "2", name: "propose_document_patch", label: "准备修改建议", state: "running" },
     ]);
-    expect(agentActivitySummary(activities, agentTurnPhases.toolActive))
-      .toBe("正在修正：准备修改建议");
+    expect(agentActivitySummary(revising, agentTurnPhases.toolActive))
+      .toBe("正在调整：准备修改建议");
   });
 });

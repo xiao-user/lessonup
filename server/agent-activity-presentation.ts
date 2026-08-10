@@ -1,4 +1,8 @@
 import type { AgentActivityRecord, NormalizedAgentEvent } from "./domain.js";
+import {
+  toolActivityStateForOutcome,
+  toolCompletionOutcomeOf,
+} from "./agent/tool-completion-outcome.js";
 
 export function persistedActivitiesFromEvents(
   events: NormalizedAgentEvent[],
@@ -19,11 +23,17 @@ export function persistedActivitiesFromEvents(
     if (event.type !== "tool.completed") continue;
     const index = activities.findIndex((activity) => activity.id === event.toolCallId);
     if (index >= 0) {
+      const outcome = event.outcome ?? toolCompletionOutcomeOf({
+        ok: event.ok,
+        revisionCode: event.revisionCode,
+      });
       activities[index] = {
         ...activities[index]!,
         label: event.label,
         groupKey: event.groupKey ?? activities[index]!.groupKey,
-        state: event.ok ? "completed" : "failed",
+        state: toolActivityStateForOutcome(outcome),
+        outcome,
+        revisionCode: event.revisionCode,
       };
     }
   }

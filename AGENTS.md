@@ -40,7 +40,7 @@
 - Keep model and service credentials on the Hono server. The browser receives only the Supabase anonymous key and the signed-in access token.
 - Revalidate the complete isolation chain `auth.user → notebook → lesson_file → agent_thread → agent_branch → run`; treat every client-provided ID as untrusted.
 - Use `@openai/agents` for the Agent loop, persistent Session, HITL RunState, MCP clients, and tracing. DeepSeek is a custom provider limited to `deepseek-v4-pro` over Chat Completions and `deepseek-v4-flash` over Responses API. DeepSeek Responses remains stateless, so LessonUp's isolated Session stays canonical.
-- Use one visible `LessonPreparationManager`; curriculum, learning design, assessment, and critique agents are internal tools. Use Pro for visible/complex work and Flash for bounded routing, titles, memory compression, and lightweight critique.
+- Use one visible `LessonPreparationManager`; curriculum, learning design, assessment, and critique agents are internal tools. Use Flash (`deepseek-v4-flash` / Responses API) for the visible manager, specialists, titles, memory compression, and lightweight work.
 - Deterministic document access is a Function Tool, knowledge retrieval is Streamable HTTP MCP with five-minute server-signed scope tokens, and teaching methods are versioned platform Skills.
 - Never inject another lesson file or a private library by default. Inject verified IDs, document version, active-section and selection hints; let the Agent read canonical document fields and sources on demand.
 - Web retrieval must reject private networks, file URLs, and unsafe redirects. Never expose reasoning, provider-native events, raw tool JSON, prompts, credentials, or private source bodies to the browser.

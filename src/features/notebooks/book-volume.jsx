@@ -1,7 +1,7 @@
-import { ChevronLeft, ChevronRight, FileText, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { LessonFilePageSummary, NotebookTitlePageSummary } from "@/components/lesson-file-page-summary";
+import { LessonFilePageBackSummary, LessonFilePageSummary, NotebookTitlePageSummary } from "@/components/lesson-file-page-summary";
 
 export function BookVolume({
   notebook,
@@ -29,8 +29,11 @@ export function BookVolume({
     },
     ...notebook.files.map((file) => ({ ...file, kind: "file" })),
   ];
-  const activePageIndex = isOpen && fileCount ? pageIndex + 1 : 0;
-  const activeFile = notebook.files[pageIndex];
+  // pageIndex is the leaf index in [title, ...files]. Title is leaf 0.
+  const activePageIndex = isOpen ? pageIndex : 0;
+  const activePage = pages[activePageIndex];
+  const activeFile = activePage?.kind === "file" ? activePage : null;
+  const leafCount = pages.length;
 
   const openFile = (event, file) => {
     event.stopPropagation();
@@ -54,7 +57,7 @@ export function BookVolume({
 
   return (
     <article
-      className={`book-volume tone-${notebook.tone} ${isOpen ? "is-open" : ""}`}
+      className={`book-volume tone-${notebook.tone} ${isOpen ? "is-open" : ""} ${bookAnimating ? "is-animating" : ""}`}
       data-notebook-id={notebook.id}
       onClick={(event) => {
         if (isOpen && event.target.closest(".book-volume-leaf-back")) onToggle();
@@ -97,16 +100,11 @@ export function BookVolume({
                   {page.kind === "title" ? (
                     <NotebookTitlePageSummary notebook={notebook} />
                   ) : (
-                    <LessonFilePageSummary
-                      file={page}
-                      pageIndex={index - 1}
-                      fileCount={fileCount}
-                    />
+                    <LessonFilePageBackSummary file={page} />
                   )}
                 </div>
               </div>
             ))}
-            {renderPages && !fileCount && <div className="book-volume-empty-page" aria-hidden="true"><FileText /></div>}
           </div>
 
           <button
@@ -129,38 +127,48 @@ export function BookVolume({
         </div>
       </div>
 
-      {isOpen && fileCount > 0 && (
-        <div className="book-volume-controls" aria-label="翻阅备课文件">
-          {fileCount > 1 && <button
+      {isOpen && (
+        <div className="book-volume-controls" aria-label="翻阅备课本">
+          {leafCount > 1 && (
+            <button
               className="book-volume-control-button"
               type="button"
-              aria-label="上一份备课文件"
-              disabled={bookAnimating || pageIndex <= 0}
+              aria-label="上一页"
+              disabled={bookAnimating || pageAnimating || pageIndex <= 0}
               onClick={(event) => { event.stopPropagation(); onPageChange(pageIndex - 1); }}
             >
-              <ChevronLeft />
-            </button>}
-          <span>{pageIndex + 1} / {fileCount}</span>
-          {fileCount > 1 && <button
+              <ChevronLeft aria-hidden="true" />
+            </button>
+          )}
+          <span className="book-volume-page-label">{pageIndex === 0 ? "扉页" : pageIndex} / {fileCount}</span>
+          {leafCount > 1 && (
+            <button
               className="book-volume-control-button"
               type="button"
-              aria-label="下一份备课文件"
-              disabled={bookAnimating || pageIndex >= fileCount - 1}
+              aria-label="下一页"
+              disabled={bookAnimating || pageAnimating || pageIndex >= leafCount - 1}
               onClick={(event) => { event.stopPropagation(); onPageChange(pageIndex + 1); }}
             >
-              <ChevronRight />
-            </button>}
-          <Button
-            className="book-volume-delete-button"
-            variant="ghost"
-            size="icon-xs"
-            type="button"
-            aria-label={`删除备课文件${activeFile?.title ?? ""}`}
-            disabled={!activeFile || bookAnimating || pageAnimating}
-            onClick={(event) => { event.stopPropagation(); onDeleteFile(activeFile); }}
-          >
-            <Trash2 />
-          </Button>
+              <ChevronRight aria-hidden="true" />
+            </button>
+          )}
+          {fileCount > 0 && (
+            <Button
+              className="book-volume-delete-button"
+              variant="ghost"
+              size="icon-xs"
+              type="button"
+              aria-label={activeFile ? `删除备课文件${activeFile.title}` : "扉页不可删除"}
+              disabled={bookAnimating || pageAnimating || !activeFile}
+              onClick={(event) => {
+                event.stopPropagation();
+                if (!activeFile) return;
+                onDeleteFile(activeFile);
+              }}
+            >
+              <Trash2 aria-hidden="true" />
+            </Button>
+          )}
         </div>
       )}
     </article>

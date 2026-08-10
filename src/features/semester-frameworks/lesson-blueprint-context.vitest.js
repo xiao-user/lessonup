@@ -65,4 +65,30 @@ describe("lesson blueprint A4 context", () => {
       { direction: "prepare", relatedPointName: "景物片段写作", currentPointName: "拟人表达" },
     ])).toContain("后续铺垫：拟人表达 → 景物片段写作");
   });
+
+  it("prefers accepted continuity and omits dismissed candidates from drafts", () => {
+    expect(continuityDraft([
+      {
+        direction: "review",
+        decision: "dismissed",
+        evidenceKind: "same_knowledge_point",
+        relatedPointName: "应排除",
+        currentPointName: "本课",
+      },
+      {
+        direction: "review",
+        decision: "accepted",
+        evidenceKind: "lexical_similarity",
+        relatedPointName: "应采用",
+        currentPointName: "本课",
+      },
+      {
+        direction: "review",
+        decision: "candidate",
+        evidenceKind: "same_knowledge_point",
+        relatedPointName: "普通候选",
+        currentPointName: "本课",
+      },
+    ])).toBe("复习旧知：应采用（用于衔接本课）");
+  });
 });
