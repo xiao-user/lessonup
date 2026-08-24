@@ -23,7 +23,7 @@ type BlueprintLike = {
   mainActivity: string;
   observableProduct: string;
   assessmentEvidence: string;
-  anticipatedDifficulties: string[];
+  anticipatedDifficulties: unknown[];
   plannedMinutes: number;
   teacherNotes: string;
   status: string;
@@ -32,8 +32,8 @@ type BlueprintLike = {
 type UnitLike = {
   id: string;
   curriculumNodeId: string;
-  plannedStartWeek: number;
-  plannedEndWeek: number;
+  plannedStartWeek: number | null;
+  plannedEndWeek: number | null;
   plannedPeriods: number;
   learningGoals: string;
   teacherNotes: string;
@@ -64,7 +64,9 @@ export function presentSemesterBlueprintForAgent(
     主要教学活动: blueprint.mainActivity,
     学生可观察产出: blueprint.observableProduct,
     达成证据: blueprint.assessmentEvidence,
-    预判难点: blueprint.anticipatedDifficulties,
+    预判难点: blueprint.anticipatedDifficulties.filter(
+      (value): value is string => typeof value === "string",
+    ),
     课堂分钟: blueprint.plannedMinutes,
     蓝图备注: blueprint.teacherNotes,
     状态: blueprint.status,

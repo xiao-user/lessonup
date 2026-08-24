@@ -1,7 +1,7 @@
 /**
  * Browser-facing tool outcomes are distinct from model-facing tool output.
  *
- * Agents SDK loops may return recoverable proposal guidance to the model
+ * Agent loops may return recoverable proposal guidance to the model
  * (ok=false + revision text). That must not all collapse into a teacher-visible
  * "failed" activity — especially no_effect_patch, which means the current
  * resource already matches the request.

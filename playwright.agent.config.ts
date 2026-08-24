@@ -22,7 +22,7 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: "NODE_ENV=test LESSONUP_DEV_AUTH=1 DEEPSEEK_API_KEY=e2e-placeholder PORT=8790 APP_ORIGIN=http://127.0.0.1:5176 npx tsx server/e2e-agent-index.ts",
+      command: "NODE_ENV=test LESSONUP_DEV_AUTH=1 MODEL_API_KEY=e2e-placeholder MODEL_BASE_URL=http://127.0.0.1:9/v1 MODEL_ID=e2e-placeholder PORT=8790 APP_ORIGIN=http://127.0.0.1:5176 npx tsx server/e2e-agent-index.ts",
       url: "http://127.0.0.1:8790/api/health",
       reuseExistingServer: false,
       timeout: 60_000,

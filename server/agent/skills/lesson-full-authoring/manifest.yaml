@@ -1,0 +1,5 @@
+id: lesson-full-authoring
+version: 1.0.0
+description: 基于当前真实课时规划完整编写可直接实施的 A4 教案
+requiredTools: [read_document, propose_document_patch]
+requiredMcp: []

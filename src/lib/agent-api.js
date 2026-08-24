@@ -229,6 +229,24 @@ export const agentApi = {
     `/api/lesson-files/${encodeURIComponent(fileId)}/page-count`,
     { method: "PATCH", body: JSON.stringify(input) },
   ),
+  getClassroomPresentationGeneration: (fileId) => request(
+    `/api/lesson-files/${encodeURIComponent(fileId)}/presentations/generation`,
+  ),
+  listClassroomPresentations: (fileId) => request(
+    `/api/lesson-files/${encodeURIComponent(fileId)}/presentations`,
+  ),
+  listMyClassroomPresentations: () => request("/api/presentations"),
+  getClassroomPresentation: (presentationId) => request(
+    `/api/presentations/${encodeURIComponent(presentationId)}`,
+  ),
+  createPresentationAccess: (presentationId) => request(
+    `/api/presentations/${encodeURIComponent(presentationId)}/access`,
+    { method: "POST", body: JSON.stringify({}) },
+  ),
+  deleteClassroomPresentation: (presentationId) => request(
+    `/api/presentations/${encodeURIComponent(presentationId)}`,
+    { method: "DELETE" },
+  ),
   listThreads: (resource) => {
     const scope = typeof resource === "string" ? { lessonFileId: resource } : resource;
     const params = new URLSearchParams();
@@ -255,6 +273,14 @@ export const agentApi = {
   getLatestActivity: (threadId, branchId) => request(`/api/agent/threads/${threadId}/activity?branchId=${branchId}`),
   createBranch: (messageId, input) => request(`/api/agent/messages/${messageId}/branch`, { method: "POST", body: JSON.stringify(input) }),
   cancelRun: (runId) => request(`/api/agent/runs/${runId}/cancel`, { method: "POST", body: JSON.stringify({}) }),
+  queueRunInput: (runId, input) => request(`/api/agent/runs/${runId}/input`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  }),
+  clearRunInput: (runId, delivery = "all") => request(
+    `/api/agent/runs/${runId}/input?delivery=${delivery}`,
+    { method: "DELETE" },
+  ),
   uploadKnowledge: (file, scope, idempotencyKey = crypto.randomUUID()) => {
     const body = new FormData();
     body.append("file", file);

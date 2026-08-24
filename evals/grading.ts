@@ -1,5 +1,17 @@
-import OpenAI from "openai";
 import { z } from "zod";
+
+export type BusinessGraderClient = {
+  chat: {
+    completions: {
+      create(args: {
+        model: string;
+        temperature: number;
+        response_format: { type: "json_object" };
+        messages: Array<{ role: "system" | "user"; content: string }>;
+      }): Promise<{ choices: Array<{ message: { content: string | null } }> }>;
+    };
+  };
+};
 
 export type BusinessRubric = {
   criteria: string[];
@@ -140,7 +152,7 @@ export function finalizeBusinessGrade(
 }
 
 export async function gradeBusinessResponse(args: {
-  client: OpenAI;
+  client: BusinessGraderClient;
   model: string;
   prompt: string;
   response: string;

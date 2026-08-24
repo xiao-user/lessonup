@@ -30,7 +30,7 @@ export default async function globalSetup(_config: FullConfig) {
         id: lessonFileId,
         title: "春日的第一声鸟鸣",
         type: "阅读课",
-        image: "/assets/paper-birds.png",
+        image: "/assets/lesson-spring-bird.png",
         pages: 1,
         lessonPlan: initialDocument,
       }],

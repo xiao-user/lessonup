@@ -8,7 +8,6 @@ import {
   createLessonPlanDraft,
   lessonPlanSections,
 } from "@/features/lesson-files/data";
-import { normalizeEditableText } from "@/features/lesson-files/editable-text";
 import {
   createLessonHistory,
   recordLessonChange,
@@ -17,60 +16,16 @@ import {
 } from "@/features/lesson-files/history";
 import { paginateLessonPlan } from "@/features/lesson-files/pagination";
 import { pickActiveLessonSection } from "@/features/lesson-files/scroll-state";
-import { applyClientDocumentPatch } from "@/features/assistant/document-patch";
+import { LessonPlanTiptapEditor, PresentationMaterialRow } from "@/features/lesson-files/lesson-plan-tiptap";
+import { applyLessonFieldEdit } from "@/features/lesson-files/lesson-plan-tiptap-bridge";
+import { renderLessonMarkdownHtml } from "@/features/lesson-files/lesson-markdown";
+import { agentApi } from "@/lib/agent-api";
 
 gsap.registerPlugin(useGSAP);
 
 const LessonAgentPanel = lazy(() => import("@/features/assistant/lesson-agent-panel").then((module) => ({
   default: module.LessonAgentPanel,
 })));
-
-const paginationInputDelay = 150;
-
-function classifyInput(field, inputType) {
-  return {
-    field,
-    kind: inputType === "insertFromPaste" || inputType === "insertFromDrop"
-      ? "paste"
-      : "typing",
-  };
-}
-
-function insertPlainText(element, text) {
-  if (element instanceof HTMLTextAreaElement) {
-    const start = element.selectionStart ?? element.value.length;
-    const end = element.selectionEnd ?? start;
-    element.setRangeText(normalizeEditableText(text), start, end, "end");
-    element.dispatchEvent(new InputEvent("input", {
-      bubbles: true,
-      inputType: "insertFromPaste",
-      data: text,
-    }));
-    return;
-  }
-
-  const selection = window.getSelection();
-  if (!selection) return;
-  let range = selection.rangeCount ? selection.getRangeAt(0) : null;
-  if (!range || !element.contains(range.commonAncestorContainer)) {
-    range = document.createRange();
-    range.selectNodeContents(element);
-    range.collapse(false);
-  }
-
-  range.deleteContents();
-  const textNode = document.createTextNode(normalizeEditableText(text));
-  range.insertNode(textNode);
-  range.setStartAfter(textNode);
-  range.collapse(true);
-  selection.removeAllRanges();
-  selection.addRange(range);
-  element.dispatchEvent(new InputEvent("input", {
-    bubbles: true,
-    inputType: "insertFromPaste",
-    data: text,
-  }));
-}
 
 function LessonTableColumns() {
   return (
@@ -85,7 +40,18 @@ function LessonTableColumns() {
   );
 }
 
-function PaginationMeasure({ plan, measureRef }) {
+function MeasuredMarkdown({ value }) {
+  return (
+    <div
+      className="lesson-tiptap-field"
+      // This HTML is generated locally from the same trusted Markdown parser
+      // and extension set as the field editor; no remote HTML enters here.
+      dangerouslySetInnerHTML={{ __html: renderLessonMarkdownHtml(value) }}
+    />
+  );
+}
+
+function PaginationMeasure({ plan, presentationMaterial, measureRef }) {
   return (
     <div className="lesson-pagination-measure" ref={measureRef} aria-hidden="true">
       <div className="lesson-pagination-page-box" />
@@ -95,15 +61,15 @@ function PaginationMeasure({ plan, measureRef }) {
         <tbody>
           <tr className="lesson-row-basics" data-measure-kind="basics">
             <th scope="row">单元</th>
-            <td><div className="lesson-editable">{plan.unit}</div></td>
+            <td><MeasuredMarkdown value={plan.unit} /></td>
             <th scope="row">课时</th>
-            <td><div className="lesson-editable">{plan.period}</div></td>
+            <td><MeasuredMarkdown value={plan.period} /></td>
             <th scope="row">总课时</th>
-            <td><div className="lesson-editable">{plan.totalPeriods}</div></td>
+            <td><MeasuredMarkdown value={plan.totalPeriods} /></td>
           </tr>
           <tr className="lesson-row-topic" data-measure-kind="topic">
             <th scope="row">课题</th>
-            <td colSpan={5}><div className="lesson-editable">{plan.topic}</div></td>
+            <td colSpan={5}><MeasuredMarkdown value={plan.topic} /></td>
           </tr>
           {lessonPlanSections.filter((section) => section.id !== "basics").map((section) => (
             <tr
@@ -112,9 +78,16 @@ function PaginationMeasure({ plan, measureRef }) {
               key={section.id}
             >
               <th scope="row"><span>{section.label}</span></th>
-              <td colSpan={5}><div className="lesson-editable">{plan[section.id]}</div></td>
+              <td colSpan={5}>
+                <MeasuredMarkdown value={plan[section.id]} />
+              </td>
             </tr>
           ))}
+          <PresentationMaterialRow
+            presentation={presentationMaterial.presentation}
+            state={presentationMaterial.state}
+            measure
+          />
         </tbody>
       </table>
 
@@ -123,7 +96,7 @@ function PaginationMeasure({ plan, measureRef }) {
         <tbody>
           <tr data-measure-probe>
             <th scope="row"><span data-measure-probe-label /></th>
-            <td colSpan={5}><div className="lesson-editable" data-measure-probe-content /></td>
+            <td colSpan={5}><div className="lesson-tiptap-field" data-measure-probe-content /></td>
           </tr>
         </tbody>
       </table>
@@ -138,7 +111,8 @@ function createDomMeasurements(measureRoot, plan) {
   const probeRow = measureRoot.querySelector("[data-measure-probe]");
   const probeLabel = measureRoot.querySelector("[data-measure-probe-label]");
   const probeContent = measureRoot.querySelector("[data-measure-probe-content]");
-  if (!pageBox || !basicsRow || !topicRow || !probeRow || !probeLabel || !probeContent) {
+  const presentationRow = measureRoot.querySelector('[data-measure-kind="presentation"]');
+  if (!pageBox || !basicsRow || !topicRow || !probeRow || !probeLabel || !probeContent || !presentationRow) {
     return null;
   }
 
@@ -149,7 +123,8 @@ function createDomMeasurements(measureRoot, plan) {
   });
 
   return {
-    pageHeight: pageBox.getBoundingClientRect().height,
+    // Collapsed table borders can accumulate a sub-pixel at the page edge.
+    pageHeight: pageBox.getBoundingClientRect().height - 1,
     measureBasics: () => basicsRow.getBoundingClientRect().height,
     measureTopic: () => topicRow.getBoundingClientRect().height,
     measureSection: (section, value, continued) => {
@@ -160,334 +135,26 @@ function createDomMeasurements(measureRoot, plan) {
 
       probeRow.className = `lesson-row-${section.id}${continued ? " is-continuation" : ""}`;
       probeLabel.textContent = `${section.label}${continued ? "（续）" : ""}`;
-      probeContent.textContent = text;
+      probeContent.innerHTML = renderLessonMarkdownHtml(text);
       const height = probeRow.getBoundingClientRect().height;
       cache.set(cacheKey, height);
       return height;
     },
+    measurePresentation: () => presentationRow.getBoundingClientRect().height,
   };
 }
 
 function pageLayoutSignature(pages) {
-  return pages.map((page) => page.map((entry) => (
-    `${entry.key}:${entry.start ?? ""}:${entry.end ?? ""}:${entry.value ?? ""}`
-  )).join("|")).join("||");
-}
-
-function readCaretOffset(element) {
-  if (element instanceof HTMLTextAreaElement) {
-    return element.selectionStart ?? element.value.length;
-  }
-
-  const selection = window.getSelection();
-  if (!selection?.rangeCount || !element.contains(selection.focusNode)) {
-    return normalizeEditableText(element.innerText).length;
-  }
-
-  const marker = document.createTextNode("\uE000");
-  const markerRange = selection.getRangeAt(0).cloneRange();
-  markerRange.collapse(false);
-  try {
-    markerRange.insertNode(marker);
-    const textWithMarker = normalizeEditableText(element.innerText);
-    const offset = textWithMarker.indexOf(marker.textContent);
-    const restoredRange = document.createRange();
-    restoredRange.setStartBefore(marker);
-    restoredRange.collapse(true);
-    marker.remove();
-    selection.removeAllRanges();
-    selection.addRange(restoredRange);
-    return offset >= 0 ? offset : normalizeEditableText(element.innerText).length;
-  } catch {
-    marker.remove();
-    return normalizeEditableText(element.innerText).length;
-  }
-}
-
-function restoreCaret(element, offset) {
-  if (element instanceof HTMLTextAreaElement) {
-    const nextOffset = Math.min(Math.max(0, offset), element.value.length);
-    element.focus({ preventScroll: true });
-    element.setSelectionRange(nextOffset, nextOffset);
-    return;
-  }
-
-  const selection = window.getSelection();
-  if (!selection) return;
-
-  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-  let remaining = Math.max(0, offset);
-  let node = walker.nextNode();
-  while (node) {
-    if (remaining <= node.textContent.length) {
-      const range = document.createRange();
-      range.setStart(node, remaining);
-      range.collapse(true);
-      selection.removeAllRanges();
-      selection.addRange(range);
-      element.focus({ preventScroll: true });
-      return;
-    }
-    remaining -= node.textContent.length;
-    node = walker.nextNode();
-  }
-
-  const range = document.createRange();
-  range.selectNodeContents(element);
-  range.collapse(false);
-  selection.removeAllRanges();
-  selection.addRange(range);
-  element.focus({ preventScroll: true });
-}
-
-function captureActiveCaret(root) {
-  const editor = document.activeElement;
-  if (!editor?.classList.contains("lesson-editable") || !root?.contains(editor)) return null;
-  return {
-    field: editor.dataset.field,
-    offset: Number(editor.dataset.start ?? 0) + readCaretOffset(editor),
-  };
-}
-
-function readSelectionOffset(editor, container, offset) {
-  const range = document.createRange();
-  range.selectNodeContents(editor);
-  range.setEnd(container, offset);
-  return normalizeEditableText(range.toString()).length;
-}
-
-function captureLessonSelection(scrollRoot) {
-  const activeEditor = document.activeElement;
-  if (activeEditor instanceof HTMLTextAreaElement
-    && activeEditor.classList.contains("lesson-editable")
-    && scrollRoot.contains(activeEditor)) {
-    const start = activeEditor.selectionStart ?? 0;
-    const end = activeEditor.selectionEnd ?? start;
-    if (start === end) return null;
-    const fragmentStart = Number(activeEditor.dataset.start ?? 0);
-    return {
-      field: activeEditor.dataset.field,
-      start: fragmentStart + start,
-      end: fragmentStart + end,
-      text: activeEditor.value.slice(start, end),
-    };
-  }
-
-  const selection = window.getSelection();
-  if (!selection?.rangeCount || selection.isCollapsed) return null;
-  const range = selection.getRangeAt(0);
-  const startElement = range.startContainer.nodeType === Node.ELEMENT_NODE
-    ? range.startContainer
-    : range.startContainer.parentElement;
-  const endElement = range.endContainer.nodeType === Node.ELEMENT_NODE
-    ? range.endContainer
-    : range.endContainer.parentElement;
-  const startEditor = startElement?.closest?.(".lesson-editable");
-  const endEditor = endElement?.closest?.(".lesson-editable");
-  if (!startEditor || startEditor !== endEditor || !scrollRoot.contains(startEditor)) return null;
-  const text = normalizeEditableText(selection.toString());
-  if (!text) return null;
-  const fragmentStart = Number(startEditor.dataset.start ?? 0);
-  return {
-    field: startEditor.dataset.field,
-    start: fragmentStart + readSelectionOffset(startEditor, range.startContainer, range.startOffset),
-    end: fragmentStart + readSelectionOffset(startEditor, range.endContainer, range.endOffset),
-    text,
-  };
-}
-
-function EditableCell({
-  value,
-  onChange,
-  label,
-  multiline = false,
-  onFocus,
-  field,
-  start,
-  end,
-  syncVersion,
-  onHistoryAction,
-  proposed = false,
-}) {
-  const editorRef = useRef(null);
-  const composingRef = useRef(false);
-  const inputTimerRef = useRef(null);
-  const latestElementRef = useRef(null);
-  const latestTransactionRef = useRef(classifyInput(field, "insertText"));
-  const lastSyncVersionRef = useRef(syncVersion);
-  const publishedValueRef = useRef(normalizeEditableText(value));
-  const readValue = (element) => normalizeEditableText(element.value);
-  const publishChange = (element, transaction = latestTransactionRef.current) => {
-    const nextValue = readValue(element);
-    const previousValue = publishedValueRef.current;
-    if (nextValue === previousValue) return;
-    publishedValueRef.current = nextValue;
-    onChange(nextValue, readCaretOffset(element), previousValue, transaction);
-  };
-  const flushChange = (element = latestElementRef.current) => {
-    window.clearTimeout(inputTimerRef.current);
-    inputTimerRef.current = null;
-    if (element) publishChange(element);
-  };
-  const scheduleChange = (element, transaction) => {
-    latestElementRef.current = element;
-    latestTransactionRef.current = transaction;
-    window.clearTimeout(inputTimerRef.current);
-    inputTimerRef.current = window.setTimeout(() => flushChange(element), paginationInputDelay);
-  };
-
-  useLayoutEffect(() => {
-    const nextValue = normalizeEditableText(value);
-    const editor = editorRef.current;
-    const forceSync = lastSyncVersionRef.current !== syncVersion;
-    lastSyncVersionRef.current = syncVersion;
-    publishedValueRef.current = nextValue;
-    if (
-      editor
-      && (forceSync || document.activeElement !== editor)
-      && normalizeEditableText(editor.value) !== nextValue
-    ) {
-      editor.value = nextValue;
-    }
-  }, [syncVersion, value]);
-
-  useEffect(() => () => window.clearTimeout(inputTimerRef.current), []);
-
-  useEffect(() => {
-    const editor = editorRef.current;
-    if (!editor) return undefined;
-    const flushPendingInput = () => flushChange(editor);
-    editor.addEventListener("lessonup:flush-edit", flushPendingInput);
-    return () => editor.removeEventListener("lessonup:flush-edit", flushPendingInput);
+  const fieldOccurrences = new Map();
+  pages.flat().forEach((entry) => {
+    if (!entry.field) return;
+    fieldOccurrences.set(entry.field, (fieldOccurrences.get(entry.field) ?? 0) + 1);
   });
-
-  return (
-    <textarea
-      className={`lesson-editable ${proposed ? "is-agent-proposed" : ""}`}
-      ref={editorRef}
-      aria-label={label}
-      aria-multiline={multiline}
-      rows={1}
-      data-field={field}
-      data-start={start}
-      data-end={end}
-      onBlur={(event) => {
-        composingRef.current = false;
-        flushChange(event.currentTarget);
-      }}
-      onCompositionStart={() => {
-        composingRef.current = true;
-        window.clearTimeout(inputTimerRef.current);
-      }}
-      onCompositionEnd={(event) => {
-        composingRef.current = false;
-        latestTransactionRef.current = classifyInput(field, "insertCompositionText");
-        flushChange(event.currentTarget);
-      }}
-      onFocus={onFocus}
-      onBeforeInput={(event) => {
-        const inputType = event.nativeEvent.inputType;
-        if (inputType !== "historyUndo" && inputType !== "historyRedo") return;
-        event.preventDefault();
-        flushChange(event.currentTarget);
-        onHistoryAction(inputType === "historyUndo" ? "undo" : "redo");
-      }}
-      onInput={(event) => {
-        if (!composingRef.current) {
-          scheduleChange(
-            event.currentTarget,
-            classifyInput(field, event.nativeEvent.inputType),
-          );
-        }
-      }}
-      onPaste={(event) => {
-        event.preventDefault();
-        insertPlainText(event.currentTarget, event.clipboardData.getData("text/plain"));
-      }}
-    />
-  );
-}
-
-function BasicsRow({ plan, onChange, onFocus, syncVersion, onHistoryAction, proposedFields }) {
-  return (
-    <tr
-      id="lesson-section-basics"
-      data-lesson-section="basics"
-      className="lesson-row-basics"
-    >
-      <th scope="row">单元</th>
-      <td>
-        <EditableCell
-          value={plan.unit}
-          onChange={(...change) => onChange("unit", ...change)}
-          onFocus={onFocus}
-          field="unit"
-          syncVersion={syncVersion}
-          onHistoryAction={onHistoryAction}
-          label="单元"
-          proposed={proposedFields?.has("unit")}
-        />
-      </td>
-      <th scope="row">课时</th>
-      <td>
-        <EditableCell
-          value={plan.period}
-          onChange={(...change) => onChange("period", ...change)}
-          onFocus={onFocus}
-          field="period"
-          syncVersion={syncVersion}
-          onHistoryAction={onHistoryAction}
-          label="课时"
-          proposed={proposedFields?.has("period")}
-        />
-      </td>
-      <th scope="row">总课时</th>
-      <td>
-        <EditableCell
-          value={plan.totalPeriods}
-          onChange={(...change) => onChange("totalPeriods", ...change)}
-          onFocus={onFocus}
-          field="totalPeriods"
-          syncVersion={syncVersion}
-          onHistoryAction={onHistoryAction}
-          label="总课时"
-          proposed={proposedFields?.has("totalPeriods")}
-        />
-      </td>
-    </tr>
-  );
-}
-
-function SectionRow({ entry, onChange, onFocus, syncVersion, onHistoryAction, proposed }) {
-  const sectionId = entry.sectionId;
-  return (
-    <tr
-      id={entry.continued ? undefined : `lesson-section-${sectionId}`}
-      data-lesson-section={sectionId}
-      className={`lesson-row-${sectionId} ${entry.continued ? "is-continuation" : ""}`}
-    >
-      <th scope="row">
-        <span>{entry.label}{entry.continued ? "（续）" : ""}</span>
-      </th>
-      <td colSpan={5}>
-        <EditableCell
-          value={entry.value}
-          onChange={(value, caretOffset, previousValue, transaction) => (
-            onChange(entry, value, caretOffset, previousValue, transaction)
-          )}
-          onFocus={() => onFocus(sectionId)}
-          field={entry.field}
-          start={entry.start}
-          end={entry.end}
-          syncVersion={syncVersion}
-          onHistoryAction={onHistoryAction}
-          multiline
-          label={`${entry.label}${entry.continued ? "续页" : ""}`}
-          proposed={proposed}
-        />
-      </td>
-    </tr>
-  );
+  return pages.map((page, pageIndex) => page.map((entry) => {
+    const fieldIsFragmented = (fieldOccurrences.get(entry.field) ?? 0) > 1;
+    const range = fieldIsFragmented ? `:${entry.start ?? ""}:${entry.end ?? ""}` : "";
+    return `${pageIndex}:${entry.kind}:${entry.key}:${entry.sectionId}:${entry.continued ? 1 : 0}${range}`;
+  }).join("|")).join("||");
 }
 
 export function LessonFileWorkspace({ notebook, file, sourceElement, originRect, closeSignal = 0, onSave, onAgentVersionCommitted, onClose, initialAgentPrompt = null, onInitialAgentPromptConsumed }) {
@@ -495,9 +162,6 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
   const scrollRef = useRef(null);
   const documentPagesRef = useRef(null);
   const firstSheetRef = useRef(null);
-  const documentPaneRef = useRef(null);
-  const agentDockRef = useRef(null);
-  const agentDockWidthRef = useRef(0);
   const closingRef = useRef(false);
   const openingTimelineRef = useRef(null);
   const sectionScrollRef = useRef(null);
@@ -515,7 +179,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
   const pendingAgentCommitRef = useRef(null);
   const saveInFlightRef = useRef(Promise.resolve());
   const persistPendingSaveRef = useRef(() => Promise.resolve());
-  const pendingCaretRef = useRef(null);
+  const tiptapBridgeRef = useRef(null);
   const undoActionRef = useRef(() => {});
   const redoActionRef = useRef(() => {});
   const initialPlan = useMemo(
@@ -528,7 +192,8 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     canUndo: false,
     canRedo: false,
   });
-  const [editorSyncVersion, setEditorSyncVersion] = useState(0);
+  const [editorExternalRevision, setEditorExternalRevision] = useState(0);
+  const [editorReadyRevision, setEditorReadyRevision] = useState(0);
   const [activeSection, setActiveSection] = useState("basics");
   const [previewSectionIndex, setPreviewSectionIndex] = useState(null);
   const [saveStatus, setSaveStatus] = useState("已自动保存");
@@ -536,82 +201,36 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
   const [documentVersion, setDocumentVersion] = useState(file.documentVersion ?? 0);
   const documentVersionRef = useRef(file.documentVersion ?? 0);
   const [mobileRail, setMobileRail] = useState(null);
-  const [pages, setPages] = useState(() => paginateLessonPlan(initialPlan));
-  const [agentPresentation, setAgentPresentation] = useState(null);
+  const [presentationMaterial, setPresentationMaterial] = useState({
+    presentation: null,
+    state: "idle",
+    error: "",
+    confirmingDelete: false,
+  });
+  const [pages, setPages] = useState(() => paginateLessonPlan(initialPlan, {}, presentationMaterial));
+  const pageLayoutSignatureRef = useRef(pageLayoutSignature(pages));
+  const [pageLayoutRevision, setPageLayoutRevision] = useState(0);
+  const hasSpatialOrigin = Boolean(
+    originRect?.width
+    && originRect?.height
+    && !window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+  const [entryPending, setEntryPending] = useState(hasSpatialOrigin);
   onSaveRef.current = onSave;
   onAgentVersionCommittedRef.current = onAgentVersionCommitted;
   planRef.current = plan;
   documentVersionRef.current = documentVersion;
 
-  const approvalPreview = useMemo(() => {
-    const approval = agentPresentation?.approval;
-    if (
-      !approval
-      || !["pending", "responding"].includes(approval.state)
-      || !Array.isArray(approval.patch?.operations)
-    ) return null;
-    try {
-      return applyClientDocumentPatch(plan, approval.patch);
-    } catch {
-      return null;
-    }
-  }, [agentPresentation?.approval, plan]);
-  const renderedPlan = approvalPreview ?? plan;
-  const renderedPages = useMemo(() => (
-    approvalPreview ? paginateLessonPlan(approvalPreview) : pages
-  ), [approvalPreview, pages]);
-  const proposedFields = useMemo(() => new Set(
-    agentPresentation?.approval?.patch?.operations?.map((operation) => operation.field) ?? [],
-  ), [agentPresentation?.approval]);
-  const agentDockMode = approvalPreview
-    ? "approval"
-    : agentPresentation?.status === "streaming" && !agentPresentation.approval
-      ? "streaming"
-      : null;
-  const agentDockLabel = agentDockMode === "approval"
-    ? "预览中 · 未写入"
-    : agentPresentation?.activities?.find((activity) => activity.state === "running")?.label
-      ?? "正在形成修改";
+  const handleTiptapEditorReady = useCallback((bridge) => {
+    tiptapBridgeRef.current = bridge;
+    if (!bridge) return;
+    setEditorReadyRevision((version) => version + 1);
+  }, []);
 
-  useGSAP(() => {
-    const dock = agentDockRef.current;
-    if (!dock || !agentDockMode) {
-      agentDockWidthRef.current = 0;
-      return undefined;
-    }
-    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    gsap.set(dock, { clearProps: "width" });
-    const nextWidth = dock.getBoundingClientRect().width;
-    const previousWidth = agentDockWidthRef.current;
-    agentDockWidthRef.current = nextWidth;
-    if (!previousWidth || reduceMotion) {
-      gsap.fromTo(dock, {
-        autoAlpha: previousWidth ? 1 : 0,
-        y: previousWidth ? 0 : 10,
-      }, {
-        autoAlpha: 1,
-        y: 0,
-        duration: reduceMotion ? 0 : 0.28,
-        ease: "power2.out",
-        overwrite: "auto",
-      });
-      return undefined;
-    }
-    const tween = gsap.fromTo(dock, {
-      width: previousWidth,
-      overflow: "hidden",
-    }, {
-      width: nextWidth,
-      duration: 0.32,
-      ease: "power2.inOut",
-      overwrite: "auto",
-      onComplete: () => {
-        gsap.set(dock, { clearProps: "width,overflow" });
-        agentDockWidthRef.current = dock.getBoundingClientRect().width;
-      },
-    });
-    return () => tween.kill();
-  }, { dependencies: [agentDockMode, agentDockLabel], scope: documentPaneRef });
+  const setDocumentPagesRef = useCallback((element) => {
+    documentPagesRef.current = element;
+    firstSheetRef.current = element?.querySelector(".lesson-sheet-frame") ?? null;
+  }, []);
 
   useLayoutEffect(() => {
     rootRef.current?.focus({ preventScroll: true });
@@ -679,14 +298,13 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     const measurements = createDomMeasurements(measureRoot, currentPlan);
     if (!measurements) return;
 
-    const measuredPages = paginateLessonPlan(currentPlan, measurements);
-    setPages((currentPages) => (
-      pageLayoutSignature(currentPages) === pageLayoutSignature(measuredPages)
-        ? currentPages
-        : measuredPages
-    ));
-
-    setEditorSyncVersion((version) => version + 1);
+    const measuredPages = paginateLessonPlan(currentPlan, measurements, presentationMaterial);
+    const measuredSignature = pageLayoutSignature(measuredPages);
+    if (pageLayoutSignatureRef.current !== measuredSignature) {
+      pageLayoutSignatureRef.current = measuredSignature;
+      setPages(measuredPages);
+      setPageLayoutRevision((revision) => revision + 1);
+    }
 
     const agentCommit = pendingAgentCommitRef.current;
     if (agentCommit?.plan === currentPlan) {
@@ -712,10 +330,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
   };
 
   const flushDocumentBeforeAgentRun = useCallback(async () => {
-    const activeElement = document.activeElement;
-    if (activeElement?.classList.contains("lesson-editable")) {
-      activeElement.dispatchEvent(new CustomEvent("lessonup:flush-edit"));
-    }
+    tiptapBridgeRef.current?.flush();
     await new Promise((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)));
     measureAndPaginateRef.current();
     window.clearTimeout(saveTimerRef.current);
@@ -724,32 +339,122 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     return { documentVersion: documentVersionRef.current };
   }, []);
 
-  useLayoutEffect(() => {
-    measureAndPaginateRef.current();
-  }, [plan]);
+  const presentationErrorMessage = useCallback((error, action) => {
+    if (error?.message === "stale_document") return "教案刚刚变化，请基于最新内容重新生成。";
+    if (error?.message === "presentation_not_found") return "这份演示材料已经不存在，请刷新后重试。";
+    if (action === "load") return "暂时无法读取演示材料状态，请刷新后重试。";
+    return action === "delete" ? "未能删除演示材料，请重试。" : "未能生成演示材料，请重试。";
+  }, []);
 
-  useLayoutEffect(() => {
-    const pendingCaret = pendingCaretRef.current;
-    if (!pendingCaret || !rootRef.current) return;
-    const activeElement = document.activeElement;
-    if (activeElement && activeElement !== document.body && !activeElement.classList.contains("lesson-editable")) {
-      pendingCaretRef.current = null;
+  const presentationGenerationErrorMessage = useCallback((generation) => {
+    if (!generation || generation.status !== "failed") return "";
+    if (generation.errorCode === "stale_document") return "教案已变化，请基于最新内容重新生成。";
+    if (generation.errorCode === "presentation_compiling_failed") return "上次渲染未完成；请在对话中重新设计并确认。";
+    if (generation.errorCode === "presentation_rendering_failed") return "Dashi 渲染失败，请重试。";
+    if (generation.errorCode === "presentation_bundle_export_failed") return "演示已渲染，但导出交付文件时失败；请重试生成。";
+    if (generation.errorCode === "presentation_storage_upload_failed") return "演示已渲染，但保存到资料库时失败；请重试生成。";
+    if (generation.errorCode === "presentation_metadata_save_failed") return "演示文件已保存，但登记到教案时失败；请重试生成。";
+    if (generation.errorCode === "presentation_generation_interrupted") return "生成被服务重启中断，请重新生成。";
+    if (generation.errorCode === "presentation_cancelled") return "演示材料生成已取消。";
+    return "演示材料生成失败，请重试。";
+  }, []);
+
+  const loadPresentationMaterial = useCallback(async () => {
+    try {
+      const [presentations, generation] = await Promise.all([
+        agentApi.listClassroomPresentations(file.id),
+        agentApi.getClassroomPresentationGeneration(file.id),
+      ]);
+      setPresentationMaterial((current) => ({
+        ...current,
+        presentation: presentations[0] ?? null,
+        // The status belongs to the server-side generation, not this React
+        // instance. This also lets an Agent-initiated render update A4.
+        state: current.state === "deleting"
+          ? "deleting"
+          : generation?.status === "generating" ? "generating" : "idle",
+        error: current.state === "deleting" ? current.error : presentationGenerationErrorMessage(generation),
+        confirmingDelete: false,
+      }));
+    } catch (error) {
+      setPresentationMaterial((current) => ({
+        ...current,
+        error: presentationErrorMessage(error, "load"),
+      }));
+    }
+  }, [file.id, presentationErrorMessage, presentationGenerationErrorMessage]);
+
+  useEffect(() => {
+    void loadPresentationMaterial();
+  }, [loadPresentationMaterial]);
+
+  useEffect(() => {
+    const refresh = window.setInterval(() => { void loadPresentationMaterial(); }, 1_500);
+    return () => window.clearInterval(refresh);
+  }, [loadPresentationMaterial]);
+
+  const generatePresentationMaterial = useCallback(async () => {
+    setPresentationMaterial((current) => ({ ...current, error: "", confirmingDelete: false }));
+    try {
+      await flushDocumentBeforeAgentRun();
+      setMobileRail("assistant");
+      window.dispatchEvent(new CustomEvent("lessonup:request-dashi-presentation", {
+        detail: {
+          prompt: presentationMaterial.presentation
+            ? "请基于当前教案与课堂编导原则重新设计课堂演示，使用 Dashi 选择并校验真实版式，生成可直接渲染的完整逐页内容与版式供我确认；我确认后直接渲染，不再改写。"
+            : "请基于当前教案与课堂编导原则设计课堂演示，使用 Dashi 选择并校验真实版式，生成可直接渲染的完整逐页内容与版式供我确认；我确认后直接渲染，不再改写。",
+        },
+      }));
+    } catch (error) {
+      setPresentationMaterial((current) => ({
+        ...current,
+        state: "idle",
+        error: presentationErrorMessage(error, "generate"),
+      }));
+    }
+  }, [flushDocumentBeforeAgentRun, presentationErrorMessage, presentationMaterial.presentation]);
+
+  const previewPresentationMaterial = useCallback(async () => {
+    const presentation = presentationMaterial.presentation;
+    if (!presentation) return;
+    const windowRef = window.open("about:blank", "_blank");
+    if (!windowRef) {
+      setPresentationMaterial((current) => ({ ...current, error: "浏览器阻止了预览窗口，请允许后重试。" }));
       return;
     }
-    const editors = [...rootRef.current.querySelectorAll(
-      `.lesson-sheet .lesson-editable[data-field="${pendingCaret.field}"]`,
-    )];
-    const target = editors.find((editor) => {
-      const entryStart = Number(editor.dataset.start ?? 0);
-      const entryEnd = Number(editor.dataset.end ?? Number.POSITIVE_INFINITY);
-      return pendingCaret.offset >= entryStart && pendingCaret.offset <= entryEnd;
-    }) ?? editors.at(-1);
-    if (!target) return;
+    windowRef.opener = null;
+    try {
+      const access = await agentApi.createPresentationAccess(presentation.id);
+      windowRef.location.replace(access.url);
+    } catch (error) {
+      windowRef.close();
+      setPresentationMaterial((current) => ({ ...current, error: presentationErrorMessage(error, "preview") }));
+    }
+  }, [presentationErrorMessage, presentationMaterial.presentation]);
 
-    const entryStart = Number(target.dataset.start ?? 0);
-    restoreCaret(target, pendingCaret.offset - entryStart);
-    pendingCaretRef.current = null;
-  }, [editorSyncVersion, pages]);
+  const deletePresentationMaterial = useCallback(async () => {
+    const presentation = presentationMaterial.presentation;
+    if (!presentation) return;
+    if (!presentationMaterial.confirmingDelete) {
+      setPresentationMaterial((current) => ({ ...current, confirmingDelete: true, error: "" }));
+      return;
+    }
+    setPresentationMaterial((current) => ({ ...current, state: "deleting", error: "" }));
+    try {
+      await agentApi.deleteClassroomPresentation(presentation.id);
+      setPresentationMaterial({ presentation: null, state: "idle", error: "", confirmingDelete: false });
+    } catch (error) {
+      setPresentationMaterial((current) => ({
+        ...current,
+        state: "idle",
+        error: presentationErrorMessage(error, "delete"),
+      }));
+    }
+  }, [presentationErrorMessage, presentationMaterial.confirmingDelete, presentationMaterial.presentation]);
+
+  useLayoutEffect(() => {
+    measureAndPaginateRef.current();
+  }, [plan, presentationMaterial]);
 
   useEffect(() => {
     let cancelled = false;
@@ -757,7 +462,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
       if (!cancelled) measureAndPaginateRef.current();
     });
     return () => { cancelled = true; };
-  }, []);
+  }, [editorReadyRevision]);
 
   useLayoutEffect(() => {
     const scrollRoot = scrollRef.current;
@@ -784,7 +489,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     observer.observe(scrollRoot);
     updateScale();
     return () => observer.disconnect();
-  }, []);
+  }, [editorReadyRevision]);
 
   useEffect(() => {
     const scrollRoot = scrollRef.current;
@@ -840,7 +545,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
       scrollRoot.removeEventListener("touchstart", interruptAnchorScroll);
       syncActiveSectionRef.current = () => {};
     };
-  }, [pages]);
+  }, [editorReadyRevision, pages]);
 
   useEffect(() => () => {
     window.clearTimeout(saveTimerRef.current);
@@ -883,6 +588,8 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     if (secondarySheets.length) gsap.set(secondarySheets, { autoAlpha: 0, y: 24 });
 
     if (!canMorph || reduceMotion) {
+      root.classList.remove("is-entering");
+      setEntryPending(false);
       gsap.set(root, { clearProps: "backgroundColor" });
       if (pageContent.length) gsap.set(pageContent, { autoAlpha: 1 });
       if (secondarySheets.length) gsap.set(secondarySheets, { autoAlpha: 1, clearProps: "transform" });
@@ -908,10 +615,18 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
       borderRadius: 3,
       willChange: "transform, box-shadow",
     });
+    // useGSAP runs in the layout phase. Revealing here exposes the already
+    // transformed start pose in the first paint, never the full workspace.
+    root.classList.remove("is-entering");
+    setEntryPending(false);
 
     const timeline = gsap.timeline({
       defaults: { ease: "power2.inOut" },
-      onComplete: () => { openingTimelineRef.current = null; },
+      onComplete: () => {
+        root.classList.remove("is-entering");
+        setEntryPending(false);
+        openingTimelineRef.current = null;
+      },
     });
     openingTimelineRef.current = timeline;
     timeline
@@ -986,7 +701,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     });
   };
 
-  const persistPlan = (nextPlan, pendingCaret = null, transaction = null) => {
+  const persistPlan = (nextPlan, transaction = null) => {
     const nextHistory = recordLessonChange(
       historyRef.current,
       nextPlan,
@@ -997,31 +712,20 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     planRef.current = nextPlan;
     dirtyPlanRef.current = nextPlan;
     pendingSaveSourceRef.current = transaction?.kind === "agent" ? "agent-local" : "manual";
-    pendingCaretRef.current = pendingCaret;
     setSaveStatus("正在保存…");
     setPlan(nextPlan);
+    if (transaction?.origin !== "tiptap") {
+      setEditorExternalRevision((version) => version + 1);
+    }
   };
 
-  const commitField = (field, value, _caretOffset, _previousValue, transaction) => {
+  const commitEditorFragment = (edit, transaction) => {
     const currentPlan = planRef.current;
-    if (String(currentPlan[field] ?? "") === value) return;
+    const nextPlan = applyLessonFieldEdit(currentPlan, edit);
+    if (nextPlan === currentPlan) return;
     persistPlan(
-      { ...currentPlan, [field]: value },
-      null,
-      transaction ?? { field, kind: "typing" },
-    );
-  };
-
-  const commitSegment = (entry, value, caretOffset, previousValue, transaction) => {
-    const currentPlan = planRef.current;
-    const source = String(currentPlan[entry.field] ?? "");
-    const replacedEnd = entry.start + previousValue.length;
-    const nextValue = `${source.slice(0, entry.start)}${value}${source.slice(replacedEnd)}`;
-    if (source === nextValue) return;
-    persistPlan(
-      { ...currentPlan, [entry.field]: nextValue },
-      { field: entry.field, offset: entry.start + caretOffset },
-      transaction ?? { field: entry.field, kind: "typing" },
+      nextPlan,
+      transaction ?? { field: edit.field, kind: "typing", origin: "tiptap" },
     );
   };
 
@@ -1032,15 +736,14 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
       : redoLessonChange(currentHistory);
     if (nextHistory === currentHistory) return;
 
-    const activeCaret = captureActiveCaret(rootRef.current);
     historyRef.current = nextHistory;
     updateHistoryAvailability(nextHistory);
     planRef.current = nextHistory.present;
     dirtyPlanRef.current = nextHistory.present;
     pendingSaveSourceRef.current = "undo";
-    pendingCaretRef.current = activeCaret;
     setSaveStatus("正在保存…");
     setPlan(nextHistory.present);
+    setEditorExternalRevision((version) => version + 1);
   };
 
   undoActionRef.current = () => applyHistory("undo");
@@ -1056,7 +759,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
       const activeElement = document.activeElement;
       const isOtherEditable = activeElement?.matches("input, textarea, [contenteditable='true']")
-        && !activeElement.classList.contains("lesson-editable");
+        && !activeElement.classList.contains("ProseMirror");
       if (isOtherEditable) return;
       const key = event.key.toLowerCase();
       const wantsUndo = key === "z" && !event.shiftKey;
@@ -1064,7 +767,6 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
       if (!wantsUndo && !wantsRedo) return;
 
       event.preventDefault();
-      activeElement?.dispatchEvent(new CustomEvent("lessonup:flush-edit"));
       if (wantsUndo) undoActionRef.current();
       else redoActionRef.current();
     };
@@ -1102,16 +804,6 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     });
   });
 
-  const captureSelection = () => {
-    const selection = window.getSelection();
-    const anchorNode = selection?.anchorNode;
-    if (!anchorNode || !scrollRef.current?.contains(anchorNode)) return;
-    const section = anchorNode.parentElement?.closest("[data-lesson-section]");
-    if (section) setActiveSection(section.dataset.lessonSection);
-    const context = captureLessonSelection(scrollRef.current);
-    if (context) setSelectionContext(context);
-  };
-
   const applyCanonicalAgentDocument = useCallback((canonicalFile) => {
     if (canonicalFile.id !== file.id) return;
     if (canonicalFile.documentVersion < documentVersionRef.current) return;
@@ -1127,7 +819,6 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     };
     persistPlan(
       canonicalFile.document,
-      null,
       { field: "document", kind: "agent" },
     );
   }, [file.id]);
@@ -1142,7 +833,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
 
     const finishClose = () => {
       const root = rootRef.current;
-      const firstSheet = firstSheetRef.current;
+      const firstSheet = root?.querySelector(".lesson-sheet-frame") ?? firstSheetRef.current;
       if (!root || !firstSheet) {
         onClose();
         return;
@@ -1233,12 +924,12 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
 
   return (
     <section
-      className="lesson-file-workspace"
+      className={`lesson-file-workspace${entryPending ? " is-entering" : ""}`}
       ref={rootRef}
       aria-label={`${file.title}备课文件`}
       tabIndex={-1}
     >
-      <PaginationMeasure plan={plan} measureRef={measureRef} />
+      <PaginationMeasure plan={plan} presentationMaterial={presentationMaterial} measureRef={measureRef} />
       <div className="lesson-mobile-switcher" aria-label="详情页工具">
         <Button
           variant="outline"
@@ -1343,125 +1034,33 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
         </nav>
       </aside>
 
-      <div className="lesson-document-pane" ref={documentPaneRef}>
+      <div className="lesson-document-pane">
         <main
-          className={`lesson-document-scroll ${approvalPreview ? "is-agent-preview" : ""}`}
+          className="lesson-document-scroll"
           ref={scrollRef}
           aria-label="A4教案编辑区"
-          onPointerUp={captureSelection}
-          onKeyUp={captureSelection}
         >
           <p className="lesson-mobile-document-hint">上下滚动查看完整教案</p>
-          <div className="lesson-document-pages" ref={documentPagesRef}>
-            {renderedPages.map((pageEntries, pageIndex) => (
-              <div
-                className="lesson-sheet-frame"
-                ref={pageIndex === 0 ? firstSheetRef : undefined}
-                key={`page-${pageIndex}`}
-              >
-                <article className="lesson-sheet" data-page-index={pageIndex}>
-                  <div className="lesson-sheet-content">
-                    <table className="lesson-plan-table">
-                      <LessonTableColumns />
-                      <tbody>
-                        {pageEntries.map((entry) => {
-                          if (entry.kind === "basics") {
-                            return (
-                              <BasicsRow
-                                plan={renderedPlan}
-                                onChange={commitField}
-                                onFocus={() => setActiveSection("basics")}
-                                syncVersion={editorSyncVersion}
-                                onHistoryAction={handleHistoryAction}
-                                proposedFields={proposedFields}
-                                key={entry.key}
-                              />
-                            );
-                          }
-
-                          if (entry.kind === "topic") {
-                            return (
-                              <tr className="lesson-row-topic" key={entry.key}>
-                                <th scope="row">课题</th>
-                                <td colSpan={5}>
-                                  <EditableCell
-                                    value={renderedPlan.topic}
-                                    onChange={(...change) => commitField("topic", ...change)}
-                                    onFocus={() => setActiveSection("basics")}
-                                    field="topic"
-                                    syncVersion={editorSyncVersion}
-                                    onHistoryAction={handleHistoryAction}
-                                    label="课题"
-                                    proposed={proposedFields.has("topic")}
-                                  />
-                                </td>
-                              </tr>
-                            );
-                          }
-
-                          return (
-                            <SectionRow
-                              entry={entry}
-                              onChange={commitSegment}
-                              onFocus={setActiveSection}
-                              syncVersion={editorSyncVersion}
-                              onHistoryAction={handleHistoryAction}
-                              proposed={proposedFields.has(entry.field)}
-                              key={entry.key}
-                            />
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                  <span className="lesson-page-number" aria-label={`第${pageIndex + 1}页，共${renderedPages.length}页`}>
-                    {pageIndex + 1} / {renderedPages.length}
-                  </span>
-                </article>
-              </div>
-            ))}
-          </div>
+          <LessonPlanTiptapEditor
+            plan={plan}
+            pages={pages}
+            readOnly={false}
+            externalRevision={editorExternalRevision}
+            layoutRevision={pageLayoutRevision}
+            displayRevision="canonical"
+            containerRef={setDocumentPagesRef}
+            onEditorReady={handleTiptapEditorReady}
+            onFieldChange={commitEditorFragment}
+            onFieldFocus={setActiveSection}
+            onSelectionChange={setSelectionContext}
+            presentationMaterial={{
+              ...presentationMaterial,
+              onGenerate: generatePresentationMaterial,
+              onPreview: previewPresentationMaterial,
+              onDelete: deletePresentationMaterial,
+            }}
+          />
         </main>
-        {agentDockMode ? (
-          <div className="lesson-document-agent-dock-slot">
-            <div
-              className={`lesson-document-agent-dock is-${agentDockMode}`}
-              ref={agentDockRef}
-              role="status"
-              aria-live="polite"
-            >
-              {agentDockMode === "streaming" ? (
-                <>
-                  <Sparkles aria-hidden="true" />
-                  <strong>{agentDockLabel}</strong>
-                </>
-              ) : (
-                <>
-                  <strong>{agentDockLabel}</strong>
-                  <div className="lesson-document-agent-dock-actions">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      disabled={agentPresentation.approval.state === "responding"}
-                      onClick={agentPresentation.reject}
-                    >
-                      保留原文
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      disabled={agentPresentation.approval.state === "responding"}
-                      onClick={agentPresentation.approve}
-                    >
-                      {agentPresentation.approval.state === "responding" ? "应用中…" : "接受"}
-                    </Button>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-        ) : null}
       </div>
 
       <aside id="lesson-assistant-panel" className={`lesson-side-rail lesson-assistant-rail ${mobileRail === "assistant" ? "is-mobile-open" : ""}`}>
@@ -1478,10 +1077,10 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
             onNavigateToSection={scrollToSection}
             initialPrompt={initialAgentPrompt}
             onInitialPromptConsumed={onInitialAgentPromptConsumed}
-            onAgentPresentationChange={setAgentPresentation}
           />
         </Suspense>
       </aside>
+
     </section>
   );
 }

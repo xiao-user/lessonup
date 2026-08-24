@@ -5,6 +5,13 @@ describe("shouldPersistRunEvent", () => {
   it("keeps recoverable activity but not transient stream deltas", () => {
     expect(shouldPersistRunEvent({ type: "message.delta", runId: "run", delta: "字" })).toBe(false);
     expect(shouldPersistRunEvent({
+      type: "tool.updated",
+      runId: "run",
+      toolCallId: "tool",
+      name: "read_document",
+      label: "读取教案",
+    })).toBe(true);
+    expect(shouldPersistRunEvent({
       type: "tool.started",
       runId: "run",
       toolCallId: "tool",

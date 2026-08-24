@@ -4,10 +4,12 @@ import { agentApi, consumeAgentStream } from "@/lib/agent-api";
 import {
   activitiesFromEvents,
   activityStateForToolCompletion,
+  agentInputDisposition,
   canRetryApprovalDecision,
   deriveBranchRuntimeState,
   lastRetryableUserMessage,
   resetAgentConversationState,
+  queuedInputsFromEvents,
   resolveBranchSourceMessage,
   stopAgentRun,
   synchronizeCompletedAgentTurn,
@@ -46,10 +48,28 @@ function presentApproval(record) {
 
 function activeApprovalFrom(records) {
   return [...records].reverse().find((item) => (
-    item.state === "pending"
-    || item.state === "responding"
-    || item.state === "continuation"
+    (item.state === "pending"
+      || item.state === "responding"
+      || item.state === "continuation")
+    && !(item.state === "continuation"
+      && item.patch?.kind === "presentation_storyboard"
+      && !item.patch.goal)
   )) ?? null;
+}
+
+function updateActiveAssistantTurn(messages, runId, patch) {
+  const index = messages.findLastIndex((message) => (
+    message.role === "assistant"
+    && message.status === "streaming"
+    && (!message.turn?.runId || message.turn.runId === runId)
+  ));
+  if (index < 0) return messages;
+  const next = [...messages];
+  next[index] = {
+    ...next[index],
+    turn: { ...next[index].turn, runId, ...patch },
+  };
+  return next;
 }
 
 export function useAgentChat({
@@ -64,6 +84,7 @@ export function useAgentChat({
   onCanonicalDocument,
   onCanonicalFramework,
   onBeforeRun,
+  starterSuggestionsEnabled = true,
 }) {
   const resourceType = semesterFrameworkId ? "semester_framework" : "lesson_file";
   const resourceId = semesterFrameworkId ?? lessonFileId;
@@ -82,6 +103,8 @@ export function useAgentChat({
   const [activeBranchId, setActiveBranchId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [activities, setActivities] = useState([]);
+  const [queuedInputs, setQueuedInputs] = useState([]);
+  const [queueDelivery, setQueueDelivery] = useState("steer");
   const [sources, setSources] = useState([]);
   const [approvals, setApprovals] = useState([]);
   const [status, setStatus] = useState("loading");
@@ -103,6 +126,7 @@ export function useAgentChat({
   const runScopesRef = useRef(new Map());
   const streamControllersRef = useRef(new Map());
   const starterRequestsRef = useRef(new Set());
+  const starterSuggestionsEnabledRef = useRef(starterSuggestionsEnabled);
   const uploadsRef = useRef([]);
   const threadCreationRef = useRef(null);
   // Keep canonical callbacks in refs so an unstable parent identity (e.g. inline
@@ -111,7 +135,9 @@ export function useAgentChat({
   const onCanonicalDocumentRef = useRef(onCanonicalDocument);
   const onCanonicalFrameworkRef = useRef(onCanonicalFramework);
   const approval = activeApprovalFrom(approvals);
+  const pendingInteraction = branches.find((branch) => branch.id === activeBranchId)?.pendingInteraction ?? null;
   resourceVersionRef.current = resourceVersion;
+  starterSuggestionsEnabledRef.current = starterSuggestionsEnabled;
   statusRef.current = status;
   onCanonicalDocumentRef.current = onCanonicalDocument;
   onCanonicalFrameworkRef.current = onCanonicalFramework;
@@ -198,6 +224,10 @@ export function useAgentChat({
         presentation.events ?? [],
         presentation.run?.status,
       ));
+      setQueuedInputs(queuedInputsFromEvents(
+        presentation.events ?? [],
+        presentation.run?.status,
+      ));
     }
     setSources(latestAssistantSources(records));
     const presentedApprovals = approvalRecords.map(presentApproval);
@@ -223,6 +253,7 @@ export function useAgentChat({
   const ensureThreadStarters = useCallback(async (thread, hasMessages, { force = false } = {}) => {
     if (
       !thread
+      || (!force && !starterSuggestionsEnabledRef.current)
       || hasMessages
       || (!force && (
         thread.starterSuggestions?.length
@@ -292,6 +323,7 @@ export function useAgentChat({
     setStartersLoading(false);
     setStartersError(null);
     setActivities([]);
+    setQueuedInputs([]);
     setSources([]);
     setRunId(null);
     setError(null);
@@ -376,6 +408,7 @@ export function useAgentChat({
     window.localStorage.setItem(branchKey(result.thread.id), result.branch.id);
     setMessages([]);
     setActivities([]);
+    setQueuedInputs([]);
     setSources([]);
     setDraftState("");
     setUploadError(null);
@@ -448,9 +481,29 @@ export function useAgentChat({
       setRunId(event.runId);
       setStatus("streaming");
       setSources([]);
-      setMessages((current) => current.some((message) => message.status === "streaming")
-        ? current
-        : [...current, { id: `stream-${event.runId}`, role: "assistant", content: "", status: "streaming" }]);
+      setMessages((current) => {
+        const turn = {
+          runId: event.runId,
+          status: "running",
+          phase: "preparing",
+          startedAt: event.startedAt ?? new Date().toISOString(),
+        };
+        const index = current.findLastIndex((message) => (
+          message.role === "assistant" && message.status === "streaming"
+        ));
+        if (index < 0) {
+          return [...current, {
+            id: `stream-${event.runId}`,
+            role: "assistant",
+            content: "",
+            status: "streaming",
+            turn,
+          }];
+        }
+        const next = [...current];
+        next[index] = { ...next[index], turn };
+        return next;
+      });
     }
     if (event.type === "thread.updated") {
       setThreads((current) => current.map((thread) => (
@@ -466,6 +519,36 @@ export function useAgentChat({
       activeThreadRef.current,
       activeBranchRef.current,
     );
+    if (isActive && event.type === "agent.started") {
+      setMessages((current) => updateActiveAssistantTurn(current, event.runId, {
+        status: "running",
+        phase: "preparing",
+      }));
+    }
+    if (isActive && event.type === "turn.started") {
+      setMessages((current) => updateActiveAssistantTurn(current, event.runId, {
+        status: "running",
+        phase: "responding",
+        currentTurn: event.turn,
+      }));
+    }
+    if (isActive && event.type === "assistant.message.started") {
+      setMessages((current) => updateActiveAssistantTurn(current, event.runId, {
+        status: "running",
+        phase: "responding",
+        currentTurn: event.turn,
+      }));
+    }
+    if (isActive && event.type === "assistant.message.ended") {
+      setMessages((current) => updateActiveAssistantTurn(current, event.runId, {
+        currentTurn: event.turn,
+      }));
+    }
+    if (isActive && event.type === "turn.ended") {
+      setMessages((current) => updateActiveAssistantTurn(current, event.runId, {
+        currentTurn: event.turn,
+      }));
+    }
     if (event.type === "document.updated") {
       if (
         resourceType === "lesson_file"
@@ -490,21 +573,63 @@ export function useAgentChat({
       if (!isActive) return;
       setMessages((current) => {
         const index = current.findLastIndex((message) => message.role === "assistant" && message.status === "streaming");
-        if (index < 0) return [...current, { id: `stream-${event.runId}`, role: "assistant", content: event.delta, status: "streaming" }];
+        if (index < 0) return [...current, {
+          id: `stream-${event.runId}`,
+          role: "assistant",
+          content: event.delta,
+          status: "streaming",
+          turn: { runId: event.runId, status: "running", phase: "responding", startedAt: new Date().toISOString() },
+        }];
         const next = [...current];
         next[index] = { ...next[index], content: `${next[index].content}${event.delta}` };
         return next;
       });
     }
+    if (event.type === "agent.input.queued") {
+      if (!isActive) return;
+      setQueuedInputs((current) => [
+        ...current.filter((item) => item.id !== event.queueId),
+        {
+          id: event.queueId,
+          content: event.content,
+          delivery: event.delivery,
+          state: "queued",
+        },
+      ]);
+    }
+    if (event.type === "agent.input.cleared") {
+      if (!isActive) return;
+      setQueuedInputs((current) => current.filter((item) => (
+        event.delivery !== "all" && item.delivery !== event.delivery
+      )));
+    }
     if (event.type === "tool.started") {
       if (!isActive) return;
+      setMessages((current) => updateActiveAssistantTurn(current, event.runId, {
+        phase: "using_tools",
+        currentTurn: event.turn,
+      }));
       setActivities((current) => [...current, {
         id: event.toolCallId,
         name: event.name,
         label: event.label,
+        detail: event.detail,
         groupKey: event.groupKey,
         state: "running",
+        turn: event.turn,
       }]);
+    }
+    if (event.type === "tool.updated") {
+      if (!isActive) return;
+      setActivities((current) => current.map((activity) => activity.id === event.toolCallId
+        ? {
+            ...activity,
+            label: event.label ?? activity.label,
+            detail: event.detail ?? activity.detail,
+            progress: event.progress ?? activity.progress,
+            turn: event.turn ?? activity.turn,
+          }
+        : activity));
     }
     if (event.type === "tool.completed") {
       if (!isActive) return;
@@ -529,9 +654,11 @@ export function useAgentChat({
               approvalDecided,
             }),
             label: event.label,
+            detail: event.detail ?? activity.detail,
             groupKey: event.groupKey ?? activity.groupKey,
             outcome: event.outcome,
             revisionCode: event.revisionCode,
+            turn: event.turn ?? activity.turn,
           }
           : activity);
       });
@@ -554,6 +681,9 @@ export function useAgentChat({
           decision: null,
         },
       ]);
+      setActivities((current) => current.map((activity) => (
+        activity.state === "running" ? { ...activity, state: "completed", outcome: "completed" } : activity
+      )));
       setStatus("awaiting_approval");
     }
     if (event.type === "approval.decided" && isActive) {
@@ -566,19 +696,47 @@ export function useAgentChat({
     if (event.type === "message.completed") {
       if (!isActive) return;
       setMessages((current) => {
+        const streaming = current.findLast((message) => (
+          message.role === "assistant" && message.status === "streaming"
+        ));
+        const completed = {
+          ...event.message,
+          turn: event.message.turn ?? streaming?.turn,
+        };
         const withoutStream = current.filter((message) => message.status !== "streaming");
         return withoutStream.some((message) => message.id === event.message.id)
-          ? withoutStream.map((message) => message.id === event.message.id ? event.message : message)
-          : [...withoutStream, event.message];
+          ? withoutStream.map((message) => message.id === event.message.id ? completed : message)
+          : [...withoutStream, completed];
       });
     }
     if (event.type === "run.completed" || event.type === "run.cancelled") {
       if (scope) setThreads((current) => current.map((thread) => thread.id === scope.threadId ? { ...thread, status: "idle" } : thread));
       if (isActive) {
+        const completedAt = new Date().toISOString();
+        setMessages((current) => {
+          const index = current.findLastIndex((message) => (
+            message.role === "assistant"
+            && (message.turn?.runId === event.runId || !message.turn?.runId)
+          ));
+          if (index < 0) return current;
+          const next = [...current];
+          next[index] = {
+            ...next[index],
+            turn: {
+              ...next[index].turn,
+              runId: event.runId,
+              status: event.type === "run.completed" ? "completed" : "cancelled",
+              startedAt: next[index].turn?.startedAt ?? completedAt,
+              completedAt,
+            },
+          };
+          return next;
+        });
         if (event.type === "run.completed") {
           setActivities((current) => current.map((activity) => (
             activity.state === "running" ? { ...activity, state: "completed" } : activity
           )));
+          setQueuedInputs((current) => current.map((item) => ({ ...item, state: "completed" })));
           // The server settles the approval transaction before emitting the
           // terminal run event. Reflect that durable decision immediately;
           // waiting for the fetch body to close can otherwise leave a valid
@@ -590,9 +748,26 @@ export function useAgentChat({
               ? { ...item, state: item.decision }
               : item
           )));
+        } else {
+          setActivities((current) => current.map((activity) => (
+            activity.state === "running"
+              ? { ...activity, state: "cancelled", outcome: "cancelled" }
+              : activity
+          )));
+          setQueuedInputs((current) => current.map((item) => ({ ...item, state: "cancelled" })));
         }
         setStatus("ready");
         setRunId(null);
+      }
+      // Presentation theme selection is a durable branch interaction. Refresh
+      // it after the turn that creates or resolves it instead of guessing from
+      // the assistant's Markdown response.
+      if (scope?.threadId === activeThreadRef.current) {
+        void agentApi.listBranches(scope.threadId)
+          .then((records) => {
+            if (activeThreadRef.current === scope.threadId) setBranches(records);
+          })
+          .catch(() => undefined);
       }
       runScopesRef.current.delete(event.runId);
     }
@@ -602,21 +777,48 @@ export function useAgentChat({
         setActivities((current) => current.map((activity) => (
           activity.state === "running" ? { ...activity, state: "failed" } : activity
         )));
+        setQueuedInputs((current) => current.map((item) => ({ ...item, state: "failed" })));
         setMessages((current) => {
+          const failedAt = new Date().toISOString();
           if (event.message) {
             const withoutStream = current.filter((message) => message.status !== "streaming");
+            const streaming = current.findLast((message) => (
+              message.role === "assistant" && message.status === "streaming"
+            ));
+            const failedMessage = {
+              ...event.message,
+              turn: {
+                ...streaming?.turn,
+                ...event.message.turn,
+                runId: event.runId,
+                status: "failed",
+                startedAt: event.message.turn?.startedAt ?? streaming?.turn?.startedAt ?? failedAt,
+                completedAt: failedAt,
+              },
+            };
             return withoutStream.some((message) => message.id === event.message.id)
               ? withoutStream.map((message) => (
-                  message.id === event.message.id ? event.message : message
+                  message.id === event.message.id ? failedMessage : message
                 ))
-              : [...withoutStream, event.message];
+              : [...withoutStream, failedMessage];
           }
           const index = current.findLastIndex((message) => (
             message.role === "assistant" && message.status === "streaming"
           ));
           if (index < 0) return current;
           const next = [...current];
-          next[index] = { ...next[index], status: "failed", error: event.error };
+          next[index] = {
+            ...next[index],
+            status: "failed",
+            error: event.error,
+            turn: {
+              ...next[index].turn,
+              runId: event.runId,
+              status: "failed",
+              startedAt: next[index].turn?.startedAt ?? failedAt,
+              completedAt: failedAt,
+            },
+          };
           return next;
         });
         setError(event.error);
@@ -645,9 +847,20 @@ export function useAgentChat({
           presentation.events ?? [],
           presentation.run?.status,
         ));
+        setQueuedInputs(queuedInputsFromEvents(
+          presentation.events ?? [],
+          presentation.run?.status,
+        ));
         setSources(sourcesFromEvents(presentation.events ?? []));
         const runStatus = presentation.run.status;
         if (runStatus === "running" || runStatus === "queued") {
+          const records = await agentApi.listMessages(activeThreadId, activeBranchId);
+          if (cancelled) return;
+          setMessages(records);
+          setSources(dedupeAgentSources([
+            ...sourcesFromEvents(presentation.events ?? []),
+            ...latestAssistantSources(records),
+          ]));
           timer = window.setTimeout(poll, 1_000);
           return;
         }
@@ -680,8 +893,30 @@ export function useAgentChat({
     };
   }, [activeBranchId, activeThreadId, loadMessages, resourceScope, runId, status]);
 
-  const send = useCallback(async (message = draft) => {
-    const attachmentSnapshot = readyUploadSources(uploads);
+  const send = useCallback(async (message = draft, options = {}) => {
+    const pendingInteractionSnapshot = pendingInteraction;
+    if (agentInputDisposition(statusRef.current, pendingInteractionSnapshot) === "queue") {
+      const content = message.trim();
+      if (!content || !runId || uploads.length) return;
+      setDraft("");
+      setError(null);
+      try {
+        const queued = await agentApi.queueRunInput(runId, {
+          content,
+          delivery: queueDelivery,
+        });
+        setQueuedInputs((current) => [
+          ...current.filter((item) => item.id !== queued.queueId),
+          { id: queued.queueId, content: queued.content, delivery: queued.delivery, state: "queued" },
+        ]);
+      } catch (queueError) {
+        setDraft(content);
+        setError(queueError.message);
+      }
+      return;
+    }
+    const continuation = options.continuation === true;
+    const attachmentSnapshot = continuation ? [] : readyUploadSources(uploads);
     if (
       hasBlockingUploads(uploads)
       || (!message.trim() && !attachmentSnapshot.length)
@@ -697,6 +932,11 @@ export function useAgentChat({
       threadId: activeThreadId,
       branchId: activeBranchId,
     };
+    if (pendingInteractionSnapshot?.kind === "presentation_theme") {
+      setBranches((current) => current.map((branch) => (
+        branch.id === requestScope.branchId ? { ...branch, pendingInteraction: null } : branch
+      )));
+    }
     const requestSectionId = activeSectionId;
     const requestSelection = selection;
     const controller = new AbortController();
@@ -706,23 +946,25 @@ export function useAgentChat({
     replaceUploads([]);
     setError(null);
     setActivities([]);
+    setQueuedInputs([]);
     setSources([]);
     setRunId(null);
     setStatus("streaming");
     setMessages((current) => [
       ...current,
-      {
+      ...(continuation ? [] : [{
         id: optimisticUserId,
         role: "user",
         content: prompt,
         status: "completed",
         sources: attachmentSnapshot,
-      },
+      }]),
       {
         id: optimisticAssistantId,
         role: "assistant",
         content: "",
         status: "streaming",
+        turn: { status: "running", phase: "starting", startedAt: new Date().toISOString() },
       },
     ]);
     let requestResourceVersion;
@@ -736,8 +978,13 @@ export function useAgentChat({
       setMessages((current) => current.filter((item) => (
         item.id !== optimisticUserId && item.id !== optimisticAssistantId
       )));
-      setDraft(message);
+      if (!continuation) setDraft(message);
       replaceUploads(uploadDraftSnapshot);
+      if (pendingInteractionSnapshot?.kind === "presentation_theme") {
+        setBranches((current) => current.map((branch) => (
+          branch.id === requestScope.branchId ? { ...branch, pendingInteraction: pendingInteractionSnapshot } : branch
+        )));
+      }
       streamControllersRef.current.delete(requestScope.threadId);
       setError("document_save_failed");
       setStatus("error");
@@ -752,15 +999,12 @@ export function useAgentChat({
         documentVersion: requestResourceVersion,
         selection: resourceType === "lesson_file" ? requestSelection || undefined : undefined,
         attachmentIds: attachmentSnapshot.map((attachment) => attachment.id),
+        continuation,
       }, (event) => handleEvent(event, requestScope), { signal: controller.signal });
       const records = await synchronizeCompletedAgentTurn({
         threadId: requestScope.threadId,
         branchId: requestScope.branchId,
-        loadMessages: (threadId, branchId) => loadMessages(
-          threadId,
-          branchId,
-          { preservePresentation: true },
-        ),
+        loadMessages,
         listThreads: () => agentApi.listThreads(resourceScope),
       });
       setThreads(records);
@@ -794,8 +1038,23 @@ export function useAgentChat({
       if (streamControllersRef.current.get(requestScope.threadId) === controller) {
         streamControllersRef.current.delete(requestScope.threadId);
       }
+      try {
+        const branchRecords = await agentApi.listBranches(requestScope.threadId);
+        if (activeThreadRef.current === requestScope.threadId) setBranches(branchRecords);
+      } catch {
+        // The optimistic theme choice remains hidden; the next branch hydration
+        // reconciles the server-owned interaction without reviving stale UI.
+      }
     }
-  }, [activeBranchId, activeSectionId, activeThreadId, activeUnitId, draft, handleEvent, loadMessages, onBeforeRun, replaceUploads, resourceScope, resourceType, runtime?.agent, selection, setDraft, uploads]);
+  }, [activeBranchId, activeSectionId, activeThreadId, activeUnitId, draft, handleEvent, loadMessages, onBeforeRun, pendingInteraction, queueDelivery, replaceUploads, resourceScope, resourceType, runId, runtime?.agent, selection, setDraft, uploads]);
+
+  const clearQueuedInputs = useCallback(async (delivery = "all") => {
+    if (!runId) return;
+    await agentApi.clearRunInput(runId, delivery);
+    setQueuedInputs((current) => current.filter((item) => (
+      delivery !== "all" && item.delivery !== delivery
+    )));
+  }, [runId]);
 
   const stop = useCallback(async () => {
     const stoppedRunId = runId;
@@ -878,15 +1137,40 @@ export function useAgentChat({
         { idempotencyKey },
       );
       if (terminalError) throw new Error(terminalError);
-      setApprovals((current) => current.map((item) => (
-        item.id === approval.id
-          ? { ...item, state: approved ? "approved" : "rejected" }
-          : item
-      )));
+      if (requestScope.threadId && requestScope.branchId) {
+        const loaded = await loadMessages(requestScope.threadId, requestScope.branchId);
+        applyBranchPresentation(requestScope.threadId, requestScope.branchId, loaded);
+        const records = await agentApi.listThreads(resourceScope);
+        threadsRef.current = records;
+        setThreads(records);
+      }
     } catch (approvalError) {
       const effectiveError = terminalError ?? approvalError.message;
       const retryableDecision = canRetryApprovalDecision(effectiveError);
       const continuationReady = decisionCommitted && retryableDecision;
+      // The approval transaction is authoritative even when the following Pi
+      // continuation fails or its stream disconnects. Rehydrate the committed
+      // resource instead of relying on an earlier SSE event having reached the
+      // browser; this also makes an idempotent continuation retry UI-only.
+      if (decisionCommitted && approved) {
+        try {
+          if (resourceType === "semester_framework") {
+            const canonical = await agentApi.getSemesterFramework(resourceId);
+            const version = canonical?.framework?.version ?? canonical?.frameworkVersion;
+            if (version !== undefined) resourceVersionRef.current = version;
+            onCanonicalFrameworkRef.current?.(canonical);
+          } else {
+            const canonical = await agentApi.getLessonFile(resourceId);
+            if (canonical?.documentVersion !== undefined) {
+              resourceVersionRef.current = canonical.documentVersion;
+            }
+            onCanonicalDocumentRef.current?.(canonical);
+          }
+        } catch {
+          // The durable approval remains recoverable. Branch hydration below
+          // keeps the continuation card available until a later refresh.
+        }
+      }
       setError(continuationReady ? null : effectiveError);
       setStatus(continuationReady ? "awaiting_approval" : "error");
       setApprovals((current) => current.map((item) => {
@@ -901,7 +1185,7 @@ export function useAgentChat({
         };
       }));
     }
-  }, [approval, handleEvent, onBeforeRun, resourceType]);
+  }, [approval, applyBranchPresentation, handleEvent, loadMessages, onBeforeRun, resourceId, resourceScope, resourceType]);
 
   const switchBranch = useCallback(async (branchId) => {
     if (!activeThreadId) return;
@@ -910,6 +1194,7 @@ export function useAgentChat({
     window.localStorage.setItem(branchKey(activeThreadId), branchId);
     setApprovals([]);
     setActivities([]);
+    setQueuedInputs([]);
     setSources([]);
     setRunId(null);
     setError(null);
@@ -940,10 +1225,9 @@ export function useAgentChat({
   const retry = useCallback(() => {
     const message = lastRetryableUserMessage(messages);
     if (!message) return;
-    setDraft(message.content);
     setError(null);
-    setStatus(runtimeRef.current?.agent ? "ready" : "unconfigured");
-  }, [messages, setDraft]);
+    void send(message.content, { continuation: true });
+  }, [messages, send]);
 
   const retryStarters = useCallback(() => {
     const thread = threadsRef.current.find((item) => item.id === activeThreadRef.current);
@@ -980,9 +1264,9 @@ export function useAgentChat({
 
   return {
     runtime, threads, activeThreadId, branches, activeBranchId, messages,
-    activities, sources, approvals, approval, status, error, uploadError, runId, draft, uploads,
+    activities, queuedInputs, queueDelivery, sources, approvals, approval, pendingInteraction, status, error, uploadError, runId, draft, uploads,
     startersLoading, startersError,
-    setDraft, send, retry, stop, respondApproval, selectThread, switchBranch, createThread, branchFromMessage,
+    setDraft, setQueueDelivery, send, retry, stop, clearQueuedInputs, respondApproval, selectThread, switchBranch, createThread, branchFromMessage,
     updateActiveThread, removeActiveThread, uploadKnowledge, dismissUpload, retryUpload, retryStarters,
   };
 }

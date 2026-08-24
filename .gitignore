@@ -1,4 +1,6 @@
 node_modules/
+server/agent/skills/dashi-ppt/project/node_modules/
+server/agent/skills/dashi-ppt/project/output/
 dist/
 .npm-cache/
 .playwright-cli/
@@ -10,3 +12,11 @@ supabase/.temp/
 .env
 .env.*
 !.env.example
+
+# Local curriculum-standard source/OCR artifacts stay outside Git and Supabase Storage.
+data/curriculum/standards/inbox/*.pdf
+data/curriculum/standards/manifest.local.json
+data/curriculum/standards/parsed/*
+!data/curriculum/standards/parsed/.gitkeep
+data/curriculum/standards/normalized/*
+!data/curriculum/standards/normalized/.gitkeep

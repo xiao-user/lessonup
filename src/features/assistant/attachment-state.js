@@ -14,8 +14,8 @@ export const canSendAgentMessage = ({ draft, uploads, agentAvailable, status }) 
   Boolean(agentAvailable)
   && status !== "loading"
   && status !== "awaiting_approval"
-  && status !== "streaming"
   && !hasBlockingUploads(uploads)
-  && (Boolean(draft.trim()) || uploads.some((upload) => upload.status === "ready"))
+  && (status === "streaming"
+    ? uploads.length === 0 && Boolean(draft.trim())
+    : Boolean(draft.trim()) || uploads.some((upload) => upload.status === "ready"))
 );
-

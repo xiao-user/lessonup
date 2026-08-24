@@ -1,5 +1,5 @@
 id: lesson-objective-review
 version: 1.1.0
 description: 审查并改写可观察、可评价的教学目标
-requiredTools: [read_section, propose_document_patch]
-requiredMcp: [knowledge]
+requiredTools: [read_section]
+requiredMcp: []

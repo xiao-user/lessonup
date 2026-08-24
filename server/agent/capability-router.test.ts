@@ -7,10 +7,50 @@ import {
   hasDeterministicRoutingSignal,
   isConversationalControlMessage,
   requiresDocumentWrite,
+  requestedDocumentFieldsFor,
   routeCapabilities,
 } from "./capability-router.js";
 
 describe("enforceRequiredCapabilities", () => {
+  it("keeps acknowledgements tool-free instead of inheriting the preceding task", () => {
+    for (const message of ["好", "好的", "没问题", "收到", "OK", "Thanks", "Thank you", "Got it"]) {
+      expect(deterministicCapabilityPlan(message), message).toMatchObject({
+        lightweightConversation: true,
+        presentationRequested: false,
+        skillIds: [],
+        toolGroups: [],
+      });
+    }
+  });
+
+  it("routes explicit classroom presentation intent to the approval-gated Dashi goal tool", () => {
+    expect(deterministicCapabilityPlan("基于当前教案生成一份上课用的交互 PPT")).toMatchObject({
+      presentationRequested: true,
+      skillIds: ["dashi-ppt"],
+      toolGroups: ["presentation-create"],
+      mcpServers: [],
+      specialistAgents: [],
+      writeMode: "consultative",
+      evidenceRequired: false,
+    });
+    expect(deterministicCapabilityPlan("请修改 A4 教案中的教学过程")).toMatchObject({
+      presentationRequested: false,
+    });
+    for (const message of [
+      "请基于当前教案设计课堂演示，先给我确认",
+      "直接渲染",
+      "把确认后的脚本交给 Dashi 渲染",
+      "直接调用 dashi skill 就行了",
+    ]) {
+      expect(deterministicCapabilityPlan(message), message).toMatchObject({
+        presentationRequested: true,
+        skillIds: ["dashi-ppt"],
+        toolGroups: ["presentation-create"],
+        evidenceRequired: false,
+      });
+    }
+  });
+
   it("keeps document writes available when the model router omits them", () => {
     const plan = enforceRequiredCapabilities("请替换教学目标第一条并提交修改建议", {
       skillIds: ["lesson-objective-review"],
@@ -75,6 +115,32 @@ describe("enforceRequiredCapabilities", () => {
     expect(requiresDocumentWrite("只对最关键一处问题提交最小修改建议，等待我确认后再写入")).toBe(true);
     expect(requiresDocumentWrite("先判断当前教案是否需要调整，不要写入")).toBe(false);
     expect(requiresDocumentWrite("重新编写教案")).toBe(true);
+    expect(requiresDocumentWrite("重新整理当前教案")).toBe(true);
+  });
+
+  it("separates broad read context from the teacher's narrow write targets", () => {
+    expect(requestedDocumentFieldsFor(
+      "请依据重点知识和教学过程，把教学目标写成一条可观察、可评价的目标，并提交修改建议",
+    )).toEqual(["objectives"]);
+    expect(requestedDocumentFieldsFor(
+      "请修改教学目标和评价练习，并等待我确认",
+    )).toEqual(["objectives", "assessment"]);
+    expect(deterministicCapabilityPlan(
+      "请把教学目标写成一条可观察、可评价的目标，并提交修改建议，等待我确认后再写入。",
+    )).toMatchObject({
+      writeMode: "explicit",
+      requestedDocumentFields: ["objectives"],
+    });
+  });
+
+  it("uses an explicit selection only for a deictic write request", () => {
+    expect(deterministicCapabilityPlan("请修改这一处，其他原文保持不变", {
+      activeSectionId: "process",
+      selectionField: "objectives",
+    })).toMatchObject({ requestedDocumentFields: ["objectives"] });
+    expect(deterministicCapabilityPlan("请重新编写教案", {
+      activeSectionId: "objectives",
+    }).requestedDocumentFields).toBeUndefined();
   });
 
   it("separates consultation from explicit approval intent", () => {
@@ -93,6 +159,9 @@ describe("enforceRequiredCapabilities", () => {
       designBasisWriteRequested: false,
       fullRewriteRequested: true,
       minimalWriteRequested: false,
+      mcpServers: ["knowledge"],
+      evidenceRequired: true,
+      requiredEvidenceKinds: ["curriculum_standard_search"],
     });
     expect(deterministicCapabilityPlan("把这个学生困难保存为教案设计依据")).toMatchObject({
       writeMode: "explicit",
@@ -112,6 +181,18 @@ describe("enforceRequiredCapabilities", () => {
     });
     expect(deterministicCapabilityPlan("请新增一条设计依据并保存")).toMatchObject({
       designBasisWriteRequested: true,
+    });
+  });
+
+  it("treats reorganizing the current lesson as a complete evidence-bound rewrite", () => {
+    expect(deterministicCapabilityPlan("重新整理当前教案")).toMatchObject({
+      writeMode: "explicit",
+      fullRewriteRequested: true,
+      skillIds: ["lesson-full-authoring"],
+      requestedDocumentFields: undefined,
+      mcpServers: ["knowledge"],
+      evidenceRequired: true,
+      requiredEvidenceKinds: ["curriculum_standard_search"],
     });
   });
 
@@ -204,6 +285,31 @@ describe("enforceRequiredCapabilities", () => {
       mcpServers: [],
       evidenceRequired: false,
     });
+    expect(deterministicCapabilityPlan(
+      "请结合重点知识、教学过程和评价练习，把教学目标改成一条可观察、可评价的目标，并提交修改建议",
+      {
+        document: {
+          unit: "第一单元",
+          period: "第1课时",
+          totalPeriods: "2",
+          topic: "春",
+          objectives: "理解朱自清笔下的春天",
+          knowledgePoints: "景物描写",
+          continuity: "",
+          focus: "",
+          preparation: "",
+          process: "圈画文本",
+          assessment: "概括春景",
+          homework: "",
+          board: "",
+          reflection: "",
+        },
+      },
+    )).toMatchObject({
+      mcpServers: [],
+      evidenceRequired: false,
+      requestedDocumentFields: ["objectives"],
+    });
   });
 
   it("honors an explicit request not to maintain structured design basis during a rewrite", () => {
@@ -214,9 +320,35 @@ describe("enforceRequiredCapabilities", () => {
       fullRewriteRequested: true,
       designBasisRequested: false,
       designBasisWriteRequested: false,
-      mcpServers: [],
-      evidenceRequired: false,
+      mcpServers: ["knowledge"],
+      evidenceRequired: true,
+      requiredEvidenceKinds: ["curriculum_standard_search"],
       specialistAgents: [],
+    });
+  });
+
+  it("requires a scoped curriculum-standard read for explicit standard work", () => {
+    expect(deterministicCapabilityPlan(
+      "请依据课程标准调整教学目标并提交修改",
+    )).toMatchObject({
+      mcpServers: ["knowledge"],
+      evidenceRequired: true,
+      requiredEvidenceKinds: ["curriculum_standard_search"],
+    });
+    expect(deterministicCapabilityPlan(
+      "本课与课程标准中的哪些内容要求相关？不要修改教案。",
+    )).toMatchObject({
+      writeMode: "consultative",
+      mcpServers: ["knowledge"],
+      evidenceRequired: true,
+      requiredEvidenceKinds: ["curriculum_standard_search"],
+    });
+    expect(deterministicCapabilityPlan(
+      "请继续依据刚才检索到的课程标准展开分析，只分析，不修改教案。",
+    )).toMatchObject({
+      evidenceRequired: true,
+      requiredEvidenceKinds: ["curriculum_standard_search"],
+      reuseRecentEvidence: true,
     });
   });
 
@@ -225,7 +357,7 @@ describe("enforceRequiredCapabilities", () => {
       skillIds: ["lesson-objective-review"],
       toolGroups: ["document-read", "document-write"],
       mcpServers: [],
-      specialistAgents: ["curriculum-analysis"],
+      specialistAgents: [],
     });
   });
 

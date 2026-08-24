@@ -2,19 +2,15 @@ export function resolveEvalGraderConfig(
   environment: Record<string, string | undefined>,
 ) {
   const apiKey = environment.LESSONUP_EVAL_GRADER_API_KEY
-    ?? environment.DEEPSEEK_API_KEY;
-  if (!apiKey) {
+    ?? environment.MODEL_API_KEY;
+  const baseURL = environment.LESSONUP_EVAL_GRADER_BASE_URL
+    ?? environment.MODEL_BASE_URL;
+  const model = environment.LESSONUP_EVAL_GRADER_MODEL
+    ?? environment.MODEL_ID;
+  if (!apiKey || !baseURL || !model) {
     throw new Error(
-      "missing_required_environment:DEEPSEEK_API_KEY_or_LESSONUP_EVAL_GRADER_API_KEY",
+      "missing_required_environment:eval_model_configuration",
     );
   }
-  return {
-    apiKey,
-    baseURL: environment.LESSONUP_EVAL_GRADER_BASE_URL
-      ?? environment.DEEPSEEK_BASE_URL
-      ?? "https://api.deepseek.com",
-    model: environment.LESSONUP_EVAL_GRADER_MODEL
-      ?? environment.DEEPSEEK_FLASH_MODEL
-      ?? "deepseek-v4-flash",
-  };
+  return { apiKey, baseURL, model };
 }

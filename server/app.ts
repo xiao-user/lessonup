@@ -1,11 +1,11 @@
-import { addTraceProcessor } from "@openai/agents";
 import { Hono } from "hono";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 import { requireUser, type AppBindings } from "./auth.js";
-import { config, hasDeepSeek, runtimeCapabilities } from "./config.js";
+import { config, hasModelProvider, runtimeCapabilities } from "./config.js";
 import {
   curriculumSemanticRelationSchema,
   createSemesterFrameworkSchema,
@@ -17,13 +17,12 @@ import {
   semesterFrameworkPatchSchema,
   updateLessonBlueprintSchema,
 } from "./domain.js";
-import { LessonAgentHarness } from "./agent/harness.js";
+import { PiLessonAgentCoordinator } from "./agent-runtime/pi/coordinator.js";
 import { publicAgentError } from "./agent/public-error.js";
 import { handleMcpRequest } from "./mcp/servers.js";
 import type { ImportedNotebook, LessonRepository } from "./repository.js";
 import { createRepository } from "./repositories/index.js";
 import { verifyMcpScopeToken } from "./security/mcp-token.js";
-import { LessonTracingProcessor } from "./tracing.js";
 import { TavilyWebSearchProvider } from "./providers/web-search.js";
 import { KnowledgeUploadService } from "./knowledge/uploads.js";
 import { publicApiError } from "./public-api-error.js";
@@ -35,8 +34,8 @@ import {
   buildContinuityWritebackSeed,
   needsContinuityWriteback,
 } from "./curriculum/continuity-adoption.js";
-
-let tracingConfigured = false;
+import { classFeedbackProvenance } from "./class-feedback-provenance.js";
+import { PresentationService } from "./presentations/service.js";
 
 const selectionSchema = z.object({
   field: z.enum(["unit", "period", "totalPeriods", "topic", "objectives", "knowledgePoints", "continuity", "focus", "preparation", "process", "assessment", "homework", "board", "reflection"]),
@@ -53,6 +52,7 @@ const runInputSchema = z.object({
   documentVersion: z.number().int().nonnegative(),
   selection: selectionSchema.optional(),
   attachmentIds: z.array(z.string().uuid()).max(8).default([]),
+  continuation: z.boolean().optional(),
 });
 
 const importedNotebookSchema = z.object({
@@ -69,29 +69,54 @@ const importedNotebookSchema = z.object({
 
 const notebookToneSchema = z.enum(["teal", "sage", "amber", "coral"]);
 
-type AgentHarnessRuntime = Pick<LessonAgentHarness, "start" | "cancel" | "resumeApproval">;
+type AgentCoordinatorRuntime = {
+  start: PiLessonAgentCoordinator["start"];
+  cancel: PiLessonAgentCoordinator["cancel"];
+  queueInput?: PiLessonAgentCoordinator["queueInput"];
+  clearQueuedInputs?: PiLessonAgentCoordinator["clearQueuedInputs"];
+  resumeApproval: (
+    args: Parameters<PiLessonAgentCoordinator["resumeApproval"]>[0],
+  ) => Promise<unknown>;
+};
 
 export function createApp(
   repository: LessonRepository = createRepository(),
   options: {
-    harness?: AgentHarnessRuntime | null;
+    agent?: AgentCoordinatorRuntime | null;
     threadStarterGenerator?: typeof generateThreadStarters | null;
+    presentations?: Pick<PresentationService, "getGeneration" | "list" | "listForOwner" | "get" | "createAccess" | "remove" | "previewUrlFor" | "syncNativeEdits">;
   } = {},
 ) {
   const app = new Hono<AppBindings>();
-  const harness = options.harness === undefined
-    ? hasDeepSeek ? new LessonAgentHarness(repository) : null
-    : options.harness;
+  const agent = options.agent === undefined
+    ? hasModelProvider ? new PiLessonAgentCoordinator(repository) : null
+    : options.agent;
   const webProvider = new TavilyWebSearchProvider();
   const knowledgeUploads = new KnowledgeUploadService(repository);
+  const presentations = options.presentations ?? new PresentationService(repository);
+  const presentationTicketKey = config.MCP_TOKEN_SECRET ?? config.AGENT_STATE_ENCRYPTION_KEY ?? crypto.randomUUID();
+  const previewTicket = (ownerId: string, presentationId: string) => {
+    const payload = Buffer.from(JSON.stringify({ ownerId, presentationId, expiresAt: Date.now() + 60 * 60 * 1_000 })).toString("base64url");
+    const signature = createHmac("sha256", presentationTicketKey).update(payload).digest("base64url");
+    return `${payload}.${signature}`;
+  };
+  const verifyPreviewTicket = (value: string | undefined, presentationId: string) => {
+    if (!value) return null;
+    const [payload, signature] = value.split(".");
+    if (!payload || !signature) return null;
+    const expected = createHmac("sha256", presentationTicketKey).update(payload).digest("base64url");
+    if (signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+    try {
+      const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { ownerId?: unknown; presentationId?: unknown; expiresAt?: unknown };
+      return parsed.presentationId === presentationId && typeof parsed.ownerId === "string"
+        && typeof parsed.expiresAt === "number" && parsed.expiresAt > Date.now()
+        ? parsed.ownerId
+        : null;
+    } catch { return null; }
+  };
   const threadStarterGenerator = options.threadStarterGenerator === undefined
-    ? config.NODE_ENV === "test" || !hasDeepSeek ? null : generateThreadStarters
+    ? config.NODE_ENV === "test" || !hasModelProvider ? null : generateThreadStarters
     : options.threadStarterGenerator;
-  if (!tracingConfigured) {
-    addTraceProcessor(new LessonTracingProcessor());
-    tracingConfigured = true;
-  }
-
   app.use("*", logger());
   app.use("*", cors({
     origin: config.APP_ORIGIN,
@@ -105,6 +130,50 @@ export function createApp(
     allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     exposeHeaders: ["mcp-session-id", "mcp-protocol-version"],
   }));
+
+  // Dashi must remain the server actually serving and editing index.html. This
+  // authenticated hand-off proxy keeps that native origin private while making
+  // the same editable deck reachable from another browser on the account.
+  app.all("/api/presentations/:presentationId/preview/*", async (c) => {
+    const presentationId = c.req.param("presentationId");
+    const cookieTicket = c.req.header("cookie")?.match(/(?:^|;\s*)lessonup_presentation_ticket=([^;]+)/)?.[1];
+    const ownerId = verifyPreviewTicket(c.req.query("token") ?? cookieTicket, presentationId);
+    if (!ownerId) return c.text("Presentation access expired", 401);
+    const record = await presentations.get(ownerId, presentationId);
+    if (!record) return c.text("Presentation not found", 404);
+    const nativeUrl = await presentations.previewUrlFor(record.presentation);
+    const pathname = new URL(c.req.url).pathname;
+    const prefix = `/api/presentations/${presentationId}/preview`;
+    const suffix = pathname.slice(prefix.length) || "/";
+    const target = new URL(`${suffix}${new URL(c.req.url).search}`, nativeUrl);
+    const headers = new Headers(c.req.raw.headers);
+    headers.delete("host");
+    const body = ["GET", "HEAD"].includes(c.req.method) ? undefined : await c.req.raw.arrayBuffer();
+    const response = await fetch(target, { method: c.req.method, headers, body });
+    if (c.req.method === "POST" && suffix === "/api/save-deck-state" && response.ok) {
+      await presentations.syncNativeEdits(ownerId, presentationId);
+    }
+    const responseHeaders = new Headers(response.headers);
+    // Node's fetch transparently decodes compressed upstream responses but
+    // retains Content-Encoding. Forwarding that stale header makes browsers
+    // decode the already-decoded Dashi CSS/JS a second time, producing
+    // ERR_CONTENT_DECODING_FAILED and a blank deck.
+    responseHeaders.delete("content-encoding");
+    responseHeaders.delete("content-length");
+    // The native Dashi template uses absolute /api/* paths for autosave and
+    // export. Scope its short-lived ticket to this one deck proxy, then rewrite
+    // only those endpoints while preserving Dashi's own implementation.
+    if (c.req.query("token")) {
+      responseHeaders.append("set-cookie", `lessonup_presentation_ticket=${encodeURIComponent(c.req.query("token")!)}; Max-Age=3600; Path=${prefix}/; HttpOnly; SameSite=Strict`);
+    }
+    if (responseHeaders.get("content-type")?.includes("text/html")) {
+      const html = (await response.text())
+        .replaceAll("'/api/", `'${prefix}/api/`)
+        .replaceAll('"/api/', `"${prefix}/api/`);
+      return new Response(html, { status: response.status, headers: responseHeaders });
+    }
+    return new Response(response.body, { status: response.status, headers: responseHeaders });
+  });
 
   app.get("/api/health", (c) => c.json({ ok: true }));
   app.get("/api/runtime", (c) => c.json(runtimeCapabilities));
@@ -122,7 +191,10 @@ export function createApp(
     }
   });
 
-  app.use("/api/*", requireUser);
+  app.use("/api/*", async (c, next) => {
+    if (/^\/api\/presentations\/[^/]+\/preview(?:\/|$)/.test(c.req.path)) return next();
+    return requireUser(c, next);
+  });
 
   app.post("/api/bootstrap/import", async (c) => {
     const input = z.object({ notebooks: z.array(importedNotebookSchema) }).parse(await c.req.json());
@@ -730,9 +802,17 @@ export function createApp(
         });
       }
     }).parse(await c.req.json());
+    const provenance = classFeedbackProvenance(input.kind);
     const record = await repository.createLessonClassFeedback(c.get("userId"), {
       lessonFileId,
       ...input,
+      // The browser may offer optional context, but provenance is canonicalized
+      // on the server so a client cannot represent its own note as platform fact.
+      evidence: {
+        ...(input.evidence ?? {}),
+        origin: "teacher_classroom_record",
+        informationLevel: provenance.level,
+      },
     });
     let writebackSeed: string | null = null;
     if (
@@ -795,6 +875,41 @@ export function createApp(
       documentVersion: input.documentVersion,
       pageCount: input.pageCount,
     }));
+  });
+
+  app.get("/api/lesson-files/:id/presentations/generation", async (c) => (
+    c.json(await presentations.getGeneration(c.get("userId"), c.req.param("id")))
+  ));
+
+  app.get("/api/lesson-files/:id/presentations", async (c) => (
+    c.json(await presentations.list(c.get("userId"), c.req.param("id")))
+  ));
+
+  app.get("/api/presentations", async (c) => (
+    c.json(await presentations.listForOwner(c.get("userId")))
+  ));
+
+  app.get("/api/presentations/:id", async (c) => {
+    const presentation = await presentations.get(c.get("userId"), c.req.param("id"));
+    return presentation
+      ? c.json(presentation)
+      : c.json({ error: "presentation_not_found" }, 404);
+  });
+
+  app.post("/api/presentations/:presentationId/access", async (c) => {
+    const presentationId = c.req.param("presentationId");
+    const access = await presentations.createAccess(c.get("userId"), presentationId);
+    return c.json({
+      ...access,
+      // Do not expose Dashi's loopback URL: browser requests pass through the
+      // signed proxy so native autosave can be durably synchronized.
+      url: `/api/presentations/${encodeURIComponent(presentationId)}/preview/?token=${encodeURIComponent(previewTicket(c.get("userId"), presentationId))}`,
+    });
+  });
+
+  app.delete("/api/presentations/:presentationId", async (c) => {
+    await presentations.remove(c.get("userId"), c.req.param("presentationId"));
+    return c.body(null, 204);
   });
 
   app.get("/api/agent/threads", async (c) => {
@@ -924,6 +1039,9 @@ export function createApp(
       assistantMessageId: approval.assistantMessageId,
       state: approval.state,
       continuationStatus: approval.continuationStatus,
+      continuationError: approval.continuationError
+        ? publicAgentError(approval.continuationError, "approval_resume_failed")
+        : undefined,
       continuationMessageId: approval.continuationMessageId,
       patch: approval.patch,
       expiresAt: approval.expiresAt,
@@ -964,18 +1082,18 @@ export function createApp(
   });
 
   app.post("/api/agent/threads/:id/runs", async (c) => {
-    if (!harness) return c.json({ error: "agent_not_configured" }, 503);
+    if (!agent) return c.json({ error: "agent_not_configured" }, 503);
     const input = runInputSchema.parse(await c.req.json());
     const userId = c.get("userId");
     return streamSSE(c, async (stream) => {
-      const emit = async (event: Parameters<Parameters<typeof harness.start>[1]>[0]) => {
+      const emit = async (event: Parameters<Parameters<typeof agent.start>[1]>[0]) => {
         if (event.runId !== "unknown" && shouldPersistRunEvent(event)) {
           await repository.appendRunEvent(userId, event.runId, event.type, event);
         }
         await stream.writeSSE({ event: event.type, data: JSON.stringify(event) }).catch(() => undefined);
       };
       try {
-        await harness.start({ userId, threadId: c.req.param("id"), ...input }, emit);
+        await agent.start({ userId, threadId: c.req.param("id"), ...input }, emit);
       } catch (error) {
         await emit({
           type: "run.failed", runId: "unknown",
@@ -986,26 +1104,63 @@ export function createApp(
   });
 
   app.post("/api/agent/runs/:id/cancel", async (c) => {
-    if (!harness) return c.json({ error: "agent_not_configured" }, 503);
-    return await harness.cancel(c.get("userId"), c.req.param("id"))
+    if (!agent) return c.json({ error: "agent_not_configured" }, 503);
+    return await agent.cancel(c.get("userId"), c.req.param("id"))
       ? c.json({ cancelled: true })
       : c.json({ error: "active_run_not_found" }, 404);
   });
 
+  app.post("/api/agent/runs/:id/input", async (c) => {
+    if (!agent?.queueInput) return c.json({ error: "agent_queue_not_configured" }, 503);
+    const input = z.object({
+      content: z.string().trim().min(1).max(8_000),
+      delivery: z.enum(["steer", "follow_up"]),
+    }).parse(await c.req.json());
+    try {
+      return c.json(await agent.queueInput({
+        userId: c.get("userId"),
+        runId: c.req.param("id"),
+        ...input,
+      }), 202);
+    } catch (error) {
+      const code = publicAgentError(error);
+      return c.json(
+        { error: code },
+        code === "active_run_not_found" || code === "run_not_accepting_input" ? 409 : 400,
+      );
+    }
+  });
+
+  app.delete("/api/agent/runs/:id/input", async (c) => {
+    if (!agent?.clearQueuedInputs) return c.json({ error: "agent_queue_not_configured" }, 503);
+    const delivery = z.enum(["steer", "follow_up", "all"])
+      .parse(c.req.query("delivery") ?? "all");
+    try {
+      await agent.clearQueuedInputs({
+        userId: c.get("userId"),
+        runId: c.req.param("id"),
+        delivery,
+      });
+      return c.json({ cleared: true, delivery });
+    } catch (error) {
+      return c.json({ error: publicAgentError(error) }, 409);
+    }
+  });
+
   app.post("/api/agent/runs/:runId/approvals/:approvalId", async (c) => {
-    if (!harness) return c.json({ error: "agent_not_configured" }, 503);
+    if (!agent) return c.json({ error: "agent_not_configured" }, 503);
     const input = z.object({ approved: z.boolean() }).parse(await c.req.json());
     const userId = c.get("userId");
     const idempotencyKey = c.req.header("idempotency-key") ?? crypto.randomUUID();
     return streamSSE(c, async (stream) => {
-      const emit = async (event: Parameters<Parameters<typeof harness.resumeApproval>[0]["emit"]>[0]) => {
+      const emit = async (event: Parameters<Parameters<typeof agent.resumeApproval>[0]["emit"]>[0]) => {
         if (shouldPersistRunEvent(event)) {
           await repository.appendRunEvent(userId, event.runId, event.type, event);
         }
         await stream.writeSSE({ event: event.type, data: JSON.stringify(event) }).catch(() => undefined);
       };
       try {
-        await harness.resumeApproval({
+        await agent.resumeApproval({
           userId,
           runId: c.req.param("runId"),
           approvalId: c.req.param("approvalId"),

@@ -105,8 +105,9 @@ export async function parseKnowledgeBytes(
 }
 
 const pause = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-const parseTimeoutMs = 45_000;
+const parseTimeoutMs = 90_000;
 const maxChunksPerSource = 2_000;
+const parserVersion = "officeparser-document-structure-v1";
 
 export async function withAbortTimeout<T>(
   operation: (signal: AbortSignal) => Promise<T>,
@@ -195,7 +196,7 @@ export class KnowledgeIndexWorker {
     if (parsed.chunks.length === 0) throw new Error("knowledge_source_empty");
     if (parsed.chunks.length > maxChunksPerSource) throw new Error("knowledge_source_too_many_chunks");
 
-    const indexVersion = `bge-m3:${config.BGE_M3_MODEL}:v1:source-${source.source_version}`;
+    const indexVersion = `bge-m3:${config.BGE_M3_MODEL}:v1:${parserVersion}:source-${source.source_version}`;
     for (let index = 0; index < parsed.chunks.length; index += 16) {
       await this.heartbeat(source.id);
       const batch = parsed.chunks.slice(index, index + 16);
@@ -230,6 +231,7 @@ export class KnowledgeIndexWorker {
       p_metadata: {
         ...(source.metadata ?? {}),
         chunkCount: parsed.chunks.length,
+        parserVersion,
         parserWarnings: parsed.warnings,
         indexedAt: new Date().toISOString(),
       },

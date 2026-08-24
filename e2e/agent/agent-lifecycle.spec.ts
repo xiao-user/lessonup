@@ -13,20 +13,15 @@ test("covers empty state, streaming, tools, sources, sessions, retry, cancel and
 
   await sendPrompt(page, "请进行普通工具调用");
   await expect(page.getByRole("button", { name: "停止生成" })).toBeVisible();
-  await expect(page.getByText("思考中…", { exact: true })).toBeVisible();
   await expect(page.getByText("读取教学目标", { exact: true })).toBeVisible();
-  await expect(page.getByLabel(/任务组：/)).toBeVisible();
+  await expect(page.getByRole("button", { name: /已处理 .*秒/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: "确定性回复" })).toBeVisible();
   await expect(page.getByRole("listitem").filter({ hasText: "已读取当前教案栏目。" })).toBeVisible();
   await expect(page.getByText("1 个来源", { exact: true })).toBeVisible();
   await expect(page.getByText("完成", { exact: true })).toBeVisible();
   await expect(page.getByText("工作范围", { exact: true })).toHaveCount(0);
-  await expect(page.locator(".craft-response-content")).toHaveCSS("max-height", "none");
-  await expect(page.locator(".craft-response-card")).toHaveCSS(
-    "box-shadow",
-    "rgba(0, 0, 0, 0.07) 0px 5px 16px -4px",
-  );
-  await expect(page.locator(".craft-response-card")).toHaveCSS("border-radius", "24px");
+  await expect(page.getByRole("article", { name: "备课助手回复" })).toHaveCSS("min-width", "0px");
+  await expect(page.getByRole("button", { name: "读取教学目标 完成" })).toHaveCount(1);
   await expect(page.locator(".lesson-assistant-rail")).toHaveCSS("padding-left", "0px");
   await expect(page.locator(".lesson-document-scroll")).toHaveCSS("scrollbar-color", "auto");
   await expect(page.locator(".lesson-document-scroll")).toHaveCSS("scrollbar-width", "auto");
@@ -67,22 +62,22 @@ test("covers empty state, streaming, tools, sources, sessions, retry, cancel and
   await page.getByRole("button", { name: "保存会话名称" }).click();
   await expect(page.locator(".lesson-agent-title")).toHaveText("教案结构检查");
 
-  await page.getByRole("button", { name: "从此消息创建分支" }).click();
+  await page.getByRole("button", { name: "从此创建分支" }).click();
   await expect(page.getByLabel("切换消息分支")).toBeVisible();
   await expect(page.getByLabel("切换消息分支")).toContainText("分支");
 
   await createThread(page);
   await sendPrompt(page, "请制造失败");
-  await expect(page.locator(".craft-turn-failed")).toContainText("备课助手本轮未能完成");
-  await expect(page.locator(".craft-response-content").last()).toContainText("已完成问题定位");
-  await expect(page.locator(".craft-turn-failed")).toContainText("未完成草稿保留");
+  const failedResponse = page.getByRole("article", { name: "备课助手回复" }).last();
+  await expect(failedResponse).toContainText("备课助手本轮未能完成");
+  await expect(failedResponse).toContainText("已完成问题定位");
+  await expect(failedResponse).toContainText("已生成的内容仍保留");
   await expect(page.locator(".lesson-agent-error")).toHaveCount(0);
   await page.reload();
   await openLessonFile(page);
-  await expect(page.locator(".craft-turn-failed")).toContainText("备课助手本轮未能完成");
-  await expect(page.locator(".craft-response-content").last()).toContainText("已完成问题定位");
-  await page.getByRole("button", { name: "编辑后重新发送" }).click();
-  await page.getByLabel("向备课助手提问").press("Enter");
+  await expect(page.getByRole("article", { name: "备课助手回复" }).last()).toContainText("备课助手本轮未能完成");
+  await expect(page.getByRole("article", { name: "备课助手回复" }).last()).toContainText("已完成问题定位");
+  await page.getByRole("button", { name: "重试" }).click();
   await expect(page.getByRole("heading", { name: "确定性回复" })).toBeVisible();
   await expect(page.getByRole("listitem").filter({ hasText: "已读取当前教案栏目。" })).toBeVisible();
   await expect(page.getByRole("alert")).toHaveCount(0);
@@ -103,10 +98,21 @@ test("covers empty state, streaming, tools, sources, sessions, retry, cancel and
   await expect(page.getByLabel("向备课助手提问")).toBeEnabled();
 });
 
+test("routes a theme Approval Card answer into the next Turn instead of the Pi queue", async ({ lessonPage: page }) => {
+  await sendPrompt(page, "请请求主题选择");
+  await expect(page.getByRole("region", { name: "选择一个视觉主题" })).toBeVisible();
+
+  await page.getByRole("button", { name: /theme02 · 炫光紫绿风/ }).click();
+
+  await expect(page.getByRole("region", { name: "选择一个视觉主题" })).toHaveCount(0);
+  await expect(page.getByText("已加入 Pi 队列", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("已接收主题 theme02，并进入下一步。", { exact: true })).toBeVisible();
+});
+
 test("reopens a thread on the branch that owns its pending approval", async ({ lessonPage: page }) => {
   await sendPrompt(page, "先生成一个可分支的回复");
   await expect(page.getByRole("heading", { name: "确定性回复" })).toBeVisible();
-  await page.getByRole("button", { name: "从此消息创建分支" }).click();
+  await page.getByRole("button", { name: "从此创建分支" }).click();
   await expect(page.getByLabel("切换消息分支")).toBeVisible();
 
   await sendPrompt(page, "请提交修改");
@@ -247,7 +253,7 @@ test("recovers an ordinary run whose server lease expired", async ({ lessonPage:
 
   await page.reload();
   await openLessonFile(page);
-  await expect(page.locator(".craft-turn-failed"))
+  await expect(page.getByRole("article", { name: "备课助手回复" }).last())
     .toContainText("服务中断后，本轮回复已安全终止");
   await expect(page.getByRole("button", { name: "停止生成" })).toHaveCount(0);
   await expect(page.getByLabel("向备课助手提问")).toBeEnabled();

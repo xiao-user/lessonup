@@ -11,6 +11,112 @@ const document = {
 };
 
 describe("LessonUp API scope", () => {
+  it("lists and opens approved Dashi-goal presentations without a direct generation API", async () => {
+    const repository = new MemoryLessonRepository();
+    const userA = "00000000-0000-4000-8000-00000000000a";
+    const userB = "00000000-0000-4000-8000-00000000000b";
+    const lessonFileId = "11111111-1111-4111-8111-111111111111";
+    const generated = {
+      id: "22222222-2222-4222-8222-222222222222",
+      title: "一次函数 · 课堂演示",
+      lessonFileId,
+      notebookId: "presentation-notebook",
+      sourceDocumentVersion: 0,
+      dashiGoal: { slides: Array.from({ length: 8 }) },
+    };
+    const presentations = {
+      getGeneration: async () => null,
+      list: async () => [generated],
+      get: async (ownerId: string) => ownerId === userA
+        ? { presentation: generated, source: { stale: false } }
+        : null,
+      createAccess: async (ownerId: string) => {
+        if (ownerId !== userA) throw new Error("presentation_not_found");
+        return { url: "data:text/html;base64,PGgxPkhlbGxvPC9oMT4=", expiresInSeconds: 300 };
+      },
+      remove: async (ownerId: string) => {
+        if (ownerId !== userA) throw new Error("presentation_not_found");
+      },
+    };
+    const app = createApp(repository, { agent: null, presentations: presentations as never });
+    await repository.importNotebookGraph(userA, [{
+      id: "presentation-notebook",
+      title: "课堂演示备课本",
+      className: "一班",
+      year: "2026",
+      subject: "数学",
+      files: [{ id: lessonFileId, title: "一次函数", type: "概念课", pages: 1, lessonPlan: document }],
+    }]);
+    const headers = {
+      "content-type": "application/json",
+      "x-lessonup-user": userA,
+      "idempotency-key": "presentation-api-create",
+    };
+    const removedDirectResponse = await app.request(`/api/lesson-files/${lessonFileId}/presentations`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ expectedDocumentVersion: 0 }),
+    });
+    expect(removedDirectResponse.status).toBe(404);
+
+    const removedStartResponse = await app.request(`/api/lesson-files/${lessonFileId}/presentations/generation`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ expectedDocumentVersion: 0 }),
+    });
+    expect(removedStartResponse.status).toBe(404);
+
+    const generationStatusResponse = await app.request(`/api/lesson-files/${lessonFileId}/presentations/generation`, {
+      headers: { "x-lessonup-user": userA },
+    });
+    expect(generationStatusResponse.status).toBe(200);
+
+    const listResponse = await app.request(`/api/lesson-files/${lessonFileId}/presentations`, {
+      headers: { "x-lessonup-user": userA },
+    });
+    expect(listResponse.status).toBe(200);
+    await expect(listResponse.json()).resolves.toEqual([
+      expect.objectContaining({ id: generated.id, lessonFileId }),
+    ]);
+
+    const aggregateResponse = await app.request(`/api/presentations/${generated.id}`, {
+      headers: { "x-lessonup-user": userA },
+    });
+    expect(aggregateResponse.status).toBe(200);
+    const aggregate = await aggregateResponse.json() as { source: { stale: boolean } };
+    expect(aggregate.source.stale).toBe(false);
+
+    const forbiddenPresentation = await app.request(`/api/presentations/${generated.id}`, {
+      headers: { "x-lessonup-user": userB },
+    });
+    expect(forbiddenPresentation.status).toBe(404);
+    const accessResponse = await app.request(`/api/presentations/${generated.id}/access`, {
+      method: "POST",
+      headers: { "x-lessonup-user": userB },
+    });
+    expect(accessResponse.status).toBe(404);
+
+    const ownerAccess = await app.request(`/api/presentations/${generated.id}/access`, {
+      method: "POST",
+      headers: { "x-lessonup-user": userA },
+    });
+    expect(ownerAccess.status).toBe(200);
+    await expect(ownerAccess.json()).resolves.toMatchObject({
+      url: expect.stringMatching(new RegExp(`^/api/presentations/${generated.id}/preview/\\?token=`)),
+    });
+
+    const deleteResponse = await app.request(`/api/presentations/${generated.id}`, {
+      method: "DELETE",
+      headers: { "x-lessonup-user": userA },
+    });
+    expect(deleteResponse.status).toBe(204);
+    const forbiddenDelete = await app.request(`/api/presentations/${generated.id}`, {
+      method: "DELETE",
+      headers: { "x-lessonup-user": userB },
+    });
+    expect(forbiddenDelete.status).toBe(404);
+  });
+
   it("imports data, creates a thread, and blocks another test user", async () => {
     const app = createApp(new MemoryLessonRepository());
     const userA = "00000000-0000-4000-8000-00000000000a";
@@ -50,7 +156,7 @@ describe("LessonUp API scope", () => {
   });
 
   it("serves published curriculum semantics and forward learning paths", async () => {
-    const app = createApp(new MemoryLessonRepository(), { harness: null });
+    const app = createApp(new MemoryLessonRepository(), { agent: null });
     const headers = { "x-lessonup-user": "00000000-0000-4000-8000-00000000000a" };
     const semanticResponse = await app.request(
       "/api/curriculum/textbooks/textbook-math-bnu/nodes/ch1-1/semantics",
@@ -75,7 +181,7 @@ describe("LessonUp API scope", () => {
   });
 
   it("serves chapter knowledge points, search, and continuity candidates", async () => {
-    const app = createApp(new MemoryLessonRepository(), { harness: null });
+    const app = createApp(new MemoryLessonRepository(), { agent: null });
     const headers = { "x-lessonup-user": "00000000-0000-4000-8000-00000000000a" };
     const nodeResponse = await app.request(
       "/api/curriculum/textbooks/textbook-math-bnu/nodes/ch1-1/knowledge-points",
@@ -120,7 +226,7 @@ describe("LessonUp API scope", () => {
   });
 
   it("reads the current curriculum release and its immutable outline", async () => {
-    const app = createApp(new MemoryLessonRepository(), { harness: null });
+    const app = createApp(new MemoryLessonRepository(), { agent: null });
     const headers = { "x-lessonup-user": "00000000-0000-4000-8000-00000000000a" };
     const releaseResponse = await app.request(
       "/api/curriculum/catalog/releases/current",
@@ -151,7 +257,7 @@ describe("LessonUp API scope", () => {
   it("creates an isolated semester framework pinned to the curriculum release", async () => {
     const repository = new MemoryLessonRepository();
     const app = createApp(repository, {
-      harness: null,
+      agent: null,
       threadStarterGenerator: async ({ framework }) => [
         `检查${framework?.units.length ?? 0}个单元的课时容量`,
         "梳理当前单元的复习与铺垫",
@@ -296,7 +402,7 @@ describe("LessonUp API scope", () => {
 
   it("persists manual unit planning and lesson blueprints through aggregate versions", async () => {
     const repository = new MemoryLessonRepository();
-    const app = createApp(repository, { harness: null });
+    const app = createApp(repository, { agent: null });
     const userId = "00000000-0000-4000-8000-00000000000a";
     await repository.importNotebookGraph(userId, [{
       id: "n-planning",
@@ -424,7 +530,7 @@ describe("LessonUp API scope", () => {
 
   it("refuses to stack another empty new thread on the current empty branch", async () => {
     const repository = new MemoryLessonRepository();
-    const app = createApp(repository, { harness: null, threadStarterGenerator: null });
+    const app = createApp(repository, { agent: null, threadStarterGenerator: null });
     const userId = "00000000-0000-4000-8000-00000000000a";
     await repository.importNotebookGraph(userId, [{
       id: "n1", title: "备课本", className: "一班", year: "2026", subject: "数学",
@@ -453,7 +559,7 @@ describe("LessonUp API scope", () => {
   it("generates starters asynchronously from the canonical document without adding conversation history", async () => {
     const repository = new MemoryLessonRepository();
     const app = createApp(repository, {
-      harness: null,
+      agent: null,
       threadStarterGenerator: async ({ file }) => [
         `检查${file?.document.topic}的目标一致性`,
         "优化课堂问题链",
@@ -527,7 +633,7 @@ describe("LessonUp API scope", () => {
       label: "读取整份教案",
       groupKey: "document-read",
     });
-    const app = createApp(repository, { harness: null });
+    const app = createApp(repository, { agent: null });
     const response = await app.request(
       `/api/agent/threads/${thread.id}/activity?branchId=${branch.id}`,
       { headers: { "x-lessonup-user": userId } },

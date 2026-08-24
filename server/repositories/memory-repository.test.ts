@@ -17,6 +17,40 @@ const importFor = (repository: MemoryLessonRepository, ownerId: string) => repos
 }]);
 
 describe("memory repository isolation", () => {
+  it("keeps separate run evidence for distinct chunks from one source", async () => {
+    const repository = new MemoryLessonRepository();
+    await repository.createRun({
+      id: "run-evidence-chunks",
+      ownerId: "user-a",
+      threadId: "thread-evidence-chunks",
+      branchId: "branch-evidence-chunks",
+      status: "running",
+    } as never);
+
+    await repository.recordRunEvidence("user-a", "run-evidence-chunks", "curriculum_standard_search", [
+      {
+        id: "standard-source",
+        title: "义务教育语文课程标准",
+        kind: "public",
+        chunkId: "standard:page-21",
+        page: 21,
+      },
+      {
+        id: "standard-source",
+        title: "义务教育语文课程标准",
+        kind: "public",
+        chunkId: "standard:page-33",
+        page: 33,
+      },
+    ]);
+
+    const evidence = await repository.listRunEvidence("user-a", "run-evidence-chunks");
+    expect(evidence.map((item) => item.source.chunkId)).toEqual([
+      "standard:page-21",
+      "standard:page-33",
+    ]);
+  });
+
   it("returns a bounded preview derived from canonical lesson content", async () => {
     const repository = new MemoryLessonRepository();
     await importFor(repository, "user-a");

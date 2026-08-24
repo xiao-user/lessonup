@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { FileText, LoaderCircle, Trash2, UserRound } from "lucide-react";
+import { FileText, LoaderCircle, Presentation, Trash2, UserRound } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -45,6 +45,7 @@ const formatBytes = (value) => {
 export function ProfileDialog({ notebooks, onClose }) {
   const [account, setAccount] = useState(null);
   const [files, setFiles] = useState([]);
+  const [presentations, setPresentations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
@@ -68,10 +69,13 @@ export function ProfileDialog({ notebooks, onClose }) {
     Promise.allSettled([
       supabase?.auth.getUser() ?? Promise.resolve({ data: { user: null } }),
       agentApi.listKnowledgeUploads({ includeAttached: true }),
-    ]).then(([accountResult, filesResult]) => {
+      agentApi.listMyClassroomPresentations(),
+    ]).then(([accountResult, filesResult, presentationsResult]) => {
       if (cancelled) return;
       if (accountResult.status === "fulfilled") setAccount(accountResult.value.data?.user ?? null);
       if (filesResult.status === "fulfilled") setFiles(filesResult.value);
+      else setLoadError(true);
+      if (presentationsResult.status === "fulfilled") setPresentations(presentationsResult.value);
       else setLoadError(true);
       setLoading(false);
     });
@@ -104,6 +108,21 @@ export function ProfileDialog({ notebooks, onClose }) {
     }
   };
 
+  const deletePresentation = async () => {
+    if (!deleteTarget || deletingId) return;
+    setDeletingId(deleteTarget.id);
+    try {
+      await agentApi.deleteClassroomPresentation(deleteTarget.id);
+      setPresentations((current) => current.filter((presentation) => presentation.id !== deleteTarget.id));
+      toast.success(`“${deleteTarget.title}”已删除`);
+      setDeleteTarget(null);
+    } catch {
+      toast.error("演示材料删除失败，请稍后重试");
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   return <>
     <Dialog open onOpenChange={(open) => { if (!open && !deletingId) onClose(); }}>
       <DialogContent className="profile-dialog">
@@ -122,10 +141,40 @@ export function ProfileDialog({ notebooks, onClose }) {
             <div><dt>备课本</dt><dd>{notebooks.length}</dd></div>
             <div><dt>备课文件</dt><dd>{lessonFileCount}</dd></div>
             <div><dt>上传资料</dt><dd>{files.length}</dd></div>
+            <div><dt>演示材料</dt><dd>{presentations.length}</dd></div>
           </dl>
           {account?.created_at && (
             <p className="profile-account-meta">加入时间　{formatDate(account.created_at)}</p>
           )}
+        </section>
+
+        <section className="profile-files" aria-labelledby="profile-presentations-title">
+          <div className="profile-files-heading">
+            <div>
+              <h3 id="profile-presentations-title">我的演示材料</h3>
+              <p>生成后的 HTML 与素材保存在私有 Storage；打开后仍使用 Dashi 原生编辑器。</p>
+            </div>
+            {!loading && <Badge variant="secondary">{presentations.length} 份演示</Badge>}
+          </div>
+          {presentations.length ? (
+            <ul className="profile-file-list">
+              {presentations.map((presentation) => (
+                <li className="profile-file-row" key={presentation.id}>
+                  <span className="profile-file-icon" aria-hidden="true"><Presentation /></span>
+                  <div className="profile-file-copy">
+                    <strong title={presentation.title}>{presentation.title}</strong>
+                    <span>{scopeNames.get(`file:${presentation.lessonFileId}`) ?? "已删除的备课文件"} · {formatBytes(presentation.byteSize)} · {formatDate(presentation.updatedAt)}</span>
+                  </div>
+                  <Badge variant="secondary">HTML</Badge>
+                  <Button variant="ghost" size="icon-sm" type="button" aria-label={`删除演示材料${presentation.title}`} onClick={() => setDeleteTarget({ ...presentation, kind: "presentation" })}>
+                    <Trash2 />
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          ) : !loading ? (
+            <Empty className="profile-files-state"><EmptyHeader><EmptyMedia variant="icon"><Presentation /></EmptyMedia><EmptyTitle>还没有课堂演示</EmptyTitle><EmptyDescription>在备课助手中确认生成的课堂演示会显示在这里。</EmptyDescription></EmptyHeader></Empty>
+          ) : null}
         </section>
 
         <Separator />
@@ -197,16 +246,18 @@ export function ProfileDialog({ notebooks, onClose }) {
     <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => { if (!open && !deletingId) setDeleteTarget(null); }}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>删除这个文件？</DialogTitle>
+          <DialogTitle>删除这个{deleteTarget?.kind === "presentation" ? "演示材料" : "文件"}？</DialogTitle>
           <DialogDescription>
-            “{deleteTarget?.title}”的原文件、数据库记录和检索内容都会被永久删除。
+            {deleteTarget?.kind === "presentation"
+              ? `“${deleteTarget?.title}”的 HTML、素材和数据库记录都会从私有 Storage 永久删除。`
+              : `“${deleteTarget?.title}”的原文件、数据库记录和检索内容都会被永久删除。`}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
           <Button variant="outline" type="button" disabled={Boolean(deletingId)} onClick={() => setDeleteTarget(null)}>
             取消
           </Button>
-          <Button variant="destructive" type="button" disabled={Boolean(deletingId)} onClick={deleteFile}>
+          <Button variant="destructive" type="button" disabled={Boolean(deletingId)} onClick={deleteTarget?.kind === "presentation" ? deletePresentation : deleteFile}>
             {deletingId ? "删除中…" : "确认删除"}
           </Button>
         </DialogFooter>

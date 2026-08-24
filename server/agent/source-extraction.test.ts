@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { extractSources } from "./source-extraction.js";
 
 describe("extractSources", () => {
-  it("reads the text content block returned by an Agents SDK MCP tool", () => {
+  it("reads the text content block returned by an MCP tool", () => {
     const output = {
       type: "text",
       text: JSON.stringify([{
@@ -19,6 +19,28 @@ describe("extractSources", () => {
       kind: "web",
       page: undefined,
       chunkId: undefined,
+    }]);
+  });
+
+  it("extracts sources nested in a curriculum-standard result envelope", () => {
+    expect(extractSources({
+      status: "available",
+      freshness: "reused",
+      results: [{
+        id: "standard-1",
+        chunkId: "standard-1",
+        title: "义务教育语文课程标准（2022年版）",
+        kind: "public",
+        page: 12,
+        passage: "正文不会作为来源元数据暴露。",
+        score: 0.98,
+      }],
+    })).toEqual([{
+      id: "standard-1",
+      chunkId: "standard-1",
+      title: "义务教育语文课程标准（2022年版）",
+      kind: "public",
+      page: 12,
     }]);
   });
 

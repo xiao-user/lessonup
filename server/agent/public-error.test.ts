@@ -39,6 +39,14 @@ describe("publicAgentError", () => {
       .toBe("agent_rate_limited");
     expect(publicAgentError(new Error("upstream timed out after 15000ms")))
       .toBe("agent_timeout");
+    expect(publicAgentError(new Error("request timed out"))).toBe("agent_timeout");
+  });
+
+  it("classifies provider connection failures before any model response", () => {
+    expect(publicAgentError(new Error("getaddrinfo ENOTFOUND model-gateway.example")))
+      .toBe("agent_provider_unavailable");
+    expect(publicAgentError(new Error("fetch failed: ECONNRESET")))
+      .toBe("agent_provider_unavailable");
   });
 
   it("preserves evidence-boundary errors without exposing source bodies", () => {

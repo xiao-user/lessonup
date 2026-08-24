@@ -7,7 +7,9 @@ export default defineConfig({
     env: {
       NODE_ENV: "test",
       LESSONUP_DEV_AUTH: "1",
-      DEEPSEEK_API_KEY: "",
+      MODEL_API_KEY: "",
+      MODEL_BASE_URL: "",
+      MODEL_ID: "",
       SUPABASE_URL: "",
       SUPABASE_ANON_KEY: "",
       SUPABASE_SERVICE_ROLE_KEY: "",

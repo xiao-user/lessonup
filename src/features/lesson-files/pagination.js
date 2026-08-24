@@ -44,6 +44,11 @@ const estimateTextHeight = (value) => (
 
 const findNaturalBreak = (text, start, rawEnd) => {
   if (rawEnd >= text.length) return text.length;
+  // Keep Markdown lines intact whenever possible. This prevents a heading,
+  // list marker or callout prefix from being separated from its content.
+  for (let index = rawEnd; index > start; index -= 1) {
+    if (text[index - 1] === "\n") return index;
+  }
   const lowerBound = start + Math.floor((rawEnd - start) * 0.72);
   const preferredBreak = /[\n。！？；，]/;
   for (let index = rawEnd; index > lowerBound; index -= 1) {
@@ -71,7 +76,7 @@ const takeTextForHeight = (text, start, availableHeight, measureText) => {
   return findNaturalBreak(text, start, best);
 };
 
-export function paginateLessonPlan(plan, measurements = {}) {
+export function paginateLessonPlan(plan, measurements = {}, presentationMaterial = {}) {
   const pageHeight = measurements.pageHeight ?? contentHeight;
   const measureBasics = measurements.measureBasics ?? (() => Math.max(
     estimateTextHeight(plan.unit),
@@ -81,6 +86,7 @@ export function paginateLessonPlan(plan, measurements = {}) {
   const measureTopic = measurements.measureTopic ?? (() => estimateTextHeight(plan.topic));
   const measureSection = measurements.measureSection
     ?? ((section, value) => estimateTextHeight(value));
+  const measurePresentation = measurements.measurePresentation ?? (() => 58);
   const pages = [[]];
   let currentPage = pages[0];
   let remainingHeight = pageHeight;
@@ -201,6 +207,14 @@ export function paginateLessonPlan(plan, measurements = {}) {
       startPage();
     }
   });
+
+  placeMeasuredRow({
+    key: "presentation-material",
+    kind: "presentation",
+    sectionId: "presentation",
+    presentation: presentationMaterial.presentation ?? null,
+    state: presentationMaterial.state ?? "idle",
+  }, measurePresentation(presentationMaterial));
 
   return pages.filter((page) => page.length);
 }

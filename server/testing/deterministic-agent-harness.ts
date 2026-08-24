@@ -114,6 +114,51 @@ export class DeterministicAgentHarness {
         return;
       }
 
+      if (input.message.includes("请求主题选择")) {
+        await this.repository.updateBranch(input.userId, thread.id, branch.id, {
+          pendingInteraction: {
+            kind: "presentation_theme",
+            originalRequest: "请生成课堂演示",
+            documentVersion: file.documentVersion,
+            requestedAt: new Date().toISOString(),
+          },
+        });
+        const content = "请选择一个演示主题。";
+        const message = await this.repository.updateMessage(input.userId, assistant.id, {
+          content,
+          status: "completed",
+        });
+        await this.repository.updateRun(input.userId, runId, {
+          status: "completed",
+          completedAt: new Date().toISOString(),
+        });
+        await this.repository.updateThread(input.userId, thread.id, { status: "idle" });
+        await emit({ type: "message.delta", runId, delta: content });
+        await emit({ type: "message.completed", runId, message });
+        await emit({ type: "run.completed", runId });
+        return;
+      }
+
+      if (branch.pendingInteraction?.kind === "presentation_theme") {
+        await this.repository.updateBranch(input.userId, thread.id, branch.id, {
+          pendingInteraction: null,
+        });
+        const content = `已接收主题 ${input.message}，并进入下一步。`;
+        const message = await this.repository.updateMessage(input.userId, assistant.id, {
+          content,
+          status: "completed",
+        });
+        await this.repository.updateRun(input.userId, runId, {
+          status: "completed",
+          completedAt: new Date().toISOString(),
+        });
+        await this.repository.updateThread(input.userId, thread.id, { status: "idle" });
+        await emit({ type: "message.delta", runId, delta: content });
+        await emit({ type: "message.completed", runId, message });
+        await emit({ type: "run.completed", runId });
+        return;
+      }
+
       if (
         input.message.includes("提交修改")
         || input.message.includes("完整备课调整")

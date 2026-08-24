@@ -9,6 +9,7 @@ import {
   List,
   LoaderCircle,
   MessageCircle,
+  MessageSquareText,
   Pencil,
   Plus,
   RefreshCw,
@@ -18,6 +19,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -54,11 +56,6 @@ const unitStatusLabels = {
   deferred: "已顺延",
 };
 
-const sidecarTabs = [
-  { id: "assistant", label: "助手", Icon: MessageCircle },
-  { id: "continuity", label: "教学衔接", Icon: Link2 },
-];
-
 const classFeedbackKindLabels = {
   observation: "课堂观察",
   practice_gap: "练习缺口",
@@ -72,11 +69,43 @@ const classFeedbackOutcomeLabels = {
   skipped: "未落实",
 };
 
+const classFeedbackProvenance = {
+  observation: {
+    label: "教师课堂事实",
+    hint: "记录你在本班课堂中直接观察到的情况；它不会被当作教材或课程标准事实。",
+  },
+  practice_gap: {
+    label: "教师课堂判断",
+    hint: "用于调整本班练习与支架；它不代表所有班级都会出现同样问题。",
+  },
+  error_cause: {
+    label: "教师推断（待后续观察校正）",
+    hint: "这是你对错因的教学推断；后续应结合学生表现继续核验，而不是当作已证实原因。",
+  },
+  continuity_outcome: {
+    label: "教师决定：衔接效果",
+    hint: "记录本班本次复习或铺垫是否有效；它不等同于平台已核验的先修关系。",
+  },
+};
+
 function continuityCandidateLabel(candidate) {
   if (!candidate) return "选择衔接候选";
   return candidate.direction === "review"
     ? `复习：${candidate.relatedPointName} → ${candidate.currentPointName}`
     : `铺垫：${candidate.currentPointName} → ${candidate.relatedPointName}`;
+}
+
+function continuityCandidateEvidence(candidate) {
+  if (!candidate) return null;
+  const platformEvidence = candidate.evidenceKind === "lexical_similarity"
+    ? "平台推荐：名称相关，仍待教师判断"
+    : "平台依据：已核验知识关联";
+  const teacherDecision = candidate.decision === "accepted"
+    ? "教师决定：已采用"
+    : candidate.decision === "dismissed"
+      ? "教师决定：已排除"
+      : "教师决定：待取舍";
+  return `${platformEvidence}；${teacherDecision}。`;
 }
 
 function prefersReducedMotion() {
@@ -131,64 +160,28 @@ function UnitPlanningEditor({ unit, totalWeeks, onSave }) {
 
   return (
     <div className="framework-unit-editor">
-      <div className="framework-unit-schedule">
-        <label>起始周<Input type="number" min="1" max={totalWeeks} value={startWeek} onChange={(event) => setStartWeek(event.target.value)} placeholder="—" /></label>
-        <span>至</span>
-        <label>结束周<Input type="number" min="1" max={totalWeeks} value={endWeek} onChange={(event) => setEndWeek(event.target.value)} placeholder="—" /></label>
-        <label>课时<Input type="number" min="0" max="100" value={plannedPeriods} onChange={(event) => setPlannedPeriods(event.target.value)} /></label>
+      <div className="framework-unit-schedule" role="group" aria-label="单元排程">
+        <label>
+          <span>周次</span>
+          <span className="framework-unit-schedule-range">
+            <Input type="number" min="1" max={totalWeeks} value={startWeek} onChange={(event) => setStartWeek(event.target.value)} placeholder="起" aria-label="起始周" />
+            <span aria-hidden="true">–</span>
+            <Input type="number" min="1" max={totalWeeks} value={endWeek} onChange={(event) => setEndWeek(event.target.value)} placeholder="止" aria-label="结束周" />
+          </span>
+        </label>
+        <label>
+          <span>课时</span>
+          <Input type="number" min="0" max="100" value={plannedPeriods} onChange={(event) => setPlannedPeriods(event.target.value)} aria-label="规划课时" />
+        </label>
       </div>
-      <label className="framework-unit-goals">单元目标<Textarea value={learningGoals} onChange={(event) => setLearningGoals(event.target.value)} placeholder="学生完成本单元后能够做什么？" /></label>
+      <label className="framework-unit-goals">
+        <span>单元目标</span>
+        <Textarea value={learningGoals} onChange={(event) => setLearningGoals(event.target.value)} placeholder="学生完成本单元后能够做什么？" />
+      </label>
       <Button size="sm" variant={changes.length ? "default" : "outline"} disabled={!changes.length || saving} onClick={save}>
         {saving ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : changes.length ? <Save aria-hidden="true" /> : <Check aria-hidden="true" />}
         {saving ? "保存中" : changes.length ? "保存单元" : "已同步"}
       </Button>
-    </div>
-  );
-}
-
-function FrameworkSidecarTabs({ view, onChange, tabIds, panelIds }) {
-  const onKeyDown = (event) => {
-    const index = sidecarTabs.findIndex((tab) => tab.id === view);
-    if (index < 0) return;
-    let next = null;
-    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-      next = sidecarTabs[(index + 1) % sidecarTabs.length];
-    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-      next = sidecarTabs[(index - 1 + sidecarTabs.length) % sidecarTabs.length];
-    } else if (event.key === "Home") {
-      next = sidecarTabs[0];
-    } else if (event.key === "End") {
-      next = sidecarTabs[sidecarTabs.length - 1];
-    }
-    if (!next) return;
-    event.preventDefault();
-    onChange(next.id);
-    queueMicrotask(() => {
-      document.getElementById(tabIds[next.id])?.focus();
-    });
-  };
-
-  return (
-    <div className="framework-sidecar-tabs" role="tablist" aria-label="切换辅助内容" onKeyDown={onKeyDown}>
-      {sidecarTabs.map((tab) => {
-        const selected = view === tab.id;
-        const Icon = tab.Icon;
-        return (
-          <button
-            key={tab.id}
-            type="button"
-            role="tab"
-            id={tabIds[tab.id]}
-            aria-controls={panelIds[tab.id]}
-            aria-selected={selected}
-            tabIndex={selected ? 0 : -1}
-            onClick={() => onChange(tab.id)}
-          >
-            <Icon aria-hidden="true" fill={selected ? "currentColor" : "none"} />
-            {tab.label}
-          </button>
-        );
-      })}
     </div>
   );
 }
@@ -205,9 +198,13 @@ function FrameworkUnitNav({
 }) {
   return (
     <>
-      <div className="framework-overview">
+      <div className="framework-overview" aria-label="学期容量">
         <span>{textbook?.edition} · {textbook?.grade}{textbook?.volume}</span>
-        <strong>{plannedPeriods} / {availablePeriods}</strong>
+        <p className="framework-overview-capacity">
+          <strong>{plannedPeriods}</strong>
+          <span aria-hidden="true">/</span>
+          <span>{availablePeriods}</span>
+        </p>
         <small>{capacityCaption(plannedPeriods, availablePeriods, capacityRatio)}</small>
       </div>
       <nav aria-label="单元列表">
@@ -222,7 +219,7 @@ function FrameworkUnitNav({
               onClick={() => onSelectUnit(unit.id)}
               key={unit.id}
             >
-              <span>{String(unit.sortNo).padStart(2, "0")}</span>
+              <span aria-hidden="true">{String(unit.sortNo).padStart(2, "0")}</span>
               <strong>{title}</strong>
               <small>{unitStatusLabels[unit.status]}</small>
               <ChevronRight aria-hidden="true" />
@@ -246,17 +243,11 @@ function FrameworkContinuityPanel({
 }) {
   return (
     <div className="framework-continuity" aria-label="教学衔接">
-      <div className="framework-continuity-heading">
-        <div className="framework-continuity-heading-copy">
-          <Link2 aria-hidden="true" />
-          <div>
-            <h2>教学衔接</h2>
-            <p>采用后会优先进入蓝图与教案；排除后不再写入后续规划</p>
-          </div>
-        </div>
+      <div className="framework-continuity-toolbar">
+        <p>采用后会优先进入蓝图与教案；排除后不再写入后续规划。</p>
         <Button size="sm" variant="outline" disabled={refreshing} onClick={onRefresh}>
           {refreshing ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : <RefreshCw aria-hidden="true" />}
-          更新教学衔接
+          更新
         </Button>
       </div>
       {continuity?.status === "semantic_release_unavailable" ? (
@@ -379,18 +370,15 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
   const [mobilePanel, setMobilePanel] = useState(null);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [pendingWritebackPrompt, setPendingWritebackPrompt] = useState(null);
+  const selectedFeedbackCandidate = useMemo(() => (
+    (feedbackTarget?.candidates ?? []).find((candidate) => (
+      candidate.fingerprint === feedbackFingerprint
+    )) ?? null
+  ), [feedbackFingerprint, feedbackTarget]);
   const unitRefs = useRef(new Map());
   const mainScrollRef = useRef(null);
   const reactId = useId();
   const mobileCloseId = `${reactId}-mobile-close`;
-  const tabIds = {
-    assistant: `${reactId}-tab-assistant`,
-    continuity: `${reactId}-tab-continuity`,
-  };
-  const panelIds = {
-    assistant: `${reactId}-panel-assistant`,
-    continuity: `${reactId}-panel-continuity`,
-  };
 
   const closeMobilePanel = () => {
     if (prefersReducedMotion()) {
@@ -413,7 +401,10 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
       setAggregate(null);
       try {
         const framework = await agentApi.getSemesterFramework(frameworkId);
-        const [outline, nextTextbook, nextContinuity] = await Promise.all([
+        const continuityRequest = agentApi.refreshSemesterFrameworkContinuity(frameworkId)
+          .catch(() => agentApi.getSemesterFrameworkContinuity(frameworkId))
+          .catch(() => null);
+        const [outline, nextTextbook] = await Promise.all([
           agentApi.listCurriculumReleaseNodes(
             framework.framework.catalogReleaseId,
             framework.framework.textbookId,
@@ -423,14 +414,15 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
             framework.framework.catalogReleaseId,
             framework.framework.textbookId,
           ),
-          agentApi.refreshSemesterFrameworkContinuity(frameworkId),
         ]);
         if (cancelled) return;
         setAggregate(framework);
         setNodes(outline.nodes ?? []);
         setTextbook(nextTextbook.textbook ?? nextTextbook);
-        setContinuity(nextContinuity);
         setActiveUnitId(framework.units[0]?.id ?? null);
+        void continuityRequest.then((nextContinuity) => {
+          if (!cancelled && nextContinuity) setContinuity(nextContinuity);
+        });
       } catch (error) {
         if (!cancelled) {
           setLoadError(error.message || "未知错误");
@@ -749,37 +741,13 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
       onNavigateToUnit={navigateToUnit}
       initialPrompt={pendingWritebackPrompt}
       onInitialPromptConsumed={() => setPendingWritebackPrompt(null)}
+      railMode={sidecarView}
+      onRailModeChange={setSidecarView}
+      continuitySlot={continuityPanel}
     />
   );
 
-  const sidecarBody = (
-    <>
-      <FrameworkSidecarTabs
-        view={sidecarView}
-        onChange={setSidecarView}
-        tabIds={tabIds}
-        panelIds={panelIds}
-      />
-      <div
-        role="tabpanel"
-        id={panelIds.assistant}
-        aria-labelledby={tabIds.assistant}
-        hidden={sidecarView !== "assistant"}
-        className="framework-sidecar-panel"
-      >
-        {assistantPanel}
-      </div>
-      <div
-        role="tabpanel"
-        id={panelIds.continuity}
-        aria-labelledby={tabIds.continuity}
-        hidden={sidecarView !== "continuity"}
-        className="framework-sidecar-panel"
-      >
-        {sidecarView === "continuity" ? continuityPanel : null}
-      </div>
-    </>
-  );
+  const sidecarBody = assistantPanel;
 
   return (
     <section className="semester-framework-workspace" aria-label={framework.title}>
@@ -848,10 +816,7 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
                   key={unit.id}
                 >
                   <div className="framework-unit-heading">
-                    <div>
-                      <span>单元 {String(unit.sortNo).padStart(2, "0")}</span>
-                      <h2>{unitTitle}</h2>
-                    </div>
+                    <h2>{unitTitle}</h2>
                     <Button size="sm" variant="outline" onClick={() => setBlueprintTarget({ unit, unitTitle, blueprint: null })}>
                       <Plus aria-hidden="true" />
                       新增课时蓝图
@@ -872,40 +837,57 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
                           knowledgeIds.has(candidate.currentEntityId)
                         )),
                       );
+                      const plannedMinutes = blueprint.plannedMinutes ?? framework.lessonDurationMinutes;
                       return (
                         <div className="framework-blueprint" key={blueprint.id}>
-                          <div className="framework-blueprint-index">
-                            单元第 {blueprint.plannedPeriod} 课时
-                            <br />
-                            <small>
-                              本篇第 {periodContext.periodNo} / {periodContext.periodCount} 课时 · {blueprint.plannedMinutes ?? framework.lessonDurationMinutes} 分钟
-                            </small>
-                            {periodContext.missingPeriods ? (
-                              <small className="is-warning">本篇还缺 {periodContext.missingPeriods} 个课时蓝图</small>
-                            ) : null}
+                          <div className="framework-blueprint-header">
+                            <span
+                              className="framework-blueprint-period"
+                              aria-label={`单元第 ${blueprint.plannedPeriod} 课时`}
+                            >
+                              {blueprint.plannedPeriod}
+                            </span>
+                            <div className="framework-blueprint-heading">
+                              <h3>{blueprint.title}</h3>
+                              <div className="framework-blueprint-tags">
+                                <Badge variant="secondary">{plannedMinutes} 分钟</Badge>
+                                {periodContext.missingPeriods ? (
+                                  <Badge variant="destructive">本篇缺 {periodContext.missingPeriods} 课时</Badge>
+                                ) : null}
+                              </div>
+                            </div>
                           </div>
-                          <div className="framework-blueprint-copy">
-                            <h3>{blueprint.title}</h3>
+                          <div className="framework-blueprint-body">
                             {knowledge.length ? (
                               <div className="framework-blueprint-knowledge">
-                                <span>重点知识</span>
                                 {knowledge.map((item) => (
                                   <mark key={item.point.id}>{item.point.canonicalName}</mark>
                                 ))}
                               </div>
                             ) : null}
-                            <p>{blueprint.mainActivity || "尚未填写主要活动"}</p>
-                            <div>
-                              <span>学生产出：{blueprint.observableProduct || "待明确"}</span>
-                              <span>达成证据：{blueprint.assessmentEvidence || "待明确"}</span>
+                            <p className="framework-blueprint-activity">
+                              {blueprint.mainActivity || "尚未填写主要活动"}
+                            </p>
+                            <dl className="framework-blueprint-meta">
+                              <div>
+                                <dt>产出</dt>
+                                <dd>{blueprint.observableProduct || "待明确"}</dd>
+                              </div>
+                              <div>
+                                <dt>证据</dt>
+                                <dd>{blueprint.assessmentEvidence || "待明确"}</dd>
+                              </div>
                               {lessonContinuity.slice(0, 2).map((candidate) => (
-                                <span className="framework-blueprint-continuity" key={candidate.id}>
-                                  {candidate.direction === "review"
-                                    ? `复习承接：${candidate.relatedPointName} → ${candidate.currentPointName}`
-                                    : `后续铺垫：${candidate.currentPointName} → ${candidate.relatedPointName}`}
-                                </span>
+                                <div className="framework-blueprint-continuity" key={candidate.id}>
+                                  <dt>{candidate.direction === "review" ? "承接" : "铺垫"}</dt>
+                                  <dd>
+                                    {candidate.direction === "review"
+                                      ? `${candidate.relatedPointName} → ${candidate.currentPointName}`
+                                      : `${candidate.currentPointName} → ${candidate.relatedPointName}`}
+                                  </dd>
+                                </div>
                               ))}
-                            </div>
+                            </dl>
                           </div>
                           <div className="framework-blueprint-actions">
                             <div className="framework-blueprint-actions-secondary">
@@ -931,7 +913,8 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
                                       setFeedbackOutcome("weak");
                                     }}
                                   >
-                                    课堂反馈
+                                    <MessageSquareText aria-hidden="true" />
+                                    反馈
                                   </Button>
                                   <Button
                                     size="sm"
@@ -957,15 +940,16 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
                                     }}
                                   >
                                     <RefreshCw aria-hidden="true" />
-                                    重新生成
+                                    重生成
                                   </Button>
                                   <Button
-                                    size="icon-sm"
+                                    size="sm"
                                     variant="ghost"
                                     aria-label={`删除${blueprint.title}的教案`}
                                     onClick={() => onDeleteLesson?.({ blueprint, framework })}
                                   >
                                     <Trash2 aria-hidden="true" />
+                                    删除
                                   </Button>
                                 </>
                               ) : null}
@@ -995,7 +979,9 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
                               >
                                 {creatingLessonId === blueprint.id
                                   ? <LoaderCircle className="animate-spin" aria-hidden="true" />
-                                  : <FilePlus2 aria-hidden="true" />}
+                                  : lessonFile
+                                    ? <BookOpen aria-hidden="true" />
+                                    : <FilePlus2 aria-hidden="true" />}
                                 {lessonFile ? "查看教案" : "生成教案"}
                               </Button>
                             </div>
@@ -1022,7 +1008,7 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
             })}
           </main>
 
-          <aside className="framework-sidecar" aria-label="学期规划辅助面板">
+          <aside className="framework-sidecar lesson-assistant-rail" aria-label="学期规划辅助面板">
             {mobilePanel === "sidecar" ? null : sidecarBody}
           </aside>
         </div>
@@ -1068,7 +1054,7 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
                 />
               </div>
             ) : (
-              <div className="framework-mobile-sidecar">
+              <div className="framework-mobile-sidecar lesson-assistant-rail">
                 {sidecarBody}
               </div>
             )}
@@ -1123,6 +1109,10 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
                   将补充对应衔接与课堂效果；偏弱或未落实时，助手可提出下一课时蓝图修改确认。
                 </p>
               ) : null}
+              <p className="framework-feedback-hint">
+                {classFeedbackProvenance[feedbackKind].label}：
+                {classFeedbackProvenance[feedbackKind].hint}
+              </p>
             </Field>
             {feedbackKind === "continuity_outcome" ? (
               <>
@@ -1157,6 +1147,11 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
                       本课还没有可用衔接候选。可先在「教学衔接」中取舍，或改记课堂观察/练习缺口。
                     </p>
                   ) : null}
+                  {selectedFeedbackCandidate ? (
+                    <p className="framework-feedback-hint">
+                      {continuityCandidateEvidence(selectedFeedbackCandidate)}
+                    </p>
+                  ) : null}
                 </Field>
                 <Field>
                   <FieldLabel htmlFor="class-feedback-outcome">课堂效果</FieldLabel>
@@ -1178,7 +1173,7 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
               </>
             ) : null}
             <Field>
-              <FieldLabel htmlFor="class-feedback-statement">说明</FieldLabel>
+              <FieldLabel htmlFor="class-feedback-statement">课堂记录</FieldLabel>
               <Textarea
                 id="class-feedback-statement"
                 value={feedbackStatement}
@@ -1225,6 +1220,10 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
                           continuityOutcome: feedbackOutcome,
                         }
                       : {}),
+                    evidence: {
+                      origin: "teacher_classroom_record",
+                      informationLevel: classFeedbackProvenance[feedbackKind].label,
+                    },
                   });
                   if (created.writebackSeed) {
                     setPendingWritebackPrompt(created.writebackSeed);

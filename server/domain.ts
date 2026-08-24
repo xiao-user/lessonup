@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { dashiJsonValueSchema, type DashiGoal } from "./presentations/dashi-goal.js";
 
 export const lessonFieldSchema = z.enum([
   "unit",
@@ -36,6 +37,25 @@ export const lessonPlanSchema = z.object({
 
 export type LessonPlan = z.infer<typeof lessonPlanSchema>;
 export type LessonField = z.infer<typeof lessonFieldSchema>;
+
+export const presentationGoalToolSchema = z.object({
+  summary: z.string().trim().min(1).max(500),
+  title: z.string().trim().min(1).max(240),
+  goal: z.string().trim().min(1).max(2_000),
+  audience: z.string().trim().max(500).optional(),
+  slides: z.array(z.object({
+    layout: z.string().regex(/^theme(?:0[1-9]|1[0-2])_page\d{3}$/),
+    props: z.record(z.string(), dashiJsonValueSchema),
+  }).strict()).min(1).max(40),
+}).strict();
+
+export type PresentationGoalPatch = {
+  kind: "presentation_storyboard";
+  fileId: string;
+  documentVersion: number;
+  summary: string;
+  goal: DashiGoal;
+};
 
 export const lessonContextProfileSchema = z.object({
   gradeLevel: z.string().trim().max(80).optional(),
@@ -128,6 +148,19 @@ export const documentPatchToolSchema = z.object({
   operations: z.array(documentPatchToolOperationSchema).min(1).max(32),
 });
 
+// Production Pi contract: document writes target semantic A4 fields. The
+// server binds the full current field as expectedText, so the model cannot
+// accidentally turn a whole-field rewrite into a brittle substring edit by
+// echoing normalized text imperfectly. The older schema remains exported only
+// for decoding historical/test proposals.
+export const documentFieldPatchToolSchema = z.object({
+  summary: z.string().min(1).max(500),
+  operations: z.array(z.object({
+    field: lessonFieldSchema,
+    replacement: z.string(),
+  })).min(1).max(32),
+});
+
 // A design-basis projection targets a semantic A4 field, not an arbitrary text
 // occurrence. The server binds the current full field as the approval snapshot.
 // Requiring the model to echo source text here made a stable resource operation
@@ -170,6 +203,7 @@ export const designBasisProjectionToolSchema = z.object({
 
 export type DocumentPatch = z.infer<typeof documentPatchSchema>;
 export type DocumentPatchProposal = z.infer<typeof documentPatchToolSchema>;
+export type DocumentFieldPatchProposal = z.infer<typeof documentFieldPatchToolSchema>;
 export type DesignBasisProjectionProposal = z.infer<typeof designBasisProjectionToolSchema>;
 export type SourceRef = z.infer<typeof sourceRefSchema>;
 
@@ -586,7 +620,13 @@ export const lessonDesignChangePatchSchema = documentPatchSchema.extend({
 
 export type LessonDesignChangeProposal = z.infer<typeof lessonDesignChangeToolSchema>;
 export type LessonDesignChangePatch = z.infer<typeof lessonDesignChangePatchSchema>;
-export type ResourcePatch = DocumentPatch | SemesterFrameworkPatch | LessonDesignBasisPatch | LessonDesignChangePatch;
+export type ResourcePatch = DocumentPatch | SemesterFrameworkPatch | LessonDesignBasisPatch | LessonDesignChangePatch | PresentationGoalPatch;
+
+export const isPresentationGoalPatch = (
+  patch: ResourcePatch,
+): patch is PresentationGoalPatch => (
+  "kind" in patch && patch.kind === "presentation_storyboard" && "goal" in patch
+);
 
 export const isSemesterFrameworkPatch = (
   patch: ResourcePatch,
@@ -616,13 +656,6 @@ type PreparationAgentContextBase = {
   allowedKnowledgeScopes: string[];
   attachmentSourceIds: string[];
   abortSignal: AbortSignal;
-  /**
-   * The exact interrupted tool call whose teacher-approved transaction has
-   * already committed. Agents SDK runs input guardrails again immediately
-   * before executing an approved tool; only this call may reuse its completed
-   * preflight instead of validating the old proposal against the new snapshot.
-   */
-  approvedToolReplayCallId?: string;
 };
 
 export type LessonAgentContext = PreparationAgentContextBase & {
@@ -714,7 +747,16 @@ export type AgentBranchRecord = {
   parentBranchId?: string;
   forkedFromMessageId?: string;
   label: string;
+  pendingInteraction?: AgentPendingInteraction | null;
   createdAt: string;
+};
+
+export type AgentPendingInteraction = {
+  kind: "presentation_theme" | "presentation_generation";
+  originalRequest: string;
+  documentVersion: number;
+  requestedAt: string;
+  confirmedTheme?: string;
 };
 
 export type AgentMessageRecord = {
@@ -728,18 +770,35 @@ export type AgentMessageRecord = {
   error?: string;
   sources?: SourceRef[];
   activities?: AgentActivityRecord[];
+  turn?: AgentTurnPresentation;
   sessionCursor?: number;
   createdAt: string;
+};
+
+export type AgentTurnPresentation = {
+  runId: string;
+  status: AgentRunRecord["status"];
+  phase?: "starting" | "preparing" | "responding" | "using_tools";
+  currentTurn?: number;
+  startedAt: string;
+  completedAt?: string;
 };
 
 export type AgentActivityRecord = {
   id: string;
   name: string;
   label: string;
+  detail?: string;
   groupKey?: string;
-  state: "running" | "completed" | "unchanged" | "needs_revision" | "failed";
-  outcome?: "completed" | "no_change" | "needs_revision" | "failed";
+  state: "running" | "completed" | "unchanged" | "needs_revision" | "cancelled" | "failed";
+  outcome?: "completed" | "no_change" | "needs_revision" | "cancelled" | "failed";
   revisionCode?: string;
+  turn?: number;
+  progress?: {
+    label: string;
+    current?: number;
+    total?: number;
+  };
 };
 
 export type AgentRunRecord = {
@@ -777,7 +836,7 @@ export type AgentApprovalRecord = {
   encryptedRunState: string;
   agentDefinitionVersion: string;
   resourceType?: "lesson_file" | "semester_framework";
-  patchKind?: "document" | "semester_framework" | "lesson_blueprint" | "lesson_design_basis";
+  patchKind?: "document" | "semester_framework" | "lesson_blueprint" | "lesson_design_basis" | "presentation_storyboard";
   lessonFileId?: string;
   semesterFrameworkId?: string;
   baseResourceVersion?: number;
@@ -808,11 +867,24 @@ export type CapabilityPlan = {
   continuityWritebackFeedbackId?: string;
   lightweightConversation?: boolean;
   curriculumRequested?: boolean;
+  presentationRequested?: boolean;
+  presentationThemeConfirmationRequired?: boolean;
+  presentationThemeDismissed?: boolean;
+  confirmedPresentationTheme?: string;
+  /** Rebind still-current evidence from the immediately preceding completed turn. */
+  reuseRecentEvidence?: boolean;
+  /**
+   * A4 fields the teacher explicitly asked to change in this turn. This limits
+   * writes only: the Agent may read any additional current-version context it
+   * needs to produce a correct result.
+   */
+  requestedDocumentFields?: LessonField[];
   requiredEvidenceKinds?: AgentRunEvidenceKind[];
 };
 
 export type AgentRunEvidenceKind =
   | "knowledge_search"
+  | "curriculum_standard_search"
   | "knowledge_passage"
   | "attachment_read"
   | "source_metadata"
@@ -835,6 +907,14 @@ export type KnowledgeResult = SourceRef & {
   passage: string;
   score: number;
   section?: string;
+};
+
+export type CurriculumStandardSearchCacheRecord = {
+  contextFingerprint: string;
+  querySha256: string;
+  limit: number;
+  results: KnowledgeResult[];
+  updatedAt: string;
 };
 
 export type CurriculumTextbookRecord = {
@@ -1296,13 +1376,48 @@ export type CurriculumKnowledgeContinuityRecord = {
 };
 
 export type NormalizedAgentEvent =
-  | { type: "run.started"; runId: string; threadId: string; branchId: string }
+  | { type: "run.started"; runId: string; threadId: string; branchId: string; startedAt?: string }
+  | { type: "agent.started"; runId: string }
+  | { type: "turn.started"; runId: string; turn: number }
+  | { type: "assistant.message.started"; runId: string; turn: number }
+  | { type: "assistant.message.ended"; runId: string; turn: number; outcome: "completed" | "failed" | "cancelled" }
+  | { type: "turn.ended"; runId: string; turn: number; toolCount: number; outcome: "completed" | "failed" | "cancelled" }
+  | { type: "agent.ended"; runId: string; turnCount: number; outcome: "completed" | "failed" | "cancelled" }
+  // Legacy event names remain readable for already persisted runs. New Pi
+  // projections use *.ended because a native end event is not proof that the
+  // business run succeeded.
+  | { type: "assistant.message.completed"; runId: string; turn: number }
+  | { type: "turn.completed"; runId: string; turn: number; toolCount: number }
+  | { type: "agent.completed"; runId: string; turnCount: number }
   | { type: "thread.updated"; runId: string; thread: AgentThreadRecord }
   | { type: "document.updated"; runId: string; file: LessonFileRecord }
   | { type: "design_basis.updated"; runId: string; basis: LessonDesignBasisAggregate }
   | { type: "resource.updated"; runId: string; resourceType: "semester_framework"; framework: SemesterFrameworkAggregate }
   | { type: "message.delta"; runId: string; delta: string }
-  | { type: "tool.started"; runId: string; toolCallId: string; name: string; label: string; groupKey?: string }
+  | {
+    type: "agent.input.queued";
+    runId: string;
+    queueId: string;
+    delivery: "steer" | "follow_up";
+    content: string;
+  }
+  | {
+    type: "agent.input.cleared";
+    runId: string;
+    delivery: "steer" | "follow_up" | "all";
+  }
+  | { type: "tool.started"; runId: string; toolCallId: string; name: string; label: string; detail?: string; groupKey?: string; turn?: number }
+  | {
+    type: "tool.updated";
+    runId: string;
+    toolCallId: string;
+    name: string;
+    label: string;
+    detail?: string;
+    groupKey?: string;
+    turn?: number;
+    progress?: { label: string; current?: number; total?: number };
+  }
   | {
     type: "tool.completed";
     runId: string;
@@ -1310,8 +1425,10 @@ export type NormalizedAgentEvent =
     name: string;
     ok: boolean;
     label: string;
+    detail?: string;
     groupKey?: string;
     revisionCode?: string;
+    turn?: number;
     /** Teacher-facing outcome; distinct from model-recoverable ok=false. */
     outcome?: "completed" | "no_change" | "needs_revision" | "failed";
   }

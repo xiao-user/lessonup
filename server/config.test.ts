@@ -24,6 +24,24 @@ describe("server runtime configuration", () => {
       NODE_ENV: "production",
       MCP_TOKEN_SECRET: "mcp-token-secret-with-at-least-32-characters",
     });
-    expect(parsed.DEEPSEEK_API_KEY).toBeUndefined();
+    expect(parsed.MODEL_API_KEY).toBeUndefined();
+  });
+
+  it("accepts explicit model IDs for an OpenAI-compatible gateway", () => {
+    const parsed = parseConfig({
+      MODEL_API_KEY: "model-key",
+      MODEL_BASE_URL: "https://gateway.example/v1",
+      MODEL_ID: "model-a",
+    });
+    expect(parsed).toMatchObject({
+      MODEL_BASE_URL: "https://gateway.example/v1",
+      MODEL_ID: "model-a",
+      MODEL_API: "openai-responses",
+    });
+  });
+
+  it("rejects partial model configuration", () => {
+    expect(() => parseConfig({ MODEL_API_KEY: "model-key" }))
+      .toThrow("model_configuration_incomplete");
   });
 });

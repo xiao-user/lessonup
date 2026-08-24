@@ -1,4 +1,3 @@
-import { OutputGuardrailTripwireTriggered } from "@openai/agents";
 import { DocumentPatchError } from "../document-patch.js";
 import { DesignBasisProjectionError } from "../design-basis-projection.js";
 import { LessonDesignBasisPatchError } from "../lesson-design-basis-patch.js";
@@ -8,6 +7,13 @@ import { AgentEvidenceError } from "./evidence.js";
 const publicErrorCodes = new Set([
   "active_run_exists",
   "agent_not_configured",
+  "agent_provider_error",
+  "agent_provider_protocol_error",
+  "agent_provider_unavailable",
+  "agent_rate_limited",
+  "agent_session_conflict",
+  "agent_timeout",
+  "agent_transcript_incomplete",
   "approval_already_resolved",
   "approval_expired",
   "approval_resume_failed",
@@ -25,20 +31,18 @@ const publicErrorCodes = new Set([
   "semester_framework_input_scope_invalid",
   "semester_framework_scope_invalid",
   "run_interrupted",
+  "active_run_not_found",
+  "run_not_accepting_input",
+  "run_not_continuable",
   "stale_document",
   "stale_design_basis",
   "stale_resource",
   "unverified_patch_citation",
   "web_search_not_configured",
+  "write_proposal_missing",
 ]);
 
 export function publicAgentError(error: unknown, fallback = "agent_run_failed") {
-  if (error instanceof OutputGuardrailTripwireTriggered) {
-    const code = error.result.output.outputInfo?.code;
-    return typeof code === "string" && publicErrorCodes.has(code)
-      ? code
-      : fallback;
-  }
   if (error instanceof AgentEvidenceError) {
     return error.code;
   }
@@ -64,6 +68,15 @@ export function publicAgentError(error: unknown, fallback = "agent_run_failed") 
   const message = error instanceof Error ? error.message : "";
   if (publicErrorCodes.has(message)) return message;
   if (/\b429\b|rate.?limit/i.test(message)) return "agent_rate_limited";
-  if (/timeout|timed out|ETIMEDOUT/i.test(message)) return "agent_timeout";
+  if (
+    /timeout|timed out|ETIMEDOUT/i.test(message)
+  ) {
+    return "agent_timeout";
+  }
+  if (
+    /connection error|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|fetch failed/i.test(message)
+  ) {
+    return "agent_provider_unavailable";
+  }
   return fallback;
 }

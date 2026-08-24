@@ -188,10 +188,6 @@
   --shadow-folder-rest: 0 8px 20px var(--gray-alpha-200);
   --shadow-folder-hover: 0 12px 24px var(--gray-alpha-300);
   --shadow-folder-focus: 0 16px 32px var(--gray-alpha-500);
-  --shadow-message: 0 1px 2px var(--gray-alpha-300);
-  --assistant-message-background: #ffffff;
-  --assistant-message-border: rgb(0 0 0 / 13%);
-  --assistant-message-shadow: 0 5px 16px -4px rgb(0 0 0 / 7%);
   --focus-ring: 0 0 0 2px var(--background-100), 0 0 0 4px var(--ring);
   --duration-state: 150ms;
   --duration-popover: 200ms;
@@ -312,9 +308,6 @@
   --ring: var(--blue-900);
   --sidebar-ring: var(--blue-900);
   --elevation-raised: 0 1px 2px rgb(0 0 0 / 16%);
-  --assistant-message-background: var(--gray-100);
-  --assistant-message-border: rgb(255 255 255 / 13%);
-  --assistant-message-shadow: 0 5px 16px -4px rgb(0 0 0 / 38%);
 }
 
 @media (color-gamut: p3) {
