@@ -3,40 +3,39 @@ import { LogIn } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { supabase } from "@/lib/supabase";
+import { restoreSession, signIn as signInWithPassword } from "@/lib/session";
 
 export function AuthBoundary({ children }) {
   const [session, setSession] = useState(undefined);
-  const [account, setAccount] = useState(import.meta.env.DEV ? "admin" : "");
-  const [password, setPassword] = useState(import.meta.env.DEV ? "1234" : "");
+  const [account, setAccount] = useState("");
+  const [password, setPassword] = useState("");
   const [status, setStatus] = useState("idle");
 
   useEffect(() => {
-    if (!supabase) {
-      setSession(null);
-      return undefined;
-    }
-    supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => setSession(nextSession));
-    return () => data.subscription.unsubscribe();
+    let active = true;
+    const refresh = () => { void restoreSession().then((nextSession) => { if (active) setSession(nextSession); }); };
+    refresh();
+    window.addEventListener("lessonup-session-change", refresh);
+    return () => {
+      active = false;
+      window.removeEventListener("lessonup-session-change", refresh);
+    };
   }, []);
 
-  if (!supabase || session) return children;
+  if (session) return children;
   if (session === undefined) return null;
 
   const signIn = async (event) => {
     event.preventDefault();
     if (!account.trim() || !password) return;
     setStatus("sending");
-    const normalizedAccount = account.trim().toLowerCase();
-    const email = normalizedAccount.includes("@")
-      ? normalizedAccount
-      : `${normalizedAccount}@lessonup.local`;
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-    setStatus(error ? "error" : "idle");
+    try {
+      const nextSession = await signInWithPassword(account, password);
+      setSession(nextSession);
+      setStatus("idle");
+    } catch {
+      setStatus("error");
+    }
   };
 
   return (
@@ -63,7 +62,6 @@ export function AuthBoundary({ children }) {
         <Button type="submit" disabled={!account.trim() || !password || status === "sending"}>
           {status === "sending" ? "正在登录…" : "登录"}
         </Button>
-        {import.meta.env.DEV && <small>本地测试账号：admin　密码：1234</small>}
         {status === "error" && <small role="alert">账号或密码错误，请重试。</small>}
       </form>
     </main>

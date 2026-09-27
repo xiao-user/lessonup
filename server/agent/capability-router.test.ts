@@ -1,16 +1,60 @@
 import { describe, expect, it } from "vitest";
 
+import { createNodeSkillRegistry } from "./skill-registry-node.js";
 import {
   deterministicCapabilityPlan,
   documentWriteMode,
   enforceRequiredCapabilities,
   hasDeterministicRoutingSignal,
   isConversationalControlMessage,
+  isFastChatTurn,
+  isFastFollowUpMessage,
   requiresDocumentWrite,
+  requestedDocumentFieldsFor,
   routeCapabilities,
 } from "./capability-router.js";
 
 describe("enforceRequiredCapabilities", () => {
+  it("keeps acknowledgements tool-free instead of inheriting the preceding task", () => {
+    for (const message of ["好", "好的", "没问题", "收到", "OK", "Thanks", "Thank you", "Got it"]) {
+      expect(deterministicCapabilityPlan(message), message).toMatchObject({
+        lightweightConversation: true,
+        executionLane: "fast",
+        presentationRequested: false,
+        skillIds: [],
+        toolGroups: [],
+      });
+    }
+  });
+
+  it("routes explicit classroom presentation intent to the approval-gated Dashi goal tool", () => {
+    expect(deterministicCapabilityPlan("基于当前教案生成一份上课用的交互 PPT")).toMatchObject({
+      presentationRequested: true,
+      skillIds: ["dashi-ppt"],
+      toolGroups: ["presentation-create"],
+      mcpServers: [],
+      specialistAgents: [],
+      writeMode: "consultative",
+      evidenceRequired: false,
+    });
+    expect(deterministicCapabilityPlan("请修改 A4 教案中的教学过程")).toMatchObject({
+      presentationRequested: false,
+    });
+    for (const message of [
+      "请基于当前教案设计课堂演示，先给我确认",
+      "直接渲染",
+      "把确认后的脚本交给 Dashi 渲染",
+      "直接调用 dashi skill 就行了",
+    ]) {
+      expect(deterministicCapabilityPlan(message), message).toMatchObject({
+        presentationRequested: true,
+        skillIds: ["dashi-ppt"],
+        toolGroups: ["presentation-create"],
+        evidenceRequired: false,
+      });
+    }
+  });
+
   it("keeps document writes available when the model router omits them", () => {
     const plan = enforceRequiredCapabilities("请替换教学目标第一条并提交修改建议", {
       skillIds: ["lesson-objective-review"],
@@ -75,6 +119,37 @@ describe("enforceRequiredCapabilities", () => {
     expect(requiresDocumentWrite("只对最关键一处问题提交最小修改建议，等待我确认后再写入")).toBe(true);
     expect(requiresDocumentWrite("先判断当前教案是否需要调整，不要写入")).toBe(false);
     expect(requiresDocumentWrite("重新编写教案")).toBe(true);
+    expect(requiresDocumentWrite("重新整理当前教案")).toBe(true);
+    expect(requiresDocumentWrite("好的，请按上面的方案调整教案")).toBe(true);
+    expect(requiresDocumentWrite("就按刚才的建议完善一下")).toBe(true);
+    expect(requiresDocumentWrite("把这些建议落实到教学过程")).toBe(true);
+    expect(requiresDocumentWrite("给我列出三条优化建议")).toBe(false);
+    expect(requiresDocumentWrite("为什么要修改教学过程？")).toBe(false);
+  });
+
+  it("separates broad read context from the teacher's narrow write targets", () => {
+    expect(requestedDocumentFieldsFor(
+      "请依据重点知识和教学过程，把教学目标写成一条可观察、可评价的目标，并提交修改建议",
+    )).toEqual(["objectives"]);
+    expect(requestedDocumentFieldsFor(
+      "请修改教学目标和评价练习，并等待我确认",
+    )).toEqual(["objectives", "assessment"]);
+    expect(deterministicCapabilityPlan(
+      "请把教学目标写成一条可观察、可评价的目标，并提交修改建议，等待我确认后再写入。",
+    )).toMatchObject({
+      writeMode: "explicit",
+      requestedDocumentFields: ["objectives"],
+    });
+  });
+
+  it("uses an explicit selection only for a deictic write request", () => {
+    expect(deterministicCapabilityPlan("请修改这一处，其他原文保持不变", {
+      activeSectionId: "process",
+      selectionField: "objectives",
+    })).toMatchObject({ requestedDocumentFields: ["objectives"] });
+    expect(deterministicCapabilityPlan("请重新编写教案", {
+      activeSectionId: "objectives",
+    }).requestedDocumentFields).toBeUndefined();
   });
 
   it("separates consultation from explicit approval intent", () => {
@@ -83,6 +158,7 @@ describe("enforceRequiredCapabilities", () => {
     expect(documentWriteMode("提交最小修改建议，等待我确认后再写入")).toBe("explicit");
     expect(documentWriteMode("请把模板教案转化为具体设计，生成一次确认项")).toBe("explicit");
     expect(documentWriteMode("未经我批准不要写入，最后只生成一次完整备课调整确认项")).toBe("explicit");
+    expect(documentWriteMode("好的，请按上面的方案调整教案")).toBe("explicit");
     expect(documentWriteMode("继续")).toBe("open");
   });
 
@@ -93,6 +169,9 @@ describe("enforceRequiredCapabilities", () => {
       designBasisWriteRequested: false,
       fullRewriteRequested: true,
       minimalWriteRequested: false,
+      mcpServers: ["knowledge"],
+      evidenceRequired: true,
+      requiredEvidenceKinds: ["curriculum_standard_search"],
     });
     expect(deterministicCapabilityPlan("把这个学生困难保存为教案设计依据")).toMatchObject({
       writeMode: "explicit",
@@ -115,6 +194,90 @@ describe("enforceRequiredCapabilities", () => {
     });
   });
 
+  it("treats reorganizing the current lesson as a complete evidence-bound rewrite", () => {
+    expect(deterministicCapabilityPlan("重新整理当前教案")).toMatchObject({
+      writeMode: "explicit",
+      fullRewriteRequested: true,
+      skillIds: ["lesson-full-authoring"],
+      requestedDocumentFields: undefined,
+      mcpServers: ["knowledge"],
+      evidenceRequired: true,
+      requiredEvidenceKinds: ["curriculum_standard_search"],
+    });
+    for (const message of ["重新编写教案", "请把当前模板教案重编为具体教案"]) {
+      expect(deterministicCapabilityPlan(message), message).toMatchObject({
+        writeMode: "explicit",
+        fullRewriteRequested: true,
+        skillIds: ["lesson-full-authoring"],
+      });
+    }
+  });
+
+  it("answers a rewrite deliberation instead of routing it to the authoring path", () => {
+    for (const message of [
+      "先判断这份教案是否需要重新编写",
+      "不要写入，只分析整份教案要不要重编",
+      "请先只做分析：整份教案重写是否值得",
+      "你认为需要重新整理当前教案吗？",
+      "要不要重新编写整份教案？",
+    ]) {
+      expect(deterministicCapabilityPlan(message), message).toMatchObject({
+        writeMode: "consultative",
+        fullRewriteRequested: true,
+        // The authoring skill requires propose_document_patch, which a
+        // consultative turn never creates. Selecting it here used to fail the
+        // run before the model was called.
+        skillIds: [],
+        evidenceRequired: false,
+      });
+    }
+  });
+
+  it("reads one deliberation vocabulary across write detection and write mode", () => {
+    // “整理/重编/编写/改写” are write verbs for detection, so they must also be
+    // recognized as deliberation when a teacher only asks whether to apply them.
+    for (const message of [
+      "你认为需要重新整理当前教案吗？",
+      "要不要重新编写整份教案？",
+      "这份教案该不该整理一遍？",
+      "你觉得教学过程值得改写吗？",
+    ]) {
+      expect(requiresDocumentWrite(message), message).toBe(false);
+      expect(documentWriteMode(message), message).toBe("consultative");
+    }
+    for (const message of [
+      "请优化教学目标并提交修改",
+      "按照这些内容重新更改教学重点难点",
+      "重新编写教案",
+      "重新整理当前教案",
+    ]) {
+      expect(requiresDocumentWrite(message), message).toBe(true);
+      expect(documentWriteMode(message), message).toBe("explicit");
+    }
+  });
+
+  it("never pairs a skill's required write tool with a turn that forbids it", async () => {
+    const registry = await createNodeSkillRegistry().load();
+    for (const message of [
+      "先判断这份教案是否需要重新编写",
+      "你认为需要重新整理当前教案吗？",
+      "要不要重新编写整份教案？",
+      "重新整理当前教案",
+      "请优化教学目标并提交修改",
+      "你认为现在还有哪些需要调整和优化？",
+      "请检查教学目标与重点",
+      "本课与课程标准中的哪些内容要求相关？不要修改教案。",
+    ]) {
+      const plan = deterministicCapabilityPlan(message);
+      const requiredTools = registry.resolve(plan.skillIds).flatMap((skill) => skill.requiredTools);
+      // Mirrors the single authority decision in PiLessonAgentCoordinator:
+      // the document proposal tool exists only outside a consultative turn.
+      if (plan.writeMode === "consultative") {
+        expect(requiredTools, message).not.toContain("propose_document_patch");
+      }
+    }
+  });
+
   it("uses a bound blueprint as upstream context without relying on prompt keywords", () => {
     expect(deterministicCapabilityPlan("请重新编写教案", {
       hasUpstreamPlanningContext: true,
@@ -128,6 +291,7 @@ describe("enforceRequiredCapabilities", () => {
   it("routes dismissal and thanks to the lightweight no-tool conversation path", () => {
     expect(deterministicCapabilityPlan("暂时不需要")).toMatchObject({
       lightweightConversation: true,
+      executionLane: "fast",
       writeMode: "consultative",
       toolGroups: [],
       specialistAgents: [],
@@ -135,7 +299,23 @@ describe("enforceRequiredCapabilities", () => {
     });
     expect(deterministicCapabilityPlan("可以")).toMatchObject({
       lightweightConversation: false,
+      executionLane: "agent",
     });
+  });
+
+  it("sends short clarifying follow-ups through Fast chat, not the Agent prefix", () => {
+    expect(deterministicCapabilityPlan("刚才那句是什么意思？")).toMatchObject({
+      executionLane: "fast",
+      lightweightConversation: false,
+      writeMode: "consultative",
+      toolGroups: [],
+      skillIds: [],
+    });
+    expect(isFastFollowUpMessage("为什么？")).toBe(true);
+    expect(isFastChatTurn("好的 谢谢")).toBe(true);
+    expect(isFastFollowUpMessage("教学过程写得怎么样？")).toBe(false);
+    expect(deterministicCapabilityPlan("教学过程写得怎么样？").executionLane).toBe("agent");
+    expect(deterministicCapabilityPlan("请修改教学过程").executionLane).toBe("agent");
   });
 
   it("does not send the curriculum catalog tool surface on unrelated turns", () => {
@@ -204,6 +384,31 @@ describe("enforceRequiredCapabilities", () => {
       mcpServers: [],
       evidenceRequired: false,
     });
+    expect(deterministicCapabilityPlan(
+      "请结合重点知识、教学过程和评价练习，把教学目标改成一条可观察、可评价的目标，并提交修改建议",
+      {
+        document: {
+          unit: "第一单元",
+          period: "第1课时",
+          totalPeriods: "2",
+          topic: "春",
+          objectives: "理解朱自清笔下的春天",
+          knowledgePoints: "景物描写",
+          continuity: "",
+          focus: "",
+          preparation: "",
+          process: "圈画文本",
+          assessment: "概括春景",
+          homework: "",
+          board: "",
+          reflection: "",
+        },
+      },
+    )).toMatchObject({
+      mcpServers: [],
+      evidenceRequired: false,
+      requestedDocumentFields: ["objectives"],
+    });
   });
 
   it("honors an explicit request not to maintain structured design basis during a rewrite", () => {
@@ -214,9 +419,35 @@ describe("enforceRequiredCapabilities", () => {
       fullRewriteRequested: true,
       designBasisRequested: false,
       designBasisWriteRequested: false,
-      mcpServers: [],
-      evidenceRequired: false,
+      mcpServers: ["knowledge"],
+      evidenceRequired: true,
+      requiredEvidenceKinds: ["curriculum_standard_search"],
       specialistAgents: [],
+    });
+  });
+
+  it("requires a scoped curriculum-standard read for explicit standard work", () => {
+    expect(deterministicCapabilityPlan(
+      "请依据课程标准调整教学目标并提交修改",
+    )).toMatchObject({
+      mcpServers: ["knowledge"],
+      evidenceRequired: true,
+      requiredEvidenceKinds: ["curriculum_standard_search"],
+    });
+    expect(deterministicCapabilityPlan(
+      "本课与课程标准中的哪些内容要求相关？不要修改教案。",
+    )).toMatchObject({
+      writeMode: "consultative",
+      mcpServers: ["knowledge"],
+      evidenceRequired: true,
+      requiredEvidenceKinds: ["curriculum_standard_search"],
+    });
+    expect(deterministicCapabilityPlan(
+      "请继续依据刚才检索到的课程标准展开分析，只分析，不修改教案。",
+    )).toMatchObject({
+      evidenceRequired: true,
+      requiredEvidenceKinds: ["curriculum_standard_search"],
+      reuseRecentEvidence: true,
     });
   });
 
@@ -225,7 +456,7 @@ describe("enforceRequiredCapabilities", () => {
       skillIds: ["lesson-objective-review"],
       toolGroups: ["document-read", "document-write"],
       mcpServers: [],
-      specialistAgents: ["curriculum-analysis"],
+      specialistAgents: [],
     });
   });
 

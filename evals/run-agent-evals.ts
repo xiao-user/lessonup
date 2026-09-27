@@ -1,12 +1,18 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import OpenAI from "openai";
 import { resolveEvalGraderConfig } from "./config.js";
+import { createPiGraderClient } from "./pi-grader.js";
 import {
   exposesInternalImplementationDetails,
   gradeBusinessResponse,
   unavailableBusinessGrade,
 } from "./grading.js";
+import {
+  gradePerformance,
+  isSafePublicEvent,
+  resolvePerformanceBudget,
+  type AgentEvalPerformance,
+} from "./performance.js";
 
 type EvalCase = {
   id: string;
@@ -40,6 +46,16 @@ type AgentEvent = {
   ok?: boolean;
 };
 
+type RunActivity = {
+  run?: {
+    tokenUsage?: {
+      requests?: number;
+      inputTokens?: number;
+      cachedInputTokens?: number;
+    };
+  };
+};
+
 const requiredEnvironment = [
   "LESSONUP_EVAL_ACCESS_TOKEN",
   "LESSONUP_EVAL_NOTEBOOK_ID",
@@ -58,9 +74,13 @@ const headers = {
   "content-type": "application/json",
 };
 const graderConfig = resolveEvalGraderConfig(process.env);
-const grader = new OpenAI({
+const performanceBudget = resolvePerformanceBudget(process.env);
+const grader = createPiGraderClient({
   apiKey: graderConfig.apiKey,
   baseURL: graderConfig.baseURL,
+  api: graderConfig.api,
+  contextWindow: graderConfig.contextWindow,
+  maxTokens: graderConfig.maxTokens,
 });
 
 const approvalFieldLabels: Record<string, string> = {
@@ -128,6 +148,7 @@ async function request<T>(pathname: string, init: RequestInit = {}) {
 }
 
 async function consumeSse(pathname: string, body: unknown) {
+  const startedAt = performance.now();
   const response = await fetch(`${baseUrl}${pathname}`, {
     method: "POST",
     headers: { ...headers, accept: "text/event-stream" },
@@ -136,6 +157,9 @@ async function consumeSse(pathname: string, body: unknown) {
   if (!response.ok || !response.body) throw new Error(`stream_failed:${response.status}`);
 
   const events: AgentEvent[] = [];
+  let firstOutputMs: number | null = null;
+  let firstSafeEventMs: number | null = null;
+  let firstProviderEventMs: number | null = null;
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -150,12 +174,24 @@ async function consumeSse(pathname: string, body: unknown) {
         .filter((line) => line.startsWith("data:"))
         .map((line) => line.slice(5).trim())
         .join("\n");
-      if (data) events.push(JSON.parse(data) as AgentEvent);
+      if (data) {
+        const event = JSON.parse(data) as AgentEvent;
+        if (event.type === "message.delta" && firstOutputMs === null) {
+          firstOutputMs = Math.round(performance.now() - startedAt);
+        }
+        if (isSafePublicEvent(event.type) && firstSafeEventMs === null) {
+          firstSafeEventMs = Math.round(performance.now() - startedAt);
+        }
+        if (event.type === "assistant.message.started" && firstProviderEventMs === null) {
+          firstProviderEventMs = Math.round(performance.now() - startedAt);
+        }
+        events.push(event);
+      }
       boundary = buffer.indexOf("\n\n");
     }
     if (done) break;
   }
-  return events;
+  return { events, firstOutputMs, firstSafeEventMs, firstProviderEventMs };
 }
 
 const caseSource = await readFile(new URL("./cases.jsonl", import.meta.url), "utf8");
@@ -222,6 +258,17 @@ for (const testCase of cases) {
   let frameworkContinuity: unknown;
   let assistantResponse = "";
   let approvalPatch: unknown;
+  let runActivity: RunActivity | null = null;
+  let performance: AgentEvalPerformance = {
+    durationMs: 0,
+    firstSafeEventMs: null,
+    firstProviderEventMs: null,
+    firstOutputMs: null,
+    modelRequests: null,
+    toolCalls: 0,
+    inputTokens: null,
+    cachedInputTokens: null,
+  };
   try {
     if (isFrameworkCase) {
       semesterFramework = await request<NonNullable<typeof semesterFramework>>(
@@ -246,7 +293,8 @@ for (const testCase of cases) {
           ).catch(() => null)
         : null;
     }
-    events = await consumeSse(`/api/agent/threads/${created.thread.id}/runs`, {
+    const startedAt = performance.now();
+    const streamed = await consumeSse(`/api/agent/threads/${created.thread.id}/runs`, {
       branchId: created.branch.id,
       message: testCase.prompt,
       activeSectionId: isFrameworkCase ? "overview" : "basics",
@@ -255,6 +303,14 @@ for (const testCase of cases) {
         ? semesterFramework!.framework.version
         : lessonFile!.documentVersion,
     });
+    events = streamed.events;
+    performance.durationMs = Math.round(performance.now() - startedAt);
+    performance.firstSafeEventMs = streamed.firstSafeEventMs;
+    performance.firstProviderEventMs = streamed.firstProviderEventMs;
+    performance.firstOutputMs = streamed.firstOutputMs;
+    runActivity = await request<RunActivity>(
+      `/api/agent/threads/${created.thread.id}/activity?branchId=${created.branch.id}`,
+    ).catch(() => null);
     const messages = await request<Array<{ role: string; content: string }>>(
       `/api/agent/threads/${created.thread.id}/messages?branchId=${created.branch.id}`,
     );
@@ -278,6 +334,10 @@ for (const testCase of cases) {
   const toolNames = events
     .filter((event) => event.type === "tool.started" && event.name)
     .map((event) => event.name as string);
+  performance.toolCalls = toolNames.length;
+  performance.modelRequests = runActivity?.run?.tokenUsage?.requests ?? null;
+  performance.inputTokens = runActivity?.run?.tokenUsage?.inputTokens ?? null;
+  performance.cachedInputTokens = runActivity?.run?.tokenUsage?.cachedInputTokens ?? null;
   const proposalRevisionCodes = events
     .filter((event) => event.type === "tool.completed" && event.revisionCode)
     .map((event) => event.revisionCode as string);
@@ -302,6 +362,7 @@ for (const testCase of cases) {
   const hasSource = events.some((event) => event.type === "source.added");
   if (testCase.requiresSource && !hasSource) failures.push("missing_source");
   if (events.some((event) => event.type === "run.failed")) failures.push("run_failed");
+  failures.push(...gradePerformance(performance, performanceBudget));
   if (
     testCase.rejectInternalImplementationDetails !== false
     && exposesInternalImplementationDetails(assistantResponse)
@@ -365,6 +426,7 @@ for (const testCase of cases) {
       toolOutcomes,
       runErrors,
     },
+    performance,
     assistantResponse,
     businessGrade,
   });
@@ -373,6 +435,7 @@ for (const testCase of cases) {
 const output = {
   generatedAt: new Date().toISOString(),
   baseUrl,
+  performanceBudget,
   cases: results,
   passed: results.filter((result) => result.passed).length,
   total: results.length,

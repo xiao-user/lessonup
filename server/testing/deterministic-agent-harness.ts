@@ -76,7 +76,7 @@ export class DeterministicAgentHarness {
     });
     await this.repository.updateThread(input.userId, thread.id, {
       status: "running",
-      title: thread.title === "新会话" ? input.message.slice(0, 14) : undefined,
+      ...(thread.title === "新会话" ? { title: input.message.slice(0, 14) } : {}),
     });
     const userMessage = await this.repository.appendMessage({
       ownerId: input.userId, threadId: thread.id, branchId: branch.id,
@@ -111,6 +111,51 @@ export class DeterministicAgentHarness {
           emit,
           "agent_run_failed",
         );
+        return;
+      }
+
+      if (input.message.includes("请求主题选择")) {
+        await this.repository.updateBranch(input.userId, thread.id, branch.id, {
+          pendingInteraction: {
+            kind: "presentation_theme",
+            originalRequest: "请生成课堂演示",
+            documentVersion: file.documentVersion,
+            requestedAt: new Date().toISOString(),
+          },
+        });
+        const content = "请选择一个演示主题。";
+        const message = await this.repository.updateMessage(input.userId, assistant.id, {
+          content,
+          status: "completed",
+        });
+        await this.repository.updateRun(input.userId, runId, {
+          status: "completed",
+          completedAt: new Date().toISOString(),
+        });
+        await this.repository.updateThread(input.userId, thread.id, { status: "idle" });
+        await emit({ type: "message.delta", runId, delta: content });
+        await emit({ type: "message.completed", runId, message });
+        await emit({ type: "run.completed", runId });
+        return;
+      }
+
+      if (branch.pendingInteraction?.kind === "presentation_theme") {
+        await this.repository.updateBranch(input.userId, thread.id, branch.id, {
+          pendingInteraction: null,
+        });
+        const content = `已接收主题 ${input.message}，并进入下一步。`;
+        const message = await this.repository.updateMessage(input.userId, assistant.id, {
+          content,
+          status: "completed",
+        });
+        await this.repository.updateRun(input.userId, runId, {
+          status: "completed",
+          completedAt: new Date().toISOString(),
+        });
+        await this.repository.updateThread(input.userId, thread.id, { status: "idle" });
+        await emit({ type: "message.delta", runId, delta: content });
+        await emit({ type: "message.completed", runId, message });
+        await emit({ type: "run.completed", runId });
         return;
       }
 
@@ -327,7 +372,7 @@ export class DeterministicAgentHarness {
         await this.repository.updateRun(args.userId, approval.runId, {
           status: "failed", completedAt: new Date().toISOString(),
         });
-        await this.repository.updateThread(args.userId, approval.threadId, { status: "failed" });
+        await this.repository.updateThread(args.userId, approval.threadId, { status: "idle" });
       }
       throw error;
     }
@@ -474,7 +519,7 @@ export class DeterministicAgentHarness {
     await this.repository.updateRun(userId, runId, {
       status: "failed", error, completedAt: new Date().toISOString(),
     });
-    await this.repository.updateThread(userId, threadId, { status: "failed" });
+    await this.repository.updateThread(userId, threadId, { status: "idle" });
     const message = await this.repository.updateMessage(userId, assistantId, {
       content,
       status: "failed",

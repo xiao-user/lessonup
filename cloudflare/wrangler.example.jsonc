@@ -1,0 +1,66 @@
+{
+  "name": "lessonup",
+  "main": "./worker.ts",
+  "compatibility_date": "2026-08-24",
+  "vars": {
+    "APP_ORIGIN": "https://replace-with-your-domain"
+  },
+  "secrets": {
+    "required": [
+      "MODEL_API_KEY",
+      "MODEL_BASE_URL",
+      "MODEL_ID",
+      "MODEL_API",
+      "MODEL_CONTEXT_WINDOW",
+      "MODEL_MAX_TOKENS",
+      "AGENT_STATE_ENCRYPTION_KEY",
+      "MCP_TOKEN_SECRET",
+      "EMBEDDING_BASE_URL",
+      "EMBEDDING_API_KEY",
+      "EMBEDDING_MODEL",
+      "EMBEDDING_DIMENSIONS"
+    ]
+  },
+  "assets": {
+    "directory": "../dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/mcp/*"]
+  },
+  "containers": [
+    {
+      "class_name": "LessonUpRuntime",
+      "image": "../Dockerfile",
+      "image_build_context": "..",
+      "max_instances": 1
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "LESSONUP_RUNTIME",
+        "class_name": "LessonUpRuntime"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["LessonUpRuntime"]
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "LESSONUP_DB",
+      "database_name": "lessonup",
+      "database_id": "00a6480e-e7eb-4d37-b464-ec9ceb4ea59e",
+      "migrations_dir": "../d1/migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "LESSONUP_PRIVATE_OBJECTS",
+      "bucket_name": "lessonup-private"
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-import type { AgentInputItem } from "@openai/agents";
+import type { AgentSessionItem as AgentInputItem } from "../repository.js";
 import {
   applyDocumentPatch,
   DocumentPatchError,
@@ -20,6 +20,7 @@ import type {
   CurriculumSemanticEntityRecord,
   CurriculumSemanticPathStep,
   CurriculumTextbookRecord,
+  CurriculumStandardSearchCacheRecord,
   CreateSemesterFrameworkInput,
   CreateLessonBlueprintInput,
   CreateLessonClassFeedbackInput,
@@ -29,6 +30,8 @@ import type {
   LessonClassFeedbackRecord,
   LessonDesignBasisAggregate,
   LessonDesignBasisPatch,
+  LessonGenerationIntentRecord,
+  SemesterFrameworkWritebackIntentRecord,
   LessonFileRecord,
   NotebookRecord,
   SetFrameworkContinuityDecisionInput,
@@ -42,8 +45,10 @@ import type {
 import {
   isLessonDesignBasisPatch,
   isLessonDesignChangePatch,
+  isPresentationGoalPatch,
   isSemesterFrameworkPatch,
 } from "../domain.js";
+import { runEvidenceIdentity, uniqueRunEvidenceSources } from "../run-evidence.js";
 import {
   buildCurriculumFacets,
   buildCurriculumOutline,
@@ -51,7 +56,7 @@ import {
   searchCurriculumNodeRecords,
   type CurriculumTextbookFilter,
 } from "../curriculum/catalog.js";
-import { persistedActivitiesFromEvents } from "../agent-activity-presentation.js";
+import { persistedActivitiesFromEvents, persistedTurnPhaseFromEvents, persistedTurnTextsFromEvents } from "../agent-activity-presentation.js";
 import {
   curriculumFixtureNodes,
   curriculumFixtureKnowledgeContinuity,
@@ -62,7 +67,12 @@ import {
   curriculumFixtureSemanticPaths,
   curriculumFixtureTextbooks,
 } from "../testing/curriculum-fixture.js";
-import type { CreateThreadInput, ImportedNotebook, LessonRepository } from "../repository.js";
+import type {
+  AgentRuntimeSessionSnapshot,
+  CreateThreadInput,
+  ImportedNotebook,
+  LessonRepository,
+} from "../repository.js";
 import { createLessonPlanPreview } from "../../src/lib/lesson-preview.js";
 import { applySemesterFrameworkPatch } from "../semester-framework-patch.js";
 import {
@@ -74,6 +84,12 @@ import {
   type ReviewedProgressionRelation,
 } from "../curriculum/framework-continuity.js";
 import { applyLessonDesignBasisPatch } from "../lesson-design-basis-patch.js";
+import { expiredRunRecovery } from "./expired-run-recovery.js";
+import type {
+  BeginClassroomPresentationGenerationResult,
+  ClassroomPresentationGeneration,
+  DirectClassroomPresentationRecord,
+} from "../presentations/domain.js";
 
 let lastTimestamp = 0;
 const now = () => {
@@ -85,6 +101,7 @@ const key = (...parts: string[]) => parts.join(":");
 export class MemoryLessonRepository implements LessonRepository {
   private notebooks = new Map<string, NotebookRecord>();
   private files = new Map<string, LessonFileRecord>();
+  private lessonGenerationIntents = new Map<string, LessonGenerationIntentRecord>();
   private designBases = new Map<string, LessonDesignBasisAggregate>();
   private threads = new Map<string, AgentThreadRecord>();
   private branches = new Map<string, AgentBranchRecord>();
@@ -92,6 +109,7 @@ export class MemoryLessonRepository implements LessonRepository {
   private runs = new Map<string, AgentRunRecord>();
   private approvals = new Map<string, AgentApprovalRecord>();
   private sessionItems = new Map<string, AgentInputItem[]>();
+  private runtimeSessions = new Map<string, AgentRuntimeSessionSnapshot>();
   private threadMemories = new Map<string, { summary: string; cursor: number }>();
   private idempotency = new Map<string, {
     operation: "save_document" | "apply_approval";
@@ -112,6 +130,10 @@ export class MemoryLessonRepository implements LessonRepository {
   }>();
   private sessionAppendBatches = new Map<string, string>();
   private createLessonFileRequests = new Map<string, { signature: string; file: LessonFileRecord }>();
+  private lessonGenerationIntentRequests = new Map<string, {
+    signature: string;
+    intent: LessonGenerationIntentRecord;
+  }>();
   private createThreadRequests = new Map<string, {
     signature: string;
     thread: AgentThreadRecord;
@@ -127,6 +149,7 @@ export class MemoryLessonRepository implements LessonRepository {
     Map<string, FrameworkContinuityCandidateRecord["decision"]>
   >();
   private lessonClassFeedback: LessonClassFeedbackRecord[] = [];
+  private semesterFrameworkWritebackIntents = new Map<string, SemesterFrameworkWritebackIntentRecord>();
   private semesterFrameworkCreateRequests = new Map<string, {
     signature: string;
     frameworkId: string;
@@ -137,6 +160,7 @@ export class MemoryLessonRepository implements LessonRepository {
   }>();
   private runEvents: Array<{ ownerId: string; runId: string; type: string; data: NormalizedAgentEvent }> = [];
   private runEvidence: AgentRunEvidenceRecord[] = [];
+  private curriculumStandardSearchCache = new Map<string, CurriculumStandardSearchCacheRecord>();
   private curriculumTextbooks = curriculumFixtureTextbooks.map((book) => structuredClone(book));
   private curriculumNodes = curriculumFixtureNodes.map((node) => structuredClone(node));
   private curriculumSemanticEntities = curriculumFixtureSemanticEntities.map((entity) => structuredClone(entity));
@@ -144,6 +168,11 @@ export class MemoryLessonRepository implements LessonRepository {
   private curriculumSemanticPaths = curriculumFixtureSemanticPaths.map((step) => structuredClone(step));
   private curriculumNodeKnowledge = curriculumFixtureNodeKnowledge.map((record) => structuredClone(record));
   private curriculumKnowledgeSearch = curriculumFixtureKnowledgeSearch.map((record) => structuredClone(record));
+  private classroomPresentations = new Map<string, DirectClassroomPresentationRecord>();
+  private classroomPresentationGenerations = new Map<string, ClassroomPresentationGeneration>();
+  private presentationCreateRequests = new Map<string, {
+    presentationId: string;
+  }>();
   private lastMessageTimestamp = 0;
   private readonly curriculumCatalogRelease: CurriculumCatalogReleaseRecord = {
     id: "00000000-0000-4000-8000-00000000c001",
@@ -367,6 +396,7 @@ export class MemoryLessonRepository implements LessonRepository {
       if (file.ownerId === ownerId && file.notebookId === notebookId) {
         this.files.delete(key(ownerId, file.id));
         this.designBases.delete(key(ownerId, file.id));
+        this.lessonGenerationIntents.delete(key(ownerId, file.id));
       }
     }
   }
@@ -406,6 +436,13 @@ export class MemoryLessonRepository implements LessonRepository {
     };
     this.files.set(key(ownerId, file.id), file);
     this.createInitialDesignBasis(ownerId, file, input.lessonBlueprintId);
+    const prompt = input.initialAgentPrompt?.trim();
+    if (prompt) {
+      this.lessonGenerationIntents.set(key(ownerId, file.id), {
+        id: crypto.randomUUID(), ownerId, lessonFileId: file.id, prompt,
+        state: "pending", createdAt: timestamp,
+      });
+    }
     await this.updateNotebook(ownerId, input.notebookId, {});
     this.createLessonFileRequests.set(requestKey, { signature, file: structuredClone(file) });
     return structuredClone(file);
@@ -429,11 +466,58 @@ export class MemoryLessonRepository implements LessonRepository {
     if (!current) throw new Error("lesson_file_not_found");
     this.files.delete(key(ownerId, fileId));
     this.designBases.delete(key(ownerId, fileId));
+    this.lessonGenerationIntents.delete(key(ownerId, fileId));
     await this.updateNotebook(ownerId, current.notebookId, {});
   }
 
   async getLessonFile(ownerId: string, fileId: string) {
     return this.files.get(key(ownerId, fileId)) ?? null;
+  }
+
+  async getLessonFileContext(ownerId: string, fileId: string) {
+    const file = await this.getLessonFile(ownerId, fileId);
+    return file ? {
+      id: file.id,
+      ownerId: file.ownerId,
+      notebookId: file.notebookId,
+      documentVersion: file.documentVersion,
+      contextProfile: structuredClone(file.contextProfile),
+    } : null;
+  }
+
+  async getPendingLessonGenerationIntent(ownerId: string, lessonFileId: string) {
+    const intent = this.lessonGenerationIntents.get(key(ownerId, lessonFileId));
+    return intent?.state === "pending" ? structuredClone(intent) : null;
+  }
+
+  async enqueueLessonGenerationIntent(input: Parameters<LessonRepository["enqueueLessonGenerationIntent"]>[0]) {
+    const prompt = input.prompt.trim();
+    if (!prompt) throw new Error("generation_intent_prompt_empty");
+    const requestKey = key(input.ownerId, input.idempotencyKey);
+    const signature = JSON.stringify({ lessonFileId: input.lessonFileId, prompt });
+    const replay = this.lessonGenerationIntentRequests.get(requestKey);
+    if (replay) {
+      if (replay.signature !== signature) throw new Error("idempotency_conflict");
+      return structuredClone(replay.intent);
+    }
+    if (!await this.getLessonFile(input.ownerId, input.lessonFileId)) throw new Error("lesson_file_not_found");
+    const intent: LessonGenerationIntentRecord = {
+      id: crypto.randomUUID(), ownerId: input.ownerId, lessonFileId: input.lessonFileId,
+      prompt, state: "pending", createdAt: now(),
+    };
+    this.lessonGenerationIntents.set(key(input.ownerId, input.lessonFileId), intent);
+    this.lessonGenerationIntentRequests.set(requestKey, { signature, intent: structuredClone(intent) });
+    return structuredClone(intent);
+  }
+
+  async claimLessonGenerationIntent(input: Parameters<LessonRepository["claimLessonGenerationIntent"]>[0]) {
+    const current = await this.getPendingLessonGenerationIntent(input.ownerId, input.lessonFileId);
+    if (!current || current.id !== input.intentId) throw new Error("lesson_generation_intent_unavailable");
+    const claimed: LessonGenerationIntentRecord = {
+      ...current, state: "claimed", runId: input.runId, claimedAt: now(),
+    };
+    this.lessonGenerationIntents.set(key(input.ownerId, input.lessonFileId), claimed);
+    return structuredClone(claimed);
   }
 
   async getLessonDesignBasis(ownerId: string, lessonFileId: string) {
@@ -562,7 +646,11 @@ export class MemoryLessonRepository implements LessonRepository {
     const approval = await this.getApproval(args.ownerId, args.approvalId);
     if (!approval) throw new Error("approval_not_found");
     if (approval.state !== "pending" && approval.state !== "approved") throw new Error("approval_not_approvable");
-    if (isSemesterFrameworkPatch(approval.patch) || isLessonDesignBasisPatch(approval.patch)) {
+    if (
+      isSemesterFrameworkPatch(approval.patch)
+      || isLessonDesignBasisPatch(approval.patch)
+      || isPresentationGoalPatch(approval.patch)
+    ) {
       throw new Error("approval_resource_scope_invalid");
     }
     const current = await this.getLessonFile(args.ownerId, approval.patch.fileId);
@@ -640,6 +728,181 @@ export class MemoryLessonRepository implements LessonRepository {
     return structuredClone(updated);
   }
 
+  async saveClassroomPresentation(
+    presentation: DirectClassroomPresentationRecord,
+  ): Promise<DirectClassroomPresentationRecord> {
+    const existing = await this.findClassroomPresentationByRequest(
+      presentation.ownerId,
+      presentation.idempotencyKey,
+    );
+    if (existing) return existing;
+    const file = await this.getLessonFile(presentation.ownerId, presentation.lessonFileId);
+    if (!file || file.notebookId !== presentation.notebookId) {
+      throw new Error("presentation_source_scope_invalid");
+    }
+    this.classroomPresentations.set(key(presentation.ownerId, presentation.id), structuredClone(presentation));
+    this.presentationCreateRequests.set(key(presentation.ownerId, presentation.idempotencyKey), {
+      presentationId: presentation.id,
+    });
+    return structuredClone(presentation);
+  }
+
+  async findClassroomPresentationByRequest(ownerId: string, idempotencyKey: string) {
+    const replay = this.presentationCreateRequests.get(key(ownerId, idempotencyKey));
+    if (!replay) return null;
+    const presentation = this.classroomPresentations.get(key(ownerId, replay.presentationId));
+    return presentation?.dashiGoal ? structuredClone(presentation) : null;
+  }
+
+  async listClassroomPresentations(ownerId: string, lessonFileId: string) {
+    const file = await this.getLessonFile(ownerId, lessonFileId);
+    if (!file) throw new Error("lesson_file_not_found");
+    return [...this.classroomPresentations.values()]
+      .filter((presentation) => presentation?.dashiGoal && presentation.ownerId === ownerId
+        && presentation.lessonFileId === lessonFileId && presentation.notebookId === file.notebookId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .map((presentation) => structuredClone(presentation));
+  }
+
+  async listClassroomPresentationsForOwner(ownerId: string) {
+    return [...this.classroomPresentations.values()]
+      .filter((presentation) => presentation?.dashiGoal && presentation.ownerId === ownerId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .map((presentation) => structuredClone(presentation));
+  }
+
+  async listRecentClassroomPresentations(ownerId: string, limit = 8) {
+    return [...this.classroomPresentations.values()]
+      .filter((item) => item.ownerId === ownerId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .slice(0, limit)
+      .map((item) => structuredClone(item));
+  }
+
+  async getClassroomPresentation(ownerId: string, presentationId: string) {
+    const presentation = this.classroomPresentations.get(key(ownerId, presentationId));
+    if (!presentation?.dashiGoal) return null;
+    const file = await this.getLessonFile(ownerId, presentation.lessonFileId);
+    return file && file.notebookId === presentation.notebookId ? structuredClone(presentation) : null;
+  }
+
+  async updateClassroomPresentationArtifact(args: {
+    ownerId: string; presentationId: string; storageKey: string; byteSize: number; updatedAt: string;
+  }) {
+    const presentation = await this.getClassroomPresentation(args.ownerId, args.presentationId);
+    if (!presentation) throw new Error("presentation_not_found");
+    const updated = {
+      ...presentation,
+      storageKey: args.storageKey,
+      byteSize: args.byteSize,
+      updatedAt: args.updatedAt,
+    };
+    this.classroomPresentations.set(key(args.ownerId, args.presentationId), structuredClone(updated));
+    return structuredClone(updated);
+  }
+
+  async updateClassroomPresentationGoal(args: Parameters<LessonRepository["updateClassroomPresentationGoal"]>[0]) {
+    const presentation = this.classroomPresentations.get(key(args.ownerId, args.presentationId));
+    if (!presentation) throw new Error("presentation_not_found");
+    if (presentation.checksum !== args.expectedChecksum) throw new Error("presentation_edit_conflict");
+    const updated = {
+      ...presentation,
+      title: args.goal.title,
+      theme: args.goal.themePack,
+      dashiGoal: structuredClone(args.goal),
+      ...(args.artifact ?? {}),
+      checksum: args.checksum,
+      updatedAt: args.updatedAt,
+    };
+    this.classroomPresentations.set(key(args.ownerId, args.presentationId), structuredClone(updated));
+    return structuredClone(updated);
+  }
+
+  async deleteClassroomPresentation(ownerId: string, presentationId: string) {
+    const presentation = await this.getClassroomPresentation(ownerId, presentationId);
+    if (!presentation) throw new Error("presentation_not_found");
+    this.classroomPresentations.delete(key(ownerId, presentationId));
+    for (const [requestKey, request] of this.presentationCreateRequests) {
+      if (request.presentationId === presentationId) this.presentationCreateRequests.delete(requestKey);
+    }
+  }
+
+  async beginClassroomPresentationGeneration(
+    generation: ClassroomPresentationGeneration,
+  ): Promise<BeginClassroomPresentationGenerationResult> {
+    const file = await this.getLessonFile(generation.ownerId, generation.lessonFileId);
+    if (!file || file.notebookId !== generation.notebookId) {
+      throw new Error("presentation_source_scope_invalid");
+    }
+    const active = [...this.classroomPresentationGenerations.values()].find((item) => (
+      item.ownerId === generation.ownerId
+      && item.lessonFileId === generation.lessonFileId
+      && item.status === "generating"
+    ));
+    if (active) return { generation: structuredClone(active), created: false };
+    this.classroomPresentationGenerations.set(
+      key(generation.ownerId, generation.id),
+      structuredClone(generation),
+    );
+    return { generation: structuredClone(generation), created: true };
+  }
+
+  async getLatestClassroomPresentationGeneration(ownerId: string, lessonFileId: string) {
+    const file = await this.getLessonFile(ownerId, lessonFileId);
+    if (!file) throw new Error("lesson_file_not_found");
+    const generations = [...this.classroomPresentationGenerations.values()]
+      .filter((item) => item.ownerId === ownerId && item.lessonFileId === lessonFileId
+        && item.notebookId === file.notebookId);
+    const active = generations.find((item) => item.status === "generating");
+    if (active) return structuredClone(active);
+    const completed = generations
+      .sort((left, right) => right.startedAt.localeCompare(left.startedAt));
+    return completed[0] ? structuredClone(completed[0]) : null;
+  }
+
+  async completeClassroomPresentationGeneration(args: {
+    ownerId: string; generationId: string; presentationId: string; completedAt: string; durationMs: number;
+  }) {
+    const generation = this.classroomPresentationGenerations.get(key(args.ownerId, args.generationId));
+    if (!generation) throw new Error("presentation_generation_not_found");
+    const updated: ClassroomPresentationGeneration = {
+      ...generation, status: "ready", presentationId: args.presentationId, errorCode: null,
+      completedAt: args.completedAt, durationMs: args.durationMs,
+    };
+    this.classroomPresentationGenerations.set(key(args.ownerId, args.generationId), updated);
+    return structuredClone(updated);
+  }
+
+  async failClassroomPresentationGeneration(args: {
+    ownerId: string; generationId: string; errorCode: string; completedAt: string; durationMs: number;
+  }) {
+    const generation = this.classroomPresentationGenerations.get(key(args.ownerId, args.generationId));
+    if (!generation) throw new Error("presentation_generation_not_found");
+    const updated: ClassroomPresentationGeneration = {
+      ...generation, status: "failed", presentationId: null, errorCode: args.errorCode,
+      completedAt: args.completedAt, durationMs: args.durationMs,
+    };
+    this.classroomPresentationGenerations.set(key(args.ownerId, args.generationId), updated);
+    return structuredClone(updated);
+  }
+
+  async recoverInterruptedClassroomPresentationGenerations(completedAt: string) {
+    let recovered = 0;
+    for (const [generationKey, generation] of this.classroomPresentationGenerations) {
+      if (generation.status !== "generating") continue;
+      this.classroomPresentationGenerations.set(generationKey, {
+        ...generation,
+        status: "failed",
+        presentationId: null,
+        errorCode: "presentation_generation_interrupted",
+        completedAt,
+        durationMs: Math.max(0, Date.parse(completedAt) - Date.parse(generation.startedAt)),
+      });
+      recovered += 1;
+    }
+    return recovered;
+  }
+
   async listThreads(
     ownerId: string,
     resource: string | AgentResourceRef,
@@ -706,6 +969,33 @@ export class MemoryLessonRepository implements LessonRepository {
     return thread?.ownerId === ownerId && !thread.deletedAt ? thread : null;
   }
 
+  async getConversationSnapshot(ownerId: string, threadId: string, branchId: string) {
+    const thread = await this.getThread(ownerId, threadId);
+    const branch = await this.getBranch(ownerId, threadId, branchId);
+    if (!thread || !branch) return null;
+    const [branches, messages, latestRun, approvals] = await Promise.all([
+      this.listBranches(ownerId, threadId),
+      this.listMessages(ownerId, threadId, branchId),
+      this.getLatestRun(ownerId, threadId, branchId),
+      this.listApprovals(ownerId, threadId, branchId),
+    ]);
+    const events = latestRun ? await this.listRunEvents(ownerId, latestRun.id) : [];
+    const capturedAt = now();
+    return {
+      schemaVersion: 1 as const,
+      capturedAt,
+      aggregateVersion: [thread.updatedAt, latestRun?.id ?? "none", latestRun?.status ?? "idle", events.length].join(":"),
+      thread: structuredClone(thread),
+      branch: structuredClone(branch),
+      branches: structuredClone(branches),
+      messages: structuredClone(messages),
+      latestRun: latestRun ? structuredClone(latestRun) : null,
+      events: structuredClone(events),
+      throughSequence: events.length,
+      approvals: structuredClone(approvals),
+    };
+  }
+
   async updateThread(
     ownerId: string,
     threadId: string,
@@ -749,7 +1039,14 @@ export class MemoryLessonRepository implements LessonRepository {
     const parentSession = parentBranchId
       ? this.sessionItems.get(key(ownerId, threadId, parentBranchId)) ?? []
       : [];
-    if (forkCursor !== undefined && parentSession.length < forkCursor) {
+    const parentPiSession = parentBranchId
+      ? this.runtimeSessions.get(key(ownerId, threadId, parentBranchId, "pi"))
+      : undefined;
+    if (
+      forkCursor !== undefined
+      && parentSession.length < forkCursor
+      && (parentPiSession?.messages.length ?? 0) < forkCursor
+    ) {
       throw new Error("fork_session_not_committed");
     }
     const branch: AgentBranchRecord = {
@@ -779,6 +1076,20 @@ export class MemoryLessonRepository implements LessonRepository {
           })) as AgentInputItem[]
         : structuredClone(parentSession.slice(0, forkCursor));
       this.sessionItems.set(key(ownerId, threadId, branch.id), inheritedSession);
+      for (const runtime of ["pi"] as const) {
+        const parentRuntime = this.runtimeSessions.get(key(ownerId, threadId, parentBranchId, runtime));
+        if (!parentRuntime) continue;
+        const runtimeMessages = forkCursor === undefined
+          ? parentRuntime.messages
+          : parentRuntime.messages.slice(0, forkCursor);
+        this.runtimeSessions.set(key(ownerId, threadId, branch.id, runtime), {
+          ...structuredClone(parentRuntime),
+          branchId: branch.id,
+          revision: 1,
+          messages: structuredClone(runtimeMessages),
+          updatedAt: now(),
+        });
+      }
       const parentMemory = this.threadMemories.get(key(ownerId, threadId, parentBranchId));
       if (parentMemory && forkCursor !== undefined && parentMemory.cursor <= forkCursor) {
         this.threadMemories.set(key(ownerId, threadId, branch.id), structuredClone(parentMemory));
@@ -800,6 +1111,19 @@ export class MemoryLessonRepository implements LessonRepository {
     return branch?.ownerId === ownerId && branch.threadId === threadId ? branch : null;
   }
 
+  async updateBranch(
+    ownerId: string,
+    threadId: string,
+    branchId: string,
+    patch: Partial<Pick<AgentBranchRecord, "pendingInteraction">>,
+  ) {
+    const branch = await this.getBranch(ownerId, threadId, branchId);
+    if (!branch) throw new Error("branch_not_found");
+    const updated = { ...branch, ...patch };
+    this.branches.set(branchId, updated);
+    return structuredClone(updated);
+  }
+
   async listMessages(ownerId: string, threadId: string, branchId: string, cursor?: string, limit = 100) {
     const separator = cursor?.lastIndexOf("|") ?? -1;
     const cursorTime = separator > 0 ? cursor!.slice(0, separator) : cursor;
@@ -818,9 +1142,18 @@ export class MemoryLessonRepository implements LessonRepository {
       const events = this.runEvents
         .filter((event) => event.ownerId === ownerId && event.runId === run.id)
         .map((event) => event.data);
+      const turnPhase = persistedTurnPhaseFromEvents(events, run.status);
       return {
         ...structuredClone(message),
         activities: persistedActivitiesFromEvents(events, run.status),
+        turnTexts: persistedTurnTextsFromEvents(events),
+        turn: {
+          runId: run.id,
+          status: run.status,
+          ...turnPhase,
+          startedAt: run.startedAt,
+          completedAt: run.completedAt,
+        },
       };
     });
   }
@@ -863,14 +1196,69 @@ export class MemoryLessonRepository implements LessonRepository {
   }
 
   async createRun(input: Omit<AgentRunRecord, "startedAt"> & { startedAt?: string }) {
+    if (
+      ["queued", "running", "awaiting_approval"].includes(input.status)
+      && [...this.runs.values()].some((candidate) => (
+        candidate.ownerId === input.ownerId
+        && candidate.threadId === input.threadId
+        && ["queued", "running", "awaiting_approval"].includes(candidate.status)
+      ))
+    ) throw new Error("active_run_exists");
     const run: AgentRunRecord = { ...input, startedAt: input.startedAt ?? now() };
     this.runs.set(run.id, run);
     return run;
   }
 
+  async createRunWithInitialMessages(input: {
+    run: AgentRunRecord;
+    userMessage?: AgentMessageRecord;
+    assistantMessage: AgentMessageRecord;
+  }) {
+    const { run, userMessage, assistantMessage } = input;
+    const branch = await this.getBranch(run.ownerId, run.threadId, run.branchId);
+    const thread = await this.getThread(run.ownerId, run.threadId);
+    if (!branch || !thread) throw new Error("branch_not_found");
+    if (
+      (run.userMessageId ?? null) !== (userMessage?.id ?? null)
+      || run.assistantMessageId !== assistantMessage.id
+      || [...(userMessage ? [userMessage] : []), assistantMessage].some((message) => (
+        message.ownerId !== run.ownerId
+        || message.threadId !== run.threadId
+        || message.branchId !== run.branchId
+      ))
+      || (userMessage !== undefined && userMessage.role !== "user")
+      || assistantMessage.role !== "assistant"
+    ) throw new Error("run_initial_messages_scope_invalid");
+    if (this.runs.has(run.id) || (userMessage && this.messages.has(userMessage.id)) || this.messages.has(assistantMessage.id)) {
+      throw new Error("idempotency_conflict");
+    }
+    if ([...this.runs.values()].some((candidate) => (
+      candidate.ownerId === run.ownerId
+      && candidate.threadId === run.threadId
+      && ["queued", "running", "awaiting_approval"].includes(candidate.status)
+    ))) throw new Error("active_run_exists");
+    this.runs.set(run.id, structuredClone(run));
+    if (userMessage) this.messages.set(userMessage.id, structuredClone(userMessage));
+    this.messages.set(assistantMessage.id, structuredClone(assistantMessage));
+    this.threads.set(thread.id, { ...thread, status: "running", updatedAt: run.startedAt });
+    return {
+      run: structuredClone(run),
+      userMessage: userMessage ? structuredClone(userMessage) : undefined,
+      assistantMessage: structuredClone(assistantMessage),
+    };
+  }
+
   async getRun(ownerId: string, runId: string) {
     const run = this.runs.get(runId);
     return run?.ownerId === ownerId ? run : null;
+  }
+
+  async getRunByClientCommand(ownerId: string, threadId: string, clientCommandId: string) {
+    return [...this.runs.values()].find((run) => (
+      run.ownerId === ownerId
+      && run.threadId === threadId
+      && run.clientCommandId === clientCommandId
+    )) ?? null;
   }
 
   async getLatestRun(ownerId: string, threadId: string, branchId: string) {
@@ -880,7 +1268,18 @@ export class MemoryLessonRepository implements LessonRepository {
         && run.threadId === threadId
         && run.branchId === branchId
       ))
-      .sort((left, right) => right.startedAt.localeCompare(left.startedAt))[0] ?? null;
+      .sort((left, right) => right.startedAt.localeCompare(left.startedAt) || right.id.localeCompare(left.id))[0] ?? null;
+  }
+
+  async getLatestCompletedRun(ownerId: string, threadId: string, branchId: string) {
+    return [...this.runs.values()]
+      .filter((run) => (
+        run.ownerId === ownerId
+        && run.threadId === threadId
+        && run.branchId === branchId
+        && run.status === "completed"
+      ))
+      .sort((left, right) => right.startedAt.localeCompare(left.startedAt) || right.id.localeCompare(left.id))[0] ?? null;
   }
 
   async updateRun(ownerId: string, runId: string, patch: Partial<AgentRunRecord>) {
@@ -901,6 +1300,12 @@ export class MemoryLessonRepository implements LessonRepository {
       || new Date(run.leaseExpiresAt).getTime() <= Date.now()
     ) {
       throw new Error("run_lease_lost");
+    }
+    for (const approval of this.approvals.values()) {
+      if (approval.ownerId === args.ownerId && approval.runId === args.runId
+        && approval.continuationStatus === "running" && approval.continuationLeaseToken === args.leaseToken) {
+        approval.continuationLeaseExpiresAt = args.leaseExpiresAt;
+      }
     }
     return this.updateRun(args.ownerId, args.runId, {
       status: "running",
@@ -947,9 +1352,7 @@ export class MemoryLessonRepository implements LessonRepository {
     await this.updateThread(args.ownerId, run.threadId, {
       status: args.status === "awaiting_approval"
         ? "awaiting_approval"
-        : args.status === "failed"
-          ? "failed"
-          : "idle",
+        : "idle",
     });
     return structuredClone(updated);
   }
@@ -999,21 +1402,34 @@ export class MemoryLessonRepository implements LessonRepository {
       ).getTime() <= staleBefore;
       if (!leaseExpired && !leaseLessZombie) continue;
       const cancelled = Boolean(run.cancelRequestedAt);
+      const hasPendingApproval = [...this.approvals.values()].some((approval) => (
+        approval.ownerId === ownerId
+        && approval.runId === run.id
+        && approval.state === "pending"
+      ));
+      const recovery = expiredRunRecovery({ cancelled, hasPendingApproval });
+      for (const approval of this.approvals.values()) {
+        if (approval.ownerId === ownerId && approval.runId === run.id && approval.continuationStatus === "running") {
+          approval.continuationStatus = cancelled ? "completed" : "ready";
+          approval.continuationLeaseToken = undefined;
+          approval.continuationLeaseExpiresAt = undefined;
+        }
+      }
       await this.updateRun(ownerId, run.id, {
-        status: cancelled ? "cancelled" : "failed",
-        error: cancelled ? undefined : "run_interrupted",
-        completedAt: now(),
+        status: recovery.status,
+        error: recovery.error,
+        completedAt: recovery.status === "awaiting_approval" ? undefined : now(),
         leaseToken: undefined,
         leaseExpiresAt: undefined,
       });
       if (run.assistantMessageId) {
         await this.updateMessage(ownerId, run.assistantMessageId, {
-          status: cancelled ? "cancelled" : "failed",
-          error: cancelled ? undefined : "run_interrupted",
+          status: recovery.messageStatus,
+          error: recovery.error,
         });
       }
       await this.updateThread(ownerId, run.threadId, {
-        status: cancelled ? "idle" : "failed",
+        status: recovery.threadStatus,
       });
       recovered += 1;
     }
@@ -1088,7 +1504,7 @@ export class MemoryLessonRepository implements LessonRepository {
     }
     const thread = await this.getThread(ownerId, approval.threadId);
     if (thread?.status === "awaiting_approval" || thread?.status === "running") {
-      await this.updateThread(ownerId, thread.id, { status: "failed" });
+      await this.updateThread(ownerId, thread.id, { status: "idle" });
     }
     return structuredClone(updated);
   }
@@ -1114,7 +1530,12 @@ export class MemoryLessonRepository implements LessonRepository {
     let basis: LessonDesignBasisAggregate | null = null;
     if (approval.state === "pending") {
       if (args.approved) {
-        if (isSemesterFrameworkPatch(approval.patch)) {
+        if (isPresentationGoalPatch(approval.patch)) {
+          const current = await this.getLessonFile(args.ownerId, approval.patch.fileId);
+          if (!current) throw new Error("lesson_file_not_found");
+          if (current.documentVersion !== approval.patch.documentVersion) throw new Error("document_conflict");
+          approval = await this.resolveApproval(args.ownerId, args.approvalId, "approved");
+        } else if (isSemesterFrameworkPatch(approval.patch)) {
           framework = await this.applyApprovedSemesterFrameworkPatch({
             ownerId: args.ownerId,
             approvalId: args.approvalId,
@@ -1140,7 +1561,10 @@ export class MemoryLessonRepository implements LessonRepository {
         approval = await this.resolveApproval(args.ownerId, args.approvalId, "rejected");
       }
     } else if (args.approved) {
-      if (isSemesterFrameworkPatch(approval.patch)) {
+      if (isPresentationGoalPatch(approval.patch)) {
+        // Confirmation is the durable side effect. Rendering runs only when
+        // the approved SDK tool resumes; no A4 mutation is performed here.
+      } else if (isSemesterFrameworkPatch(approval.patch)) {
         framework = await this.getSemesterFramework(args.ownerId, approval.patch.frameworkId);
       } else if (isLessonDesignBasisPatch(approval.patch)) {
         basis = await this.getLessonDesignBasis(args.ownerId, approval.patch.fileId);
@@ -1178,10 +1602,16 @@ export class MemoryLessonRepository implements LessonRepository {
     leaseToken: string;
     leaseExpiresAt: string;
   }) {
-    const approval = await this.getApproval(args.ownerId, args.approvalId);
-    if (!approval) throw new Error("approval_not_found");
+    const approval = this.approvals.get(args.approvalId);
+    if (!approval || approval.ownerId !== args.ownerId) throw new Error("approval_not_found");
     if (approval.state === "pending") throw new Error("approval_decision_missing");
     if (approval.continuationStatus === "completed") return structuredClone(approval);
+    const run = this.runs.get(approval.runId);
+    if (!run || run.ownerId !== args.ownerId) throw new Error("run_not_found");
+    if (run.status === "cancelled" || run.status === "completed" || run.cancelRequestedAt) throw new Error("run_not_continuable");
+    if ([...this.runs.values()].some(other => other.ownerId === args.ownerId
+      && other.threadId === approval.threadId && other.id !== run.id
+      && ["queued", "running", "awaiting_approval"].includes(other.status))) throw new Error("active_run_exists");
     const leaseActive = approval.continuationStatus === "running"
       && approval.continuationLeaseExpiresAt
       && new Date(approval.continuationLeaseExpiresAt).getTime() > Date.now();
@@ -1198,6 +1628,10 @@ export class MemoryLessonRepository implements LessonRepository {
       continuationMessageId: approval.continuationMessageId ?? crypto.randomUUID(),
     };
     this.approvals.set(args.approvalId, updated);
+    this.runs.set(run.id, { ...run, status: "running", leaseToken: args.leaseToken,
+      leaseExpiresAt: args.leaseExpiresAt, heartbeatAt: now(), completedAt: undefined, error: undefined });
+    const thread = this.threads.get(approval.threadId);
+    if (thread) this.threads.set(thread.id, { ...thread, status: "running", updatedAt: now() });
     return structuredClone(updated);
   }
 
@@ -1208,36 +1642,35 @@ export class MemoryLessonRepository implements LessonRepository {
     status: "ready" | "completed";
     error?: string;
   }) {
-    const approval = await this.getApproval(args.ownerId, args.approvalId);
-    if (!approval) throw new Error("approval_not_found");
-    if (
-      approval.continuationStatus === "running"
-      && approval.continuationLeaseToken !== args.leaseToken
-    ) {
-      throw new Error("approval_lease_lost");
-    }
-    if (approval.continuationStatus === "completed") return structuredClone(approval);
-    const updated: AgentApprovalRecord = {
-      ...approval,
-      continuationStatus: args.status,
-      continuationLeaseToken: undefined,
-      continuationLeaseExpiresAt: undefined,
-      continuationError: args.error,
-    };
-    this.approvals.set(args.approvalId, updated);
-    return structuredClone(updated);
+    return this.settleApprovalContinuation({ ...args, outcome: args.status });
   }
 
   async settleApprovalContinuation(args: Parameters<LessonRepository["settleApprovalContinuation"]>[0]) {
-    const approval = await this.getApproval(args.ownerId, args.approvalId);
-    if (!approval) throw new Error("approval_not_found");
+    const approval = this.approvals.get(args.approvalId);
+    if (!approval || approval.ownerId !== args.ownerId) throw new Error("approval_not_found");
     if (approval.continuationStatus === "completed") return structuredClone(approval);
+    if (approval.continuationStatus === "ready" && !approval.continuationLeaseToken) return structuredClone(approval);
+    const run = this.runs.get(approval.runId);
+    if (!run || run.ownerId !== args.ownerId) throw new Error("run_not_found");
     if (
       approval.continuationStatus !== "running"
       || approval.continuationLeaseToken !== args.leaseToken
+      || run.status !== "running" || run.leaseToken !== args.leaseToken
+      || !run.leaseExpiresAt || Date.parse(run.leaseExpiresAt) <= Date.now()
+      || (run.cancelRequestedAt && args.outcome !== "cancelled")
     ) {
       throw new Error("approval_lease_lost");
     }
+
+    if (args.sessionItems) {
+      await this.replaceSessionItems(
+        args.ownerId,
+        approval.threadId,
+        approval.branchId,
+        args.sessionItems,
+      );
+    }
+    const sessionCursor = args.sessionItems?.length ?? args.sessionCursor;
 
     const terminal = args.outcome === "completed" || args.outcome === "cancelled";
     const updated: AgentApprovalRecord = {
@@ -1251,24 +1684,34 @@ export class MemoryLessonRepository implements LessonRepository {
     this.approvals.set(args.approvalId, updated);
 
     if (args.outcome === "paused") {
+      await this.updateRun(args.ownerId, run.id, { status: "awaiting_approval", leaseToken: undefined, leaseExpiresAt: undefined });
+      await this.updateThread(args.ownerId, approval.threadId, { status: "awaiting_approval" });
+      if (args.assistantMessageId) {
+        await this.updateMessage(args.ownerId, args.assistantMessageId, {
+          content: args.content,
+          sources: args.sources,
+          sessionCursor,
+          status: "completed",
+        });
+      }
       return structuredClone(updated);
     }
 
-    const run = await this.getRun(args.ownerId, approval.runId);
-    if (!run) throw new Error("run_not_found");
     if (terminal) {
       await this.updateRun(args.ownerId, run.id, {
         status: args.outcome === "cancelled" ? "cancelled" : "completed",
         tokenUsage: args.tokenUsage ?? run.tokenUsage,
         error: undefined,
         completedAt: now(),
+        leaseToken: undefined,
+        leaseExpiresAt: undefined,
       });
       await this.updateThread(args.ownerId, approval.threadId, { status: "idle" });
       if (args.assistantMessageId) {
         await this.updateMessage(args.ownerId, args.assistantMessageId, {
           content: args.content,
           sources: args.sources,
-          sessionCursor: args.sessionCursor,
+          sessionCursor,
           status: args.outcome === "cancelled" ? "cancelled" : "completed",
         });
       }
@@ -1278,14 +1721,17 @@ export class MemoryLessonRepository implements LessonRepository {
         tokenUsage: args.tokenUsage ?? run.tokenUsage,
         error: args.error,
         completedAt: now(),
+        leaseToken: undefined,
+        leaseExpiresAt: undefined,
       });
-      await this.updateThread(args.ownerId, approval.threadId, { status: "failed" });
+      await this.updateThread(args.ownerId, approval.threadId, { status: "idle" });
       if (args.assistantMessageId) {
         await this.updateMessage(args.ownerId, args.assistantMessageId, {
           content: args.content,
           sources: args.sources,
-          sessionCursor: args.sessionCursor,
+          sessionCursor,
           status: "failed",
+          error: args.error,
         });
       }
     }
@@ -1366,6 +1812,48 @@ export class MemoryLessonRepository implements LessonRepository {
     }
   }
 
+  async getAgentRuntimeSession(
+    ownerId: string,
+    threadId: string,
+    branchId: string,
+    runtime: "pi",
+  ) {
+    const branch = await this.getBranch(ownerId, threadId, branchId);
+    if (!branch) return null;
+    const snapshot = this.runtimeSessions.get(key(ownerId, threadId, branchId, runtime));
+    return snapshot ? structuredClone(snapshot) : null;
+  }
+
+  async saveAgentRuntimeSession(args: {
+    ownerId: string;
+    threadId: string;
+    branchId: string;
+    runtime: "pi";
+    expectedRevision: number;
+    messages: unknown[];
+  }) {
+    const thread = await this.getThread(args.ownerId, args.threadId);
+    const branch = await this.getBranch(args.ownerId, args.threadId, args.branchId);
+    if (!thread || !branch) throw new Error("agent_runtime_session_scope_invalid");
+    const sessionKey = key(args.ownerId, args.threadId, args.branchId, args.runtime);
+    const current = this.runtimeSessions.get(sessionKey);
+    const currentRevision = current?.revision ?? 0;
+    if (currentRevision !== args.expectedRevision) {
+      throw new Error("agent_runtime_session_conflict");
+    }
+    const snapshot: AgentRuntimeSessionSnapshot = {
+      ownerId: args.ownerId,
+      threadId: args.threadId,
+      branchId: args.branchId,
+      runtime: args.runtime,
+      revision: currentRevision + 1,
+      messages: structuredClone(args.messages),
+      updatedAt: now(),
+    };
+    this.runtimeSessions.set(sessionKey, snapshot);
+    return structuredClone(snapshot);
+  }
+
   async getThreadMemory(ownerId: string, threadId: string, branchId: string) {
     return this.threadMemories.get(key(ownerId, threadId, branchId)) ?? null;
   }
@@ -1374,6 +1862,40 @@ export class MemoryLessonRepository implements LessonRepository {
     this.threadMemories.set(key(ownerId, threadId, branchId), { summary, cursor });
   }
   async searchKnowledge(): Promise<KnowledgeResult[]> { return []; }
+  async searchCurriculumStandards(): Promise<KnowledgeResult[]> { return []; }
+  async getPublishedCurriculumStandardFingerprint() {
+    return "memory-curriculum-standards-v1";
+  }
+  async getCurriculumStandardSearchCache(input: {
+    contextFingerprint: string;
+    querySha256: string;
+    limit: number;
+  }) {
+    const cached = this.curriculumStandardSearchCache.get(key(
+      input.contextFingerprint,
+      input.querySha256,
+      String(input.limit),
+    ));
+    return cached ? structuredClone(cached) : null;
+  }
+  async saveCurriculumStandardSearchCache(input: {
+    contextFingerprint: string;
+    querySha256: string;
+    limit: number;
+    results: KnowledgeResult[];
+  }) {
+    const record: CurriculumStandardSearchCacheRecord = {
+      ...input,
+      results: structuredClone(input.results),
+      updatedAt: now(),
+    };
+    this.curriculumStandardSearchCache.set(key(
+      input.contextFingerprint,
+      input.querySha256,
+      String(input.limit),
+    ), record);
+    return structuredClone(record);
+  }
   async getKnowledgePassage(): Promise<KnowledgeResult | null> { return null; }
   async getKnowledgeSourcePassages(): Promise<KnowledgeResult[]> { return []; }
   async listProjectSources(): Promise<SourceRef[]> { return []; }
@@ -1395,12 +1917,12 @@ export class MemoryLessonRepository implements LessonRepository {
   ) {
     const run = await this.getRun(ownerId, runId);
     if (!run) throw new Error("run_not_found");
-    for (const source of sources) {
+    for (const source of uniqueRunEvidenceSources(sources)) {
       const index = this.runEvidence.findIndex((item) => (
         item.ownerId === ownerId
         && item.runId === runId
         && item.kind === kind
-        && item.source.id === source.id
+        && runEvidenceIdentity(item.source) === runEvidenceIdentity(source)
       ));
       const record: AgentRunEvidenceRecord = {
         ownerId,
@@ -1418,6 +1940,11 @@ export class MemoryLessonRepository implements LessonRepository {
     return this.runEvidence
       .filter((item) => item.ownerId === ownerId && item.runId === runId)
       .map((item) => structuredClone(item));
+  }
+
+  async filterCurrentCurriculumStandardSources(sources: SourceRef[]) {
+    if (!await this.getPublishedCurriculumStandardFingerprint()) return [];
+    return structuredClone(sources.filter((source) => Boolean(source.chunkId)));
   }
 
   async createSemesterFramework(
@@ -1861,6 +2388,42 @@ export class MemoryLessonRepository implements LessonRepository {
       && (!filter.lessonBlueprintId || item.lessonBlueprintId === filter.lessonBlueprintId)
       && (!filter.semesterFrameworkId || item.semesterFrameworkId === filter.semesterFrameworkId)
     )));
+  }
+
+  async getPendingSemesterFrameworkWritebackIntent(ownerId: string, frameworkId: string) {
+    return structuredClone([...this.semesterFrameworkWritebackIntents.values()].find((intent) => (
+      intent.ownerId === ownerId
+      && intent.frameworkId === frameworkId
+      && intent.state === "pending"
+    )) ?? null);
+  }
+
+  async enqueueSemesterFrameworkWritebackIntent(input: Parameters<LessonRepository["enqueueSemesterFrameworkWritebackIntent"]>[0]) {
+    const prompt = input.prompt.trim();
+    if (!prompt) throw new Error("framework_writeback_prompt_empty");
+    const feedback = this.lessonClassFeedback.find((record) => (
+      record.id === input.feedbackId
+      && record.semesterFrameworkId === input.frameworkId
+    ));
+    if (!feedback) throw new Error("class_feedback_scope_invalid");
+    const existing = this.semesterFrameworkWritebackIntents.get(key(input.ownerId, input.feedbackId));
+    if (existing) return structuredClone(existing);
+    const intent: SemesterFrameworkWritebackIntentRecord = {
+      id: crypto.randomUUID(), ownerId: input.ownerId, frameworkId: input.frameworkId,
+      feedbackId: input.feedbackId, prompt, state: "pending", createdAt: now(),
+    };
+    this.semesterFrameworkWritebackIntents.set(key(input.ownerId, input.feedbackId), intent);
+    return structuredClone(intent);
+  }
+
+  async claimSemesterFrameworkWritebackIntent(input: Parameters<LessonRepository["claimSemesterFrameworkWritebackIntent"]>[0]) {
+    const current = await this.getPendingSemesterFrameworkWritebackIntent(input.ownerId, input.frameworkId);
+    if (!current || current.id !== input.intentId) throw new Error("semester_framework_writeback_intent_unavailable");
+    const claimed: SemesterFrameworkWritebackIntentRecord = {
+      ...current, state: "claimed", runId: input.runId, claimedAt: now(),
+    };
+    this.semesterFrameworkWritebackIntents.set(key(input.ownerId, current.feedbackId), claimed);
+    return structuredClone(claimed);
   }
 
   async getCurrentCurriculumCatalogRelease() {

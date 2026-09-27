@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DocumentPatchError } from "../document-patch.js";
 import { AgentEvidenceError } from "./evidence.js";
-import { publicAgentError } from "./public-error.js";
+import { publicAgentError, publicPiAgentError } from "./public-error.js";
 
 describe("publicAgentError", () => {
   it("does not expose internal document fields for stale patch text", () => {
@@ -39,6 +39,27 @@ describe("publicAgentError", () => {
       .toBe("agent_rate_limited");
     expect(publicAgentError(new Error("upstream timed out after 15000ms")))
       .toBe("agent_timeout");
+    expect(publicAgentError(new Error("request timed out"))).toBe("agent_timeout");
+  });
+
+  it("classifies provider connection failures before any model response", () => {
+    expect(publicAgentError(new Error("getaddrinfo ENOTFOUND model-gateway.example")))
+      .toBe("agent_provider_unavailable");
+    expect(publicAgentError(new Error("fetch failed: ECONNRESET")))
+      .toBe("agent_provider_unavailable");
+  });
+
+  it("normalizes Pi protocol failures through the shared public contract", () => {
+    expect(publicPiAgentError(new Error("pi_provider_protocol_text_detected")))
+      .toBe("agent_provider_protocol_error");
+    expect(publicPiAgentError(new Error("pi_run_transcript_incomplete")))
+      .toBe("agent_transcript_incomplete");
+    expect(publicPiAgentError(new Error("pi_run_failed:429 rate limit")))
+      .toBe("agent_rate_limited");
+    expect(publicPiAgentError(new Error("pi_run_failed:tool response schema invalid")))
+      .toBe("agent_provider_protocol_error");
+    expect(publicPiAgentError(new Error("pi_run_failed:unknown provider failure")))
+      .toBe("agent_provider_error");
   });
 
   it("preserves evidence-boundary errors without exposing source bodies", () => {

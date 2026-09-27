@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { FileText, LoaderCircle, Trash2, UserRound } from "lucide-react";
+import { Eye, FileText, LoaderCircle, Presentation, Trash2, UserRound } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/empty";
 import { Separator } from "@/components/ui/separator";
 import { agentApi } from "@/lib/agent-api";
-import { supabase } from "@/lib/supabase";
+import { getCurrentAccount } from "@/lib/session";
 
 const statusLabels = {
   queued: "等待处理",
@@ -45,8 +45,10 @@ const formatBytes = (value) => {
 export function ProfileDialog({ notebooks, onClose }) {
   const [account, setAccount] = useState(null);
   const [files, setFiles] = useState([]);
+  const [presentations, setPresentations] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState(false);
+  const [filesLoadError, setFilesLoadError] = useState(false);
+  const [presentationsLoadError, setPresentationsLoadError] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
 
@@ -66,21 +68,22 @@ export function ProfileDialog({ notebooks, onClose }) {
   useEffect(() => {
     let cancelled = false;
     Promise.allSettled([
-      supabase?.auth.getUser() ?? Promise.resolve({ data: { user: null } }),
+      getCurrentAccount(),
       agentApi.listKnowledgeUploads({ includeAttached: true }),
-    ]).then(([accountResult, filesResult]) => {
+      agentApi.listMyClassroomPresentations(),
+    ]).then(([accountResult, filesResult, presentationsResult]) => {
       if (cancelled) return;
-      if (accountResult.status === "fulfilled") setAccount(accountResult.value.data?.user ?? null);
+      if (accountResult.status === "fulfilled") setAccount(accountResult.value);
       if (filesResult.status === "fulfilled") setFiles(filesResult.value);
-      else setLoadError(true);
+      else setFilesLoadError(true);
+      if (presentationsResult.status === "fulfilled") setPresentations(presentationsResult.value);
+      else setPresentationsLoadError(true);
       setLoading(false);
     });
     return () => { cancelled = true; };
   }, []);
 
-  const accountName = account?.user_metadata?.full_name
-    || account?.user_metadata?.name
-    || account?.email?.split("@")[0]
+  const accountName = account?.loginName
     || "LessonUp 用户";
 
   const scopeLabel = (file) => {
@@ -104,38 +107,81 @@ export function ProfileDialog({ notebooks, onClose }) {
     }
   };
 
+  const deletePresentation = async () => {
+    if (!deleteTarget || deletingId) return;
+    setDeletingId(deleteTarget.id);
+    try {
+      await agentApi.deleteClassroomPresentation(deleteTarget.id);
+      setPresentations((current) => current.filter((presentation) => presentation.id !== deleteTarget.id));
+      toast.success(`“${deleteTarget.title}”已删除`);
+      setDeleteTarget(null);
+    } catch {
+      toast.error("演示材料删除失败，请稍后重试");
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   return <>
     <Dialog open onOpenChange={(open) => { if (!open && !deletingId) onClose(); }}>
       <DialogContent className="profile-dialog">
-        <DialogHeader>
+        <DialogHeader className="profile-dialog-header">
           <DialogTitle>个人信息</DialogTitle>
-          <DialogDescription>查看账户概况，并管理你上传到 LessonUp 的资料。</DialogDescription>
         </DialogHeader>
 
         <section className="profile-account" aria-label="账户信息">
           <span className="profile-avatar" aria-hidden="true"><UserRound /></span>
           <div className="profile-account-copy">
             <strong>{accountName}</strong>
-            <span>{account?.email ?? "当前本地开发账户"}</span>
+            <span>{account?.createdAt ? `加入时间 ${formatDate(account.createdAt)}` : "加入时间 —"}</span>
           </div>
           <dl className="profile-stats">
             <div><dt>备课本</dt><dd>{notebooks.length}</dd></div>
             <div><dt>备课文件</dt><dd>{lessonFileCount}</dd></div>
             <div><dt>上传资料</dt><dd>{files.length}</dd></div>
+            <div><dt>演示材料</dt><dd>{presentations.length}</dd></div>
           </dl>
-          {account?.created_at && (
-            <p className="profile-account-meta">加入时间　{formatDate(account.created_at)}</p>
-          )}
+        </section>
+
+        <section className="profile-files" aria-labelledby="profile-presentations-title">
+          <div className="profile-files-heading">
+            <h3 id="profile-presentations-title">我的演示材料</h3>
+            {!loading && <Badge variant="secondary">{presentations.length} 份演示</Badge>}
+          </div>
+          {presentationsLoadError && !loading ? (
+            <Empty className="profile-files-state"><EmptyHeader><EmptyMedia variant="icon"><Presentation /></EmptyMedia><EmptyTitle>暂时无法读取演示材料</EmptyTitle><EmptyDescription>请关闭后重新打开个人信息再试。</EmptyDescription></EmptyHeader></Empty>
+          ) : presentations.length ? (
+            <ul className="profile-file-list">
+              {presentations.map((presentation) => (
+                <li className="profile-file-row profile-presentation-row" key={presentation.id}>
+                  <span className="profile-file-icon" aria-hidden="true"><Presentation /></span>
+                  <div className="profile-file-copy">
+                    <strong title={presentation.title}>{presentation.title}</strong>
+                    <span>{formatBytes(presentation.byteSize)} · {formatDate(presentation.updatedAt)}</span>
+                  </div>
+                  <Badge variant="secondary">Dashi</Badge>
+                  <Button variant="ghost" size="icon-sm" type="button" aria-label={`打开演示材料${presentation.title}`} onClick={async () => {
+                    const access = await agentApi.createPresentationAccess(presentation.id);
+                    window.open(access.url, "_blank", "noopener");
+                  }}>
+                    <Eye />
+                  </Button>
+                  <Button variant="ghost" size="icon-sm" type="button" aria-label={`删除演示材料${presentation.title}`} onClick={() => setDeleteTarget({ ...presentation, kind: "presentation" })}>
+                    <Trash2 />
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          ) : !loading ? (
+            <Empty className="profile-files-state"><EmptyHeader><EmptyMedia variant="icon"><Presentation /></EmptyMedia><EmptyTitle>还没有课堂演示</EmptyTitle><EmptyDescription>在备课助手中确认生成的课堂演示会显示在这里。</EmptyDescription></EmptyHeader></Empty>
+          ) : null}
         </section>
 
         <Separator />
 
         <section className="profile-files" aria-labelledby="profile-files-title">
           <div className="profile-files-heading">
-            <div>
-              <h3 id="profile-files-title">我的资料</h3>
-              <p>原文件存放于私有 Storage，列表信息与检索内容保存在数据库中。</p>
-            </div>
+            <h3 id="profile-files-title">我的资料</h3>
             {!loading && <Badge variant="secondary">{files.length} 个文件</Badge>}
           </div>
 
@@ -147,7 +193,7 @@ export function ProfileDialog({ notebooks, onClose }) {
                 <EmptyDescription>正在同步你的个人资料列表。</EmptyDescription>
               </EmptyHeader>
             </Empty>
-          ) : loadError ? (
+          ) : filesLoadError ? (
             <Empty className="profile-files-state">
               <EmptyHeader>
                 <EmptyMedia variant="icon"><FileText /></EmptyMedia>
@@ -197,17 +243,19 @@ export function ProfileDialog({ notebooks, onClose }) {
     <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => { if (!open && !deletingId) setDeleteTarget(null); }}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>删除这个文件？</DialogTitle>
+          <DialogTitle>删除这个{deleteTarget?.kind === "presentation" ? "演示材料" : "文件"}？</DialogTitle>
           <DialogDescription>
-            “{deleteTarget?.title}”的原文件、数据库记录和检索内容都会被永久删除。
+            {deleteTarget?.kind === "presentation"
+              ? `“${deleteTarget?.title}”的 HTML 演示和数据库记录都会被永久删除。`
+              : `“${deleteTarget?.title}”的原文件、数据库记录和检索内容都会被永久删除。`}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
           <Button variant="outline" type="button" disabled={Boolean(deletingId)} onClick={() => setDeleteTarget(null)}>
             取消
           </Button>
-          <Button variant="destructive" type="button" disabled={Boolean(deletingId)} onClick={deleteFile}>
-            {deletingId ? "删除中…" : "确认删除"}
+          <Button variant="destructive" type="button" disabled={Boolean(deletingId)} onClick={deleteTarget?.kind === "presentation" ? deletePresentation : deleteFile}>
+            {deletingId ? "删除中…" : deleteTarget?.kind === "presentation" ? "删除演示材料" : "删除文件"}
           </Button>
         </DialogFooter>
       </DialogContent>

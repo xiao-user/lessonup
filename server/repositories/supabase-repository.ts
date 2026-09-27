@@ -1,4 +1,4 @@
-import type { AgentInputItem } from "@openai/agents";
+import type { AgentSessionItem as AgentInputItem } from "../repository.js";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { defaultClassFeedbackWritebackStatus } from "../curriculum/continuity-adoption.js";
 import type {
@@ -30,6 +30,8 @@ import type {
   LessonDesignBasisEntryRecord,
   LessonDesignBasisPatch,
   LessonDesignBasisRecord,
+  LessonGenerationIntentRecord,
+  SemesterFrameworkWritebackIntentRecord,
   LessonBlueprintRecord,
   LessonFileRecord,
   NotebookRecord,
@@ -43,6 +45,7 @@ import type {
   UpdateLessonBlueprintInput,
 } from "../domain.js";
 import { lessonContextProfileSchema, lessonPlanSchema } from "../domain.js";
+import { runEvidenceIdentity, uniqueRunEvidenceSources } from "../run-evidence.js";
 import {
   buildCurriculumFacets,
   buildCurriculumOutline,
@@ -55,9 +58,21 @@ import {
   continuityFingerprintFromCandidateId,
 } from "../curriculum/continuity-adoption.js";
 import { deriveFrameworkContinuity } from "../curriculum/framework-continuity.js";
-import type { CreateThreadInput, ImportedNotebook, LessonRepository } from "../repository.js";
+import type {
+  AgentRuntimeName,
+  AgentRuntimeSessionSnapshot,
+  CreateThreadInput,
+  ImportedNotebook,
+  LessonRepository,
+} from "../repository.js";
 import { createLessonPlanPreview } from "../../src/lib/lesson-preview.js";
-import { persistedActivitiesFromEvents } from "../agent-activity-presentation.js";
+import { persistedActivitiesFromEvents, persistedTurnPhaseFromEvents, persistedTurnTextsFromEvents } from "../agent-activity-presentation.js";
+import {
+  type BeginClassroomPresentationGenerationResult,
+  type ClassroomPresentationGeneration,
+  type DirectClassroomPresentationRecord,
+} from "../presentations/domain.js";
+import { dashiGoalSchema } from "../presentations/dashi-goal.js";
 
 const mapCurriculumTextbook = (row: Record<string, any>): CurriculumTextbookRecord => ({
   id: row.id ?? row.textbook_id,
@@ -235,6 +250,31 @@ const mapLessonDesignBasisAggregate = (
   entries: (payload.entries ?? []).map(mapLessonDesignBasisEntry),
 });
 
+const mapLessonGenerationIntent = (row: Record<string, any>): LessonGenerationIntentRecord => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  lessonFileId: row.lesson_file_id,
+  prompt: row.prompt,
+  state: row.state,
+  runId: row.run_id ?? undefined,
+  createdAt: row.created_at,
+  claimedAt: row.claimed_at ?? undefined,
+});
+
+const mapSemesterFrameworkWritebackIntent = (
+  row: Record<string, any>,
+): SemesterFrameworkWritebackIntentRecord => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  frameworkId: row.framework_id,
+  feedbackId: row.feedback_id,
+  prompt: row.prompt,
+  state: row.state,
+  runId: row.run_id ?? undefined,
+  createdAt: row.created_at,
+  claimedAt: row.claimed_at ?? undefined,
+});
+
 const mapFrameworkContinuityCandidate = (
   row: Record<string, any>,
 ): FrameworkContinuityCandidateRecord => ({
@@ -327,7 +367,7 @@ const mapBranch = (row: Record<string, any>): AgentBranchRecord => ({
   id: row.id, ownerId: row.owner_id, threadId: row.thread_id,
   parentBranchId: row.parent_branch_id ?? undefined,
   forkedFromMessageId: row.forked_from_message_id ?? undefined,
-  label: row.label, createdAt: row.created_at,
+  label: row.label, pendingInteraction: row.pending_interaction ?? null, createdAt: row.created_at,
 });
 
 const mapMessage = (row: Record<string, any>): AgentMessageRecord => ({
@@ -337,6 +377,16 @@ const mapMessage = (row: Record<string, any>): AgentMessageRecord => ({
   sources: row.sources ?? undefined,
   sessionCursor: row.session_cursor == null ? undefined : Number(row.session_cursor),
   createdAt: row.created_at,
+});
+
+const mapRuntimeSession = (row: Record<string, any>): AgentRuntimeSessionSnapshot => ({
+  ownerId: row.owner_id,
+  threadId: row.thread_id,
+  branchId: row.branch_id,
+  runtime: row.runtime,
+  revision: Number(row.revision),
+  messages: row.messages ?? [],
+  updatedAt: row.updated_at,
 });
 
 const mapRun = (row: Record<string, any>): AgentRunRecord => ({
@@ -352,8 +402,14 @@ const mapRun = (row: Record<string, any>): AgentRunRecord => ({
   leaseExpiresAt: row.lease_expires_at ?? undefined,
   heartbeatAt: row.heartbeat_at ?? undefined,
   cancelRequestedAt: row.cancel_requested_at ?? undefined,
+  generationIntentId: row.generation_intent_id ?? undefined,
+  clientCommandId: row.client_command_id ?? undefined,
+  commandFingerprint: row.command_fingerprint ?? undefined,
+  userMessageId: row.user_message_id ?? undefined,
   assistantMessageId: row.assistant_message_id ?? undefined,
 });
+
+const withoutCreatedAt = ({ createdAt: _createdAt, ...message }: AgentMessageRecord) => message;
 
 const mapApproval = (row: Record<string, any>): AgentApprovalRecord => ({
   id: row.id,
@@ -362,6 +418,7 @@ const mapApproval = (row: Record<string, any>): AgentApprovalRecord => ({
   threadId: row.thread_id,
   branchId: row.branch_id,
   assistantMessageId: row.assistant_message_id ?? undefined,
+  toolCallId: row.tool_call_id ?? undefined,
   state: row.state,
   patch: row.patch,
   encryptedRunState: row.encrypted_run_state,
@@ -406,6 +463,55 @@ const mapNotebook = (row: Record<string, any>): NotebookRecord => ({
   tone: row.tone ?? "teal",
   updatedAt: row.updated_at,
 });
+
+
+const mapDirectClassroomPresentation = (
+  row: Record<string, any>,
+): DirectClassroomPresentationRecord => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  notebookId: row.notebook_id,
+  lessonFileId: row.lesson_file_id,
+  title: row.title,
+  theme: row.theme,
+  sourceDocumentVersion: Number(row.source_document_version),
+  sourceDocument: lessonPlanSchema.parse(row.source_document),
+  dashiGoal: dashiGoalSchema.safeParse(row.outline).data ?? null,
+  delivery: row.delivery === "native-dashi" ? "native-dashi" : "legacy-static",
+  storageKey: row.storage_key,
+  mediaType: row.media_type,
+  byteSize: Number(row.byte_size),
+  checksum: row.checksum,
+  idempotencyKey: row.idempotency_key,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const mapClassroomPresentationGeneration = (
+  row: Record<string, any>,
+): ClassroomPresentationGeneration => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  notebookId: row.notebook_id,
+  lessonFileId: row.lesson_file_id,
+  sourceDocumentVersion: Number(row.source_document_version),
+  sourceDocument: lessonPlanSchema.parse(row.source_document),
+  lessonTitle: row.lesson_title,
+  subject: row.subject,
+  gradeLevel: row.grade_level,
+  learnerProfile: row.learner_profile,
+  lessonDurationMinutes: Number(row.lesson_duration_minutes),
+  goal: dashiGoalSchema.safeParse(row.storyboard).data ?? null,
+  status: row.status,
+  presentationId: row.presentation_id,
+  errorCode: row.error_code,
+  startedAt: row.started_at,
+  completedAt: row.completed_at,
+  durationMs: row.duration_ms === null ? null : Number(row.duration_ms),
+});
+
+
+
 
 export class SupabaseLessonRepository implements LessonRepository {
   private readonly client: SupabaseClient;
@@ -569,6 +675,55 @@ export class SupabaseLessonRepository implements LessonRepository {
     return result.data ? mapFile(result.data) : null;
   }
 
+  async getLessonFileContext(ownerId: string, fileId: string) {
+    const result = await this.client.from("lesson_files")
+      .select("id,owner_id,notebook_id,document_version,context_profile")
+      .eq("owner_id", ownerId).eq("id", fileId).maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    return result.data ? {
+      id: result.data.id,
+      ownerId: result.data.owner_id,
+      notebookId: result.data.notebook_id,
+      documentVersion: Number(result.data.document_version),
+      contextProfile: result.data.context_profile ?? {},
+    } : null;
+  }
+
+  // Retired adapter compatibility only. Production uses D1; this preserves
+  // the storage port so a future PostgreSQL adapter remains mechanical.
+  async getPendingLessonGenerationIntent(ownerId: string, lessonFileId: string) {
+    const result = await this.client.from("lesson_generation_intents").select("*")
+      .eq("owner_id", ownerId).eq("lesson_file_id", lessonFileId).eq("state", "pending").maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    return result.data ? mapLessonGenerationIntent(result.data) : null;
+  }
+
+  async enqueueLessonGenerationIntent(input: Parameters<LessonRepository["enqueueLessonGenerationIntent"]>[0]) {
+    const prompt = input.prompt.trim();
+    if (!prompt) throw new Error("generation_intent_prompt_empty");
+    const record: LessonGenerationIntentRecord = {
+      id: crypto.randomUUID(), ownerId: input.ownerId, lessonFileId: input.lessonFileId,
+      prompt, state: "pending", createdAt: new Date().toISOString(),
+    };
+    const result = await this.client.from("lesson_generation_intents").upsert({
+      id: record.id, owner_id: record.ownerId, lesson_file_id: record.lessonFileId,
+      prompt: record.prompt, state: record.state, run_id: null,
+      created_at: record.createdAt, claimed_at: null,
+    }, { onConflict: "owner_id,lesson_file_id" }).select("*").single();
+    if (result.error) throw new Error(result.error.message);
+    return mapLessonGenerationIntent(result.data);
+  }
+
+  async claimLessonGenerationIntent(input: Parameters<LessonRepository["claimLessonGenerationIntent"]>[0]) {
+    const result = await this.client.from("lesson_generation_intents")
+      .update({ state: "claimed", run_id: input.runId, claimed_at: new Date().toISOString() })
+      .eq("owner_id", input.ownerId).eq("lesson_file_id", input.lessonFileId)
+      .eq("id", input.intentId).eq("state", "pending").select("*").maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (!result.data) throw new Error("lesson_generation_intent_unavailable");
+    return mapLessonGenerationIntent(result.data);
+  }
+
   async getLessonDesignBasis(ownerId: string, lessonFileId: string) {
     const result = await this.client.rpc("lesson_design_basis_snapshot", {
       p_owner_id: ownerId,
@@ -702,6 +857,28 @@ export class SupabaseLessonRepository implements LessonRepository {
     return result.data ? mapThread(result.data) : null;
   }
 
+  async getConversationSnapshot(ownerId: string, threadId: string, branchId: string) {
+    const [thread, branch, branches, messages, latestRun, approvals] = await Promise.all([
+      this.getThread(ownerId, threadId),
+      this.getBranch(ownerId, threadId, branchId),
+      this.listBranches(ownerId, threadId),
+      this.listMessages(ownerId, threadId, branchId),
+      this.getLatestRun(ownerId, threadId, branchId),
+      this.listApprovals(ownerId, threadId, branchId),
+    ]);
+    if (!thread || !branch) return null;
+    const events = latestRun ? await this.listRunEvents(ownerId, latestRun.id) : [];
+    const capturedAt = new Date().toISOString();
+    return {
+      schemaVersion: 1 as const,
+      capturedAt,
+      aggregateVersion: [thread.updatedAt, latestRun?.id ?? "none", latestRun?.status ?? "idle", events.length].join(":"),
+      thread, branch, branches, messages, latestRun, events,
+      throughSequence: events.length,
+      approvals,
+    };
+  }
+
   async updateThread(ownerId: string, threadId: string, patch: Partial<AgentThreadRecord>) {
     const payload: Record<string, unknown> = {};
     if (patch.title !== undefined) payload.title = patch.title;
@@ -743,6 +920,15 @@ export class SupabaseLessonRepository implements LessonRepository {
     return result.data ? mapBranch(result.data) : null;
   }
 
+  async updateBranch(ownerId: string, threadId: string, branchId: string, patch: Partial<AgentBranchRecord>) {
+    const payload: Record<string, unknown> = {};
+    if (patch.pendingInteraction !== undefined) payload.pending_interaction = patch.pendingInteraction;
+    const result = await this.client.from("agent_branches").update(payload)
+      .eq("owner_id", ownerId).eq("thread_id", threadId).eq("id", branchId)
+      .select("*").single();
+    return mapBranch(unwrap(result as any));
+  }
+
   async listMessages(ownerId: string, threadId: string, branchId: string, cursor?: string, limit = 100) {
     let query = this.client.from("agent_messages").select("*")
       .eq("owner_id", ownerId).eq("thread_id", threadId).eq("branch_id", branchId);
@@ -764,7 +950,7 @@ export class SupabaseLessonRepository implements LessonRepository {
     const assistantIds = messages.filter((message) => message.role === "assistant").map((message) => message.id);
     if (!assistantIds.length) return messages;
     const runsResult = await this.client.from("agent_runs")
-      .select("id,assistant_message_id,status,started_at")
+      .select("id,assistant_message_id,status,started_at,completed_at")
       .eq("owner_id", ownerId)
       .in("assistant_message_id", assistantIds)
       .order("started_at", { ascending: false });
@@ -790,9 +976,19 @@ export class SupabaseLessonRepository implements LessonRepository {
     return messages.map((message) => {
       const run = runByMessageId.get(message.id);
       if (!run) return message;
+      const runEvents = eventsByRunId.get(run.id) ?? [];
+      const turnPhase = persistedTurnPhaseFromEvents(runEvents, run.status);
       return {
         ...message,
-        activities: persistedActivitiesFromEvents(eventsByRunId.get(run.id) ?? [], run.status),
+        activities: persistedActivitiesFromEvents(runEvents, run.status),
+        turnTexts: persistedTurnTextsFromEvents(runEvents),
+        turn: {
+          runId: run.id,
+          status: run.status,
+          ...turnPhase,
+          startedAt: run.started_at,
+          completedAt: run.completed_at ?? undefined,
+        },
       };
     });
   }
@@ -847,10 +1043,31 @@ export class SupabaseLessonRepository implements LessonRepository {
       lease_expires_at: input.leaseExpiresAt,
       heartbeat_at: input.heartbeatAt,
       cancel_requested_at: input.cancelRequestedAt,
+      generation_intent_id: input.generationIntentId,
+      client_command_id: input.clientCommandId,
+      command_fingerprint: input.commandFingerprint,
       assistant_message_id: input.assistantMessageId,
       started_at: input.startedAt,
     }).select("*").single();
     return mapRun(unwrap(result as any));
+  }
+
+  // The active production adapter is D1, whose implementation commits this
+  // operation atomically. Keep the retired Supabase adapter contract-complete
+  // for migration tooling and local compatibility.
+  async createRunWithInitialMessages(input: {
+    run: AgentRunRecord;
+    userMessage?: AgentMessageRecord;
+    assistantMessage: AgentMessageRecord;
+  }) {
+    const run = await this.createRun(input.run);
+    const userMessage = input.userMessage
+      ? await this.appendMessage(withoutCreatedAt(input.userMessage))
+      : undefined;
+    const { createdAt: _assistantCreatedAt, ...assistantInput } = input.assistantMessage;
+    const assistantMessage = await this.appendMessage(assistantInput);
+    await this.updateThread(input.run.ownerId, input.run.threadId, { status: "running" });
+    return { run, userMessage, assistantMessage };
   }
 
   async getRun(ownerId: string, runId: string) {
@@ -860,10 +1077,31 @@ export class SupabaseLessonRepository implements LessonRepository {
     return result.data ? mapRun(result.data) : null;
   }
 
+  async getRunByClientCommand(ownerId: string, threadId: string, clientCommandId: string) {
+    const result = await this.client.from("agent_runs").select("*")
+      .eq("owner_id", ownerId).eq("thread_id", threadId)
+      .eq("client_command_id", clientCommandId).maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    return result.data ? mapRun(result.data) : null;
+  }
+
   async getLatestRun(ownerId: string, threadId: string, branchId: string) {
     const result = await this.client.from("agent_runs").select("*")
       .eq("owner_id", ownerId).eq("thread_id", threadId).eq("branch_id", branchId)
       .order("started_at", { ascending: false }).limit(1).maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    return result.data ? mapRun(result.data) : null;
+  }
+
+  async getLatestCompletedRun(ownerId: string, threadId: string, branchId: string) {
+    const result = await this.client.from("agent_runs").select("*")
+      .eq("owner_id", ownerId)
+      .eq("thread_id", threadId)
+      .eq("branch_id", branchId)
+      .eq("status", "completed")
+      .order("started_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
     if (result.error) throw new Error(result.error.message);
     return result.data ? mapRun(result.data) : null;
   }
@@ -947,6 +1185,7 @@ export class SupabaseLessonRepository implements LessonRepository {
       id: approval.id, owner_id: approval.ownerId, run_id: approval.runId,
       thread_id: approval.threadId, branch_id: approval.branchId, state: approval.state,
       assistant_message_id: approval.assistantMessageId,
+      tool_call_id: approval.toolCallId,
       patch: approval.patch, encrypted_run_state: approval.encryptedRunState,
       agent_definition_version: approval.agentDefinitionVersion,
       resource_type: approval.resourceType,
@@ -1077,6 +1316,7 @@ export class SupabaseLessonRepository implements LessonRepository {
       p_assistant_message_id: args.assistantMessageId ?? null,
       p_content: args.content ?? null,
       p_sources: args.sources ?? null,
+      p_session_items: args.sessionItems ?? null,
       p_session_cursor: args.sessionCursor ?? null,
       p_token_usage: args.tokenUsage ?? null,
       p_encrypted_run_state: args.encryptedRunState ?? null,
@@ -1172,6 +1412,42 @@ export class SupabaseLessonRepository implements LessonRepository {
     if (result.error) throw new Error(result.error.message);
   }
 
+  async getAgentRuntimeSession(
+    ownerId: string,
+    threadId: string,
+    branchId: string,
+    runtime: AgentRuntimeName,
+  ) {
+    const result = await this.client.from("agent_runtime_sessions")
+      .select("*")
+      .eq("owner_id", ownerId)
+      .eq("thread_id", threadId)
+      .eq("branch_id", branchId)
+      .eq("runtime", runtime)
+      .maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    return result.data ? mapRuntimeSession(result.data) : null;
+  }
+
+  async saveAgentRuntimeSession(args: {
+    ownerId: string;
+    threadId: string;
+    branchId: string;
+    runtime: AgentRuntimeName;
+    expectedRevision: number;
+    messages: unknown[];
+  }) {
+    const result = await this.client.rpc("save_agent_runtime_session", {
+      p_owner_id: args.ownerId,
+      p_thread_id: args.threadId,
+      p_branch_id: args.branchId,
+      p_runtime: args.runtime,
+      p_expected_revision: args.expectedRevision,
+      p_messages: args.messages,
+    });
+    return mapRuntimeSession(unwrap(result as any));
+  }
+
   async getThreadMemory(ownerId: string, threadId: string, branchId: string) {
     const result = await this.client.from("agent_thread_memories")
       .select("summary,summary_cursor")
@@ -1197,6 +1473,89 @@ export class SupabaseLessonRepository implements LessonRepository {
     });
     if (result.error) throw new Error(result.error.message);
     return (result.data ?? []) as KnowledgeResult[];
+  }
+
+  async searchCurriculumStandards(input: {
+    query: string;
+    subject: string;
+    stage?: string;
+    grade?: string;
+    limit: number;
+    embedding?: number[];
+  }) {
+    const result = await this.client.rpc("search_curriculum_standards", {
+      p_query: input.query,
+      p_query_embedding: input.embedding ?? null,
+      p_subject: input.subject,
+      p_stage: input.stage ?? null,
+      p_grade: input.grade ?? null,
+      p_limit: input.limit,
+    });
+    if (result.error) throw new Error(result.error.message);
+    return (result.data ?? []) as KnowledgeResult[];
+  }
+
+  async getPublishedCurriculumStandardFingerprint() {
+    const result = await this.client.from("curriculum_standard_releases")
+      .select("id,release_key,published_at,updated_at")
+      .eq("status", "published")
+      .order("published_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (!result.data) return null;
+    return [
+      result.data.id,
+      result.data.release_key,
+      result.data.updated_at ?? result.data.published_at,
+    ].join(":");
+  }
+
+  async getCurriculumStandardSearchCache(input: {
+    contextFingerprint: string;
+    querySha256: string;
+    limit: number;
+  }) {
+    const result = await this.client.from("curriculum_standard_query_cache")
+      .select("context_fingerprint,query_sha256,result_limit,results,updated_at")
+      .eq("context_fingerprint", input.contextFingerprint)
+      .eq("query_sha256", input.querySha256)
+      .eq("result_limit", input.limit)
+      .maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (!result.data) return null;
+    return {
+      contextFingerprint: result.data.context_fingerprint,
+      querySha256: result.data.query_sha256,
+      limit: result.data.result_limit,
+      results: result.data.results as KnowledgeResult[],
+      updatedAt: result.data.updated_at,
+    };
+  }
+
+  async saveCurriculumStandardSearchCache(input: {
+    contextFingerprint: string;
+    querySha256: string;
+    limit: number;
+    results: KnowledgeResult[];
+  }) {
+    const result = await this.client.from("curriculum_standard_query_cache").upsert({
+      context_fingerprint: input.contextFingerprint,
+      query_sha256: input.querySha256,
+      result_limit: input.limit,
+      results: input.results,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "context_fingerprint,query_sha256,result_limit" })
+      .select("context_fingerprint,query_sha256,result_limit,results,updated_at")
+      .single();
+    if (result.error) throw new Error(result.error.message);
+    return {
+      contextFingerprint: result.data.context_fingerprint,
+      querySha256: result.data.query_sha256,
+      limit: result.data.result_limit,
+      results: result.data.results as KnowledgeResult[],
+      updatedAt: result.data.updated_at,
+    };
   }
 
   async getKnowledgePassage(ownerId: string, scopes: string[], chunkId: string) {
@@ -1255,14 +1614,15 @@ export class SupabaseLessonRepository implements LessonRepository {
   ) {
     if (!sources.length) return;
     const result = await this.client.from("agent_run_evidence").upsert(
-      sources.map((source) => ({
+      uniqueRunEvidenceSources(sources).map((source) => ({
         owner_id: ownerId,
         run_id: runId,
         kind,
         source_id: source.id,
+        evidence_key: runEvidenceIdentity(source),
         source,
       })),
-      { onConflict: "owner_id,run_id,kind,source_id" },
+      { onConflict: "owner_id,run_id,kind,evidence_key" },
     );
     if (result.error) throw new Error(result.error.message);
   }
@@ -1280,6 +1640,39 @@ export class SupabaseLessonRepository implements LessonRepository {
       source: row.source,
       createdAt: row.created_at,
     }));
+  }
+
+  async filterCurrentCurriculumStandardSources(sources: SourceRef[]) {
+    const candidates = sources.filter((source) => source.id && source.chunkId);
+    if (!candidates.length) return [];
+    const releases = await this.client.from("curriculum_standard_releases")
+      .select("id")
+      .eq("status", "published");
+    if (releases.error) throw new Error(releases.error.message);
+    const releaseIds = (releases.data ?? []).map((release) => release.id);
+    if (!releaseIds.length) return [];
+    const sourceIds = [...new Set(candidates.map((source) => source.id))];
+    const documents = await this.client.from("curriculum_standard_documents")
+      .select("knowledge_source_id")
+      .in("release_id", releaseIds)
+      .in("knowledge_source_id", sourceIds);
+    if (documents.error) throw new Error(documents.error.message);
+    const publishedSourceIds = new Set(
+      (documents.data ?? []).map((document) => String(document.knowledge_source_id)),
+    );
+    if (!publishedSourceIds.size) return [];
+    const chunkIds = [...new Set(candidates.map((source) => source.chunkId!))];
+    const chunks = await this.client.from("knowledge_chunks")
+      .select("source_id,stable_chunk_id")
+      .in("source_id", [...publishedSourceIds])
+      .in("stable_chunk_id", chunkIds);
+    if (chunks.error) throw new Error(chunks.error.message);
+    const publishedChunks = new Set(
+      (chunks.data ?? []).map((chunk) => `${chunk.source_id}:${chunk.stable_chunk_id}`),
+    );
+    return candidates.filter((source) => (
+      publishedChunks.has(`${source.id}:${source.chunkId}`)
+    ));
   }
 
   async createSemesterFramework(
@@ -1700,6 +2093,263 @@ export class SupabaseLessonRepository implements LessonRepository {
     const result = await query;
     if (result.error) throw new Error(result.error.message);
     return (result.data ?? []).map((row) => this.mapClassFeedback(row));
+  }
+
+  async getPendingSemesterFrameworkWritebackIntent(ownerId: string, frameworkId: string) {
+    const result = await this.client.from("semester_framework_writeback_intents").select("*")
+      .eq("owner_id", ownerId).eq("framework_id", frameworkId).eq("state", "pending")
+      .order("created_at", { ascending: true }).limit(1).maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    return result.data ? mapSemesterFrameworkWritebackIntent(result.data) : null;
+  }
+
+  async enqueueSemesterFrameworkWritebackIntent(input: Parameters<LessonRepository["enqueueSemesterFrameworkWritebackIntent"]>[0]) {
+    const prompt = input.prompt.trim();
+    if (!prompt) throw new Error("framework_writeback_prompt_empty");
+    const record: SemesterFrameworkWritebackIntentRecord = {
+      id: crypto.randomUUID(), ownerId: input.ownerId, frameworkId: input.frameworkId,
+      feedbackId: input.feedbackId, prompt, state: "pending", createdAt: new Date().toISOString(),
+    };
+    const result = await this.client.from("semester_framework_writeback_intents").upsert({
+      id: record.id, owner_id: record.ownerId, framework_id: record.frameworkId,
+      feedback_id: record.feedbackId, prompt: record.prompt, state: record.state,
+      run_id: null, created_at: record.createdAt, claimed_at: null,
+    }, { onConflict: "feedback_id", ignoreDuplicates: true }).select("*").maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (result.data) return mapSemesterFrameworkWritebackIntent(result.data);
+    const existing = await this.client.from("semester_framework_writeback_intents").select("*")
+      .eq("owner_id", input.ownerId).eq("feedback_id", input.feedbackId).maybeSingle();
+    if (existing.error) throw new Error(existing.error.message);
+    if (!existing.data) throw new Error("framework_writeback_intent_not_created");
+    return mapSemesterFrameworkWritebackIntent(existing.data);
+  }
+
+  async claimSemesterFrameworkWritebackIntent(input: Parameters<LessonRepository["claimSemesterFrameworkWritebackIntent"]>[0]) {
+    const result = await this.client.from("semester_framework_writeback_intents")
+      .update({ state: "claimed", run_id: input.runId, claimed_at: new Date().toISOString() })
+      .eq("owner_id", input.ownerId).eq("framework_id", input.frameworkId)
+      .eq("id", input.intentId).eq("state", "pending").select("*").maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (!result.data) throw new Error("semester_framework_writeback_intent_unavailable");
+    return mapSemesterFrameworkWritebackIntent(result.data);
+  }
+
+  async findClassroomPresentationByRequest(ownerId: string, idempotencyKey: string) {
+    const result = await this.client.from("classroom_presentation_documents").select("*")
+      .eq("owner_id", ownerId).eq("idempotency_key", idempotencyKey).maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    return result.data ? mapDirectClassroomPresentation(result.data) : null;
+  }
+
+  async saveClassroomPresentation(presentation: DirectClassroomPresentationRecord) {
+    const replay = await this.findClassroomPresentationByRequest(
+      presentation.ownerId,
+      presentation.idempotencyKey,
+    );
+    if (replay) return replay;
+    const result = await this.client.from("classroom_presentation_documents").insert({
+      id: presentation.id,
+      owner_id: presentation.ownerId,
+      notebook_id: presentation.notebookId,
+      lesson_file_id: presentation.lessonFileId,
+      title: presentation.title,
+      theme: presentation.theme,
+      source_document_version: presentation.sourceDocumentVersion,
+      source_document: presentation.sourceDocument,
+      // The database column name is retained for old local rows. New records
+      // store Dashi's native goal.json there.
+      outline: presentation.dashiGoal,
+      delivery: presentation.delivery,
+      storage_key: presentation.storageKey,
+      media_type: presentation.mediaType,
+      byte_size: presentation.byteSize,
+      checksum: presentation.checksum,
+      idempotency_key: presentation.idempotencyKey,
+      created_at: presentation.createdAt,
+      updated_at: presentation.updatedAt,
+    }).select("*").maybeSingle();
+    if (result.error?.code === "23505") {
+      const existing = await this.findClassroomPresentationByRequest(
+        presentation.ownerId,
+        presentation.idempotencyKey,
+      );
+      if (existing) return existing;
+    }
+    if (result.error) throw new Error(result.error.message);
+    if (!result.data) throw new Error("presentation_save_failed");
+    return mapDirectClassroomPresentation(result.data);
+  }
+
+  async listClassroomPresentations(ownerId: string, lessonFileId: string) {
+    const file = await this.getLessonFile(ownerId, lessonFileId);
+    if (!file) throw new Error("lesson_file_not_found");
+    const result = await this.client.from("classroom_presentation_documents").select("*")
+      .eq("owner_id", ownerId).eq("notebook_id", file.notebookId)
+      .eq("lesson_file_id", lessonFileId).order("updated_at", { ascending: false });
+    if (result.error) throw new Error(result.error.message);
+    return (result.data ?? []).map(mapDirectClassroomPresentation);
+  }
+
+  async listClassroomPresentationsForOwner(ownerId: string) {
+    const result = await this.client.from("classroom_presentation_documents").select("*")
+      .eq("owner_id", ownerId).order("updated_at", { ascending: false });
+    if (result.error) throw new Error(result.error.message);
+    return (result.data ?? []).map(mapDirectClassroomPresentation);
+  }
+
+  async listRecentClassroomPresentations(ownerId: string, limit = 8) {
+    const result = await this.client.from("classroom_presentation_documents").select("*")
+      .eq("owner_id", ownerId).order("updated_at", { ascending: false }).limit(limit);
+    if (result.error) throw new Error(result.error.message);
+    return (result.data ?? []).map(mapDirectClassroomPresentation);
+  }
+
+  async getClassroomPresentation(ownerId: string, presentationId: string) {
+    const result = await this.client.from("classroom_presentation_documents").select("*")
+      .eq("owner_id", ownerId).eq("id", presentationId).maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (!result.data) return null;
+    const presentation = mapDirectClassroomPresentation(result.data);
+    const file = await this.getLessonFile(ownerId, presentation.lessonFileId);
+    return file && file.notebookId === presentation.notebookId ? presentation : null;
+  }
+
+  async updateClassroomPresentationArtifact(args: {
+    ownerId: string; presentationId: string; storageKey: string; byteSize: number; updatedAt: string;
+  }) {
+    const result = await this.client.from("classroom_presentation_documents").update({
+      storage_key: args.storageKey,
+      byte_size: args.byteSize,
+      updated_at: args.updatedAt,
+    }).eq("owner_id", args.ownerId).eq("id", args.presentationId).select("*").maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (!result.data) throw new Error("presentation_not_found");
+    return mapDirectClassroomPresentation(result.data);
+  }
+
+  async updateClassroomPresentationGoal(args: Parameters<LessonRepository["updateClassroomPresentationGoal"]>[0]) {
+    const result = await this.client.from("classroom_presentation_documents").update({
+      title: args.goal.title,
+      theme: args.goal.themePack,
+      outline: args.goal,
+      ...(args.artifact ? { storage_key: args.artifact.storageKey, byte_size: args.artifact.byteSize } : {}),
+      checksum: args.checksum,
+      updated_at: args.updatedAt,
+    }).eq("owner_id", args.ownerId).eq("id", args.presentationId)
+      .eq("checksum", args.expectedChecksum).select("*").maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (!result.data) {
+      const current = await this.getClassroomPresentation(args.ownerId, args.presentationId);
+      throw new Error(current ? "presentation_edit_conflict" : "presentation_not_found");
+    }
+    return mapDirectClassroomPresentation(result.data);
+  }
+
+  async deleteClassroomPresentation(ownerId: string, presentationId: string) {
+    const presentation = await this.getClassroomPresentation(ownerId, presentationId);
+    if (!presentation) throw new Error("presentation_not_found");
+    const result = await this.client.from("classroom_presentation_documents").delete()
+      .eq("owner_id", ownerId).eq("id", presentationId);
+    if (result.error) throw new Error(result.error.message);
+  }
+
+  async beginClassroomPresentationGeneration(
+    generation: ClassroomPresentationGeneration,
+  ): Promise<BeginClassroomPresentationGenerationResult> {
+    const insert = await this.client.from("classroom_presentation_generations").insert({
+      id: generation.id,
+      owner_id: generation.ownerId,
+      notebook_id: generation.notebookId,
+      lesson_file_id: generation.lessonFileId,
+      source_document_version: generation.sourceDocumentVersion,
+      source_document: generation.sourceDocument,
+      lesson_title: generation.lessonTitle,
+      subject: generation.subject,
+      grade_level: generation.gradeLevel,
+      learner_profile: generation.learnerProfile,
+      lesson_duration_minutes: generation.lessonDurationMinutes,
+      storyboard: generation.goal,
+      status: generation.status,
+      presentation_id: null,
+      error_code: null,
+      started_at: generation.startedAt,
+    }).select("*").maybeSingle();
+    if (!insert.error && insert.data) {
+      return { generation: mapClassroomPresentationGeneration(insert.data), created: true };
+    }
+    // The partial unique index allows exactly one active generation per lesson.
+    // A concurrent A4 click or Agent tool call joins that durable operation.
+    if (insert.error?.code === "23505") {
+      const active = await this.client.from("classroom_presentation_generations").select("*")
+        .eq("owner_id", generation.ownerId).eq("lesson_file_id", generation.lessonFileId)
+        .eq("status", "generating").maybeSingle();
+      if (!active.error && active.data) {
+        return { generation: mapClassroomPresentationGeneration(active.data), created: false };
+      }
+    }
+    if (insert.error) throw new Error(insert.error.message);
+    throw new Error("presentation_generation_start_failed");
+  }
+
+  async getLatestClassroomPresentationGeneration(ownerId: string, lessonFileId: string) {
+    const file = await this.getLessonFile(ownerId, lessonFileId);
+    if (!file) throw new Error("lesson_file_not_found");
+    const active = await this.client.from("classroom_presentation_generations").select("*")
+      .eq("owner_id", ownerId).eq("notebook_id", file.notebookId).eq("lesson_file_id", lessonFileId)
+      .eq("status", "generating").maybeSingle();
+    if (active.error) throw new Error(active.error.message);
+    if (active.data) return mapClassroomPresentationGeneration(active.data);
+    const result = await this.client.from("classroom_presentation_generations").select("*")
+      .eq("owner_id", ownerId).eq("notebook_id", file.notebookId).eq("lesson_file_id", lessonFileId)
+      .order("started_at", { ascending: false }).limit(1).maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    return result.data ? mapClassroomPresentationGeneration(result.data) : null;
+  }
+
+  async completeClassroomPresentationGeneration(args: {
+    ownerId: string; generationId: string; presentationId: string; completedAt: string; durationMs: number;
+  }) {
+    const result = await this.client.from("classroom_presentation_generations").update({
+      status: "ready", presentation_id: args.presentationId, error_code: null,
+      completed_at: args.completedAt, duration_ms: args.durationMs,
+    }).eq("owner_id", args.ownerId).eq("id", args.generationId).eq("status", "generating")
+      .select("*").maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (!result.data) throw new Error("presentation_generation_not_found");
+    return mapClassroomPresentationGeneration(result.data);
+  }
+
+  async failClassroomPresentationGeneration(args: {
+    ownerId: string; generationId: string; errorCode: string; completedAt: string; durationMs: number;
+  }) {
+    const result = await this.client.from("classroom_presentation_generations").update({
+      status: "failed", error_code: args.errorCode, presentation_id: null,
+      completed_at: args.completedAt, duration_ms: args.durationMs,
+    }).eq("owner_id", args.ownerId).eq("id", args.generationId).eq("status", "generating")
+      .select("*").maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (!result.data) throw new Error("presentation_generation_not_found");
+    return mapClassroomPresentationGeneration(result.data);
+  }
+
+  async recoverInterruptedClassroomPresentationGenerations(completedAt: string) {
+    const pending = await this.client.from("classroom_presentation_generations")
+      .select("id,owner_id,started_at").eq("status", "generating");
+    if (pending.error) throw new Error(pending.error.message);
+    const recovered = await Promise.all((pending.data ?? []).map(async (generation) => {
+      const durationMs = Math.max(0, Date.parse(completedAt) - Date.parse(generation.started_at));
+      const result = await this.client.from("classroom_presentation_generations").update({
+        status: "failed",
+        presentation_id: null,
+        error_code: "presentation_generation_interrupted",
+        completed_at: completedAt,
+        duration_ms: durationMs,
+      }).eq("owner_id", generation.owner_id).eq("id", generation.id).eq("status", "generating")
+        .select("id").maybeSingle();
+      if (result.error) throw new Error(result.error.message);
+      return result.data ? 1 : 0;
+    }));
+    return recovered.reduce<number>((total, count) => total + count, 0);
   }
 
   async getCurrentCurriculumCatalogRelease() {

@@ -545,9 +545,19 @@ export const BookCarousel = forwardRef(function BookCarousel({
     const scrollbar = root.querySelector(".book-carousel-scrollbar");
     const otherBooks = bookRefs.current.filter((book, index) => book && index !== activeIndexRef.current);
     const duration = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 0.38;
-    timeline.to(metaLeft, { x: open ? -72 : 0, autoAlpha: open ? 0 : 1, duration, ease: EASE.fade }, position)
-      .to(metaRight, { x: open ? 72 : 0, autoAlpha: open ? 0 : 1, duration, ease: EASE.fade }, position)
-      .to(names, {
+    if (metaLeft) timeline.to(metaLeft, {
+      x: open ? -72 : 0,
+      autoAlpha: open ? 0 : 1,
+      duration,
+      ease: EASE.fade,
+    }, position);
+    if (metaRight) timeline.to(metaRight, {
+      x: open ? 72 : 0,
+      autoAlpha: open ? 0 : 1,
+      duration,
+      ease: EASE.fade,
+    }, position);
+    if (names.length) timeline.to(names, {
         "--name-x": open ? "64px" : "0px",
         autoAlpha: open
           ? 0
@@ -555,9 +565,14 @@ export const BookCarousel = forwardRef(function BookCarousel({
         duration,
         ease: EASE.fade,
         stagger: open ? 0.018 : { each: 0.018, from: "end" },
-      }, position)
-      .to(scrollbar, { x: open ? 10 : 0, autoAlpha: open ? 0 : 0.85, duration, ease: EASE.fade }, position)
-      .to(otherBooks, {
+      }, position);
+    if (scrollbar) timeline.to(scrollbar, {
+      x: open ? 10 : 0,
+      autoAlpha: open ? 0 : 0.85,
+      duration,
+      ease: EASE.fade,
+    }, position);
+    if (otherBooks.length) timeline.to(otherBooks, {
         autoAlpha: open ? 0 : 1,
         duration: duration * 0.9,
         ease: EASE.fade,
@@ -720,7 +735,8 @@ export const BookCarousel = forwardRef(function BookCarousel({
           "--cover-angle": "0deg",
           "--book-spread-x": "0%",
         });
-        if (controls) gsap.set(controls, { clearProps: "opacity,visibility" });
+        // Leave controls at autoAlpha 0. Clearing opacity/visibility here would
+        // flash the pager for one frame while closingId still keeps isOpen true.
         isAnimatingRef.current = false;
         setBookAnimating(false);
         setClosingId(null);

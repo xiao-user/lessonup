@@ -47,6 +47,7 @@ const fallbackLabels: Record<string, string> = {
   read_curriculum_knowledge_points: "读取章节知识点",
   search_curriculum_knowledge_points: "检索相关知识点",
   read_curriculum_knowledge_continuity: "核对知识连续性",
+  search_curriculum_standards: "检索当前学科课标",
   search_knowledge: "检索备课资料",
   read_attached_source: "读取附带资料",
   get_passage: "读取资料片段",
@@ -58,6 +59,11 @@ const fallbackLabels: Record<string, string> = {
   learning_design: "设计学习过程",
   assessment: "检查教学评一致性",
   critic: "检查教案",
+  create_classroom_presentation: "创建课堂演示",
+  propose_classroom_presentation: "准备 Dashi 最终演示",
+  query_dashi_layouts: "规划 Dashi 版式",
+  inspect_dashi_layouts: "核对 Dashi 版式",
+  render_dashi_presentation: "生成课堂演示",
 };
 
 const parseArguments = (value: unknown): Record<string, unknown> => {
@@ -121,6 +127,7 @@ export function safeToolPresentation(
     || name === "read_curriculum_knowledge_points"
     || name === "search_curriculum_knowledge_points"
     || name === "read_curriculum_knowledge_continuity"
+    || name === "search_curriculum_standards"
   ) {
     return {
       label: fallbackLabels[name],
@@ -153,6 +160,93 @@ export function safeToolPresentation(
   if (name === "propose_design_basis_projection") {
     return { label: fallbackLabels[name], groupKey: "document-write" };
   }
+  if (name === "create_classroom_presentation") {
+    return { label: fallbackLabels[name], groupKey: "presentation-create" };
+  }
+  if (name === "propose_classroom_presentation") {
+    return { label: fallbackLabels[name], groupKey: "presentation-create" };
+  }
+  if (name === "query_dashi_layouts" || name === "inspect_dashi_layouts") {
+    return { label: fallbackLabels[name], groupKey: "presentation-create" };
+  }
+  if (name === "render_dashi_presentation") {
+    return { label: fallbackLabels[name], groupKey: "presentation-create" };
+  }
 
   return { label: fallbackLabels[name] ?? "调用备课能力" };
+}
+
+/** A public purpose summary for the activity row; never includes raw tool output or identifiers. */
+export function safeToolDetail(name: string, rawArguments?: unknown): string {
+  const args = parseArguments(rawArguments);
+
+  if (name === "read_section") {
+    const label = fieldLabel(args.field) ?? "目标栏目";
+    return `读取${label}的当前内容，作为后续分析与修改依据。`;
+  }
+  if (name === "read_document") {
+    const fields = Array.isArray(args.fields)
+      ? [...new Set(args.fields.map(fieldLabel).filter(Boolean))]
+      : [];
+    if (fields.length === 1) return `读取${fields[0]}的当前内容，作为后续分析与修改依据。`;
+    if (fields.length > 1) return `读取当前教案的 ${fields.length} 个栏目，作为后续分析与修改依据。`;
+    return "读取当前教案的完整内容，作为后续分析与修改依据。";
+  }
+  if (name === "read_document_metadata" || name === "read_document_outline") {
+    return "核对当前教案的基本信息、版本与结构，确保后续处理基于可见文档。";
+  }
+  if (name.startsWith("propose_") && name !== "propose_classroom_presentation") {
+    return "整理并校验本轮修改建议，生成等待教师确认的可见变更。";
+  }
+  if (name === "create_classroom_presentation" || name === "propose_classroom_presentation" || name === "render_dashi_presentation") {
+    return "根据已确认的课堂目标组织演示内容与版式，并生成可查看的结果。";
+  }
+  if (name === "query_dashi_layouts" || name === "inspect_dashi_layouts") {
+    return "读取并核对适合当前课堂内容的演示版式。";
+  }
+  if (name === "curriculum_analysis") return "分析当前课程目标、内容范围与学习要求。";
+  if (name === "learning_design") return "梳理可执行的学习活动与课堂流程。";
+  if (name === "assessment") return "核对教学目标、课堂活动与评价任务之间的一致性。";
+  if (name === "critic") return "检查当前教案的结构、证据与课堂可执行性。";
+  if (/curriculum|textbook|learning_path|knowledge_points|standards/.test(name)) {
+    return "读取与当前教材范围匹配的目录、知识点或课标信息。";
+  }
+  if (/semester|framework|class_feedback/.test(name)) {
+    return "读取学期框架与相关课堂信息，核对课时安排和学习连续性。";
+  }
+  if (/source|knowledge|passage|search_web|open_web/.test(name)) {
+    return "读取与当前任务相关的资料，作为后续分析依据。";
+  }
+  return "使用已授权的备课能力处理当前任务。";
+}
+
+/**
+ * Completion copy for the teacher-visible chip.
+ *
+ * Pi's own contract is `label` plus optional structured `details` — it does
+ * not prescribe a post-tool narration. Claude / Cursor / Beautiful UI ToolChips
+ * likewise keep the factual start description and let the status badge speak.
+ * Do not invent “the agent will continue” sentences or name the runtime.
+ */
+export function safeToolCompletionDetail(
+  name: string,
+  label: string,
+  isError = false,
+  startedDetail?: string,
+): string {
+  if (isError) {
+    if (name.startsWith("propose_")) {
+      return "修改建议未通过预检，可在本轮根据问题继续调整。";
+    }
+    return `${label}未完成。`;
+  }
+  if (name.startsWith("propose_")) {
+    return "修改建议已通过预检，并生成了等待教师确认的可见变更。";
+  }
+  return startedDetail ?? safeToolDetail(name);
+}
+
+/** Older journals stored agent-loop narration; treat those as missing copy. */
+export function isAgentLoopNarration(detail?: string) {
+  return Boolean(detail && /(?:返回给 Pi|返回 Pi|Pi 将)/.test(detail));
 }

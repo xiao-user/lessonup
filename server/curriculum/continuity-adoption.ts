@@ -203,9 +203,3 @@ export function continuityFingerprintFromCandidateId(candidateId: string) {
     ? candidateId.slice("lexical-".length)
     : null;
 }
-
-export function decisionLabel(decision: ContinuityDecision) {
-  if (decision === "accepted") return "教师已采用";
-  if (decision === "dismissed") return "教师已排除";
-  return "待取舍";
-}

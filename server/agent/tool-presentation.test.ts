@@ -1,8 +1,21 @@
 import { describe, expect, it } from "vitest";
 
-import { safeToolPresentation } from "./tool-presentation.js";
+import {
+  safeToolCompletionDetail,
+  safeToolDetail,
+  safeToolPresentation,
+} from "./tool-presentation.js";
 
 describe("safeToolPresentation", () => {
+  it("normalizes presentation generation without exposing ids or job parameters", () => {
+    expect(safeToolPresentation("create_classroom_presentation", {
+      direction: "用更轻快的风格强调观察任务",
+    })).toEqual({
+      label: "创建课堂演示",
+      groupKey: "presentation-create",
+    });
+  });
+
   it("names a single section without exposing raw tool arguments", () => {
     expect(safeToolPresentation("read_section", '{"field":"objectives"}')).toEqual({
       label: "读取教学目标",
@@ -105,5 +118,48 @@ describe("safeToolPresentation", () => {
       label: "核对知识连续性",
       groupKey: "curriculum-read",
     });
+    expect(safeToolPresentation("search_curriculum_standards", {
+      query: "当前课题与实际知识点",
+    })).toEqual({
+      label: "检索当前学科课标",
+      groupKey: "curriculum-read",
+    });
+  });
+});
+
+describe("safeToolDetail", () => {
+  it("describes a known document read without exposing private arguments", () => {
+    const detail = safeToolDetail("read_section", {
+      field: "objectives",
+      sourceId: "private-source-id",
+    });
+    expect(detail).toBe("读取教学目标的当前内容，作为后续分析与修改依据。");
+    expect(detail).not.toContain("private-source-id");
+  });
+
+  it("provides a truthful fallback without exposing raw tool output", () => {
+    const detail = safeToolDetail("custom_teacher_tool", {
+      prompt: "private prompt",
+      result: "private result",
+    });
+    expect(detail).toBe("使用已授权的备课能力处理当前任务。");
+    expect(detail).not.toContain("private");
+  });
+});
+
+describe("safeToolCompletionDetail", () => {
+  it("keeps the factual start description instead of narrating the agent loop", () => {
+    const started = safeToolDetail("read_document", {});
+    expect(safeToolCompletionDetail("read_document", "读取整份教案", false, started)).toBe(started);
+    expect(safeToolCompletionDetail("read_document", "读取整份教案")).toBe(
+      "读取当前教案的完整内容，作为后续分析与修改依据。",
+    );
+    expect(safeToolCompletionDetail("read_document", "读取整份教案")).not.toMatch(/Pi/);
+  });
+
+  it("distinguishes a proposal preflight failure", () => {
+    expect(safeToolCompletionDetail("propose_document_patch", "准备修改建议", true)).toBe(
+      "修改建议未通过预检，可在本轮根据问题继续调整。",
+    );
   });
 });

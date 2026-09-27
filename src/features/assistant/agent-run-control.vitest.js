@@ -2,12 +2,80 @@ import { describe, expect, it } from "vitest";
 import {
   activitiesFromEvents,
   activityStateForToolCompletion,
-  canRetryApprovalDecision,
+  agentInputDisposition,
+  approvalBackedToolCallIds,
   deriveBranchRuntimeState,
   presentAgentError,
+  queuedInputsFromEvents,
 } from "./agent-run-control.js";
 
+describe("agentInputDisposition", () => {
+  it("queues an ordinary message only while a Pi Turn is actually running", () => {
+    expect(agentInputDisposition("streaming", null)).toBe("queue");
+  });
+
+  it("starts a new Turn for a pending Approval Card answer", () => {
+    expect(agentInputDisposition("streaming", {
+      kind: "presentation_theme",
+      originalRequest: "生成课堂演示",
+    })).toBe("start_turn");
+  });
+
+  it("starts a normal Turn when no run is active", () => {
+    expect(agentInputDisposition("ready", null)).toBe("start_turn");
+  });
+});
+
+describe("queuedInputsFromEvents", () => {
+  it("restores native Pi queue items and their terminal state", () => {
+    const events = [{
+      type: "agent.input.queued",
+      runId: "run-1",
+      queueId: "queue-1",
+      delivery: "steer",
+      content: "改为只说明课堂活动",
+    }];
+    expect(queuedInputsFromEvents(events, "running")).toEqual([{
+      id: "queue-1",
+      delivery: "steer",
+      content: "改为只说明课堂活动",
+      state: "queued",
+    }]);
+    expect(queuedInputsFromEvents(events, "completed")[0].state).toBe("completed");
+  });
+});
+
 describe("activitiesFromEvents", () => {
+  it("settles every unfinished tool when Pi reports a failed terminal run", () => {
+    expect(activitiesFromEvents([
+      {
+        type: "tool.started",
+        toolCallId: "read-1",
+        name: "read_document",
+        label: "读取整份教案",
+      },
+      { type: "run.failed", runId: "run-1", error: "agent_provider_error" },
+    ])).toMatchObject([{ id: "read-1", state: "failed", outcome: "failed" }]);
+
+    expect(activitiesFromEvents([{
+      type: "tool.started",
+      toolCallId: "read-2",
+      name: "read_document",
+      label: "读取整份教案",
+    }], "failed")).toMatchObject([{ id: "read-2", state: "failed" }]);
+  });
+
+  it("uses awaiting_approval as a settled tool-loop boundary", () => {
+    expect(activitiesFromEvents([{
+      type: "tool.started",
+      toolCallId: "read-1",
+      name: "read_document",
+      label: "读取整份教案",
+    }], "awaiting_approval")).toEqual([
+      expect.objectContaining({ id: "read-1", state: "completed", outcome: "completed" }),
+    ]);
+  });
+
   it("keeps an approval-backed proposal successful despite an old post-approval stale event", () => {
     expect(activitiesFromEvents([
       {
@@ -34,15 +102,75 @@ describe("activitiesFromEvents", () => {
     ]);
   });
 
+  it("settles an unfinished tool as stopped when the teacher cancels the run", () => {
+    expect(activitiesFromEvents([
+      {
+        type: "tool.started",
+        toolCallId: "read-1",
+        name: "read_document",
+        label: "读取整份教案",
+      },
+      { type: "run.cancelled", runId: "run-1" },
+    ])).toMatchObject([{ id: "read-1", state: "cancelled", outcome: "cancelled" }]);
+
+    expect(activitiesFromEvents([{
+      type: "tool.started",
+      toolCallId: "read-2",
+      name: "read_document",
+      label: "读取整份教案",
+    }], "cancelled")).toMatchObject([{ id: "read-2", state: "cancelled" }]);
+  });
+
   it("treats a post-decision propose acknowledgement as successful during live completion", () => {
     expect(activityStateForToolCompletion({
+      toolCallId: "proposal-1",
       name: "propose_document_patch",
       ok: false,
       revisionCode: "document_context_stale",
     }, {
-      approvalCreated: true,
-      approvalDecided: true,
+      approvalBackedToolCalls: approvalBackedToolCallIds(
+        [{ id: "proposal-1", name: "propose_document_patch" }],
+        [{ runId: "run-1", toolCallId: "proposal-1" }],
+      ),
     })).toBe("completed");
+  });
+
+  it("keeps an earlier rejected proposal attempt visible after the run self-corrects", () => {
+    // The approval proves only that proposal-2 passed preflight. Reloading the
+    // thread used to mark both calls successful, hiding the correction the
+    // teacher had already watched happen live.
+    expect(activitiesFromEvents([
+      { type: "tool.started", toolCallId: "proposal-1", name: "propose_document_patch", label: "准备修改建议" },
+      {
+        type: "tool.completed",
+        toolCallId: "proposal-1",
+        name: "propose_document_patch",
+        ok: false,
+        revisionCode: "semantic_quality_rejected",
+      },
+      { type: "tool.started", toolCallId: "proposal-2", name: "propose_document_patch", label: "准备修改建议" },
+      { type: "tool.completed", toolCallId: "proposal-2", name: "propose_document_patch", ok: true },
+      {
+        type: "approval.required",
+        runId: "run-1",
+        approvalId: "approval-1",
+        toolCallId: "proposal-2",
+        patch: {},
+      },
+    ], "awaiting_approval")).toMatchObject([
+      { id: "proposal-1", state: "needs_revision" },
+      { id: "proposal-2", state: "completed" },
+    ]);
+  });
+
+  it("attributes an approval that predates tool-call attribution to the last proposal", () => {
+    expect(approvalBackedToolCallIds(
+      [
+        { id: "proposal-1", name: "propose_document_patch" },
+        { id: "proposal-2", name: "propose_document_patch" },
+      ],
+      [{ runId: "run-1" }],
+    )).toEqual(new Set(["proposal-2"]));
   });
 
   it("presents no-effect proposals as unchanged instead of failed", () => {
@@ -110,20 +238,14 @@ describe("activitiesFromEvents", () => {
   });
 });
 
-describe("canRetryApprovalDecision", () => {
-  it("clears approvals that the server has made terminal", () => {
-    expect(canRetryApprovalDecision("stale_document")).toBe(false);
-    expect(canRetryApprovalDecision("stale_design_basis")).toBe(false);
-    expect(canRetryApprovalDecision("approval_expired")).toBe(false);
-  });
-
-  it("keeps a pending approval available after a retryable transport failure", () => {
-    expect(canRetryApprovalDecision("agent_timeout")).toBe(true);
-    expect(canRetryApprovalDecision("approval_resume_failed")).toBe(true);
-  });
-});
-
 describe("presentAgentError", () => {
+  it("does not describe a pre-request provider outage as a failed modification", () => {
+    expect(presentAgentError("agent_provider_unavailable")).toEqual({
+      message: "暂时无法连接模型服务。本轮尚未开始生成，也没有读取资料或修改教案。",
+      retryLabel: "重新发送",
+    });
+  });
+
   it("explains a post-write continuation failure without claiming the patch was lost", () => {
     expect(presentAgentError("approval_resume_failed")).toEqual({
       message: "你的确认已写入；后续说明未能完成，可直接继续提问，不会重复写入。",
@@ -173,11 +295,33 @@ describe("deriveBranchRuntimeState", () => {
     })).toEqual({ status: "ready", runId: null, error: null });
   });
 
+  it("keeps a failed terminal run visible without locking the conversation", () => {
+    expect(deriveBranchRuntimeState({
+      runtimeAvailable: true,
+      approvals: [],
+      persistedRun: { id: "run-failed", status: "failed", error: "agent_provider_error" },
+    })).toEqual({ status: "ready", runId: null, error: null });
+  });
+
   it("restores the selected branch pending approval", () => {
     expect(deriveBranchRuntimeState({
       runtimeAvailable: true,
       approvals: [{ id: "approval-1", runId: "run-1", state: "pending" }],
       persistedRun: { id: "run-1", status: "awaiting_approval" },
     })).toEqual({ status: "awaiting_approval", runId: "run-1", error: null });
+  });
+
+  it("does not let a completed legacy storyboard continuation block new conversation", () => {
+    expect(deriveBranchRuntimeState({
+      runtimeAvailable: true,
+      approvals: [{
+        id: "approval-legacy",
+        runId: "run-legacy",
+        state: "approved",
+        continuationStatus: "ready",
+        patch: { kind: "presentation_storyboard", slides: [] },
+      }],
+      persistedRun: { id: "run-legacy", status: "failed", error: "presentation_generation_failed" },
+    })).toEqual({ status: "ready", runId: null, error: null });
   });
 });

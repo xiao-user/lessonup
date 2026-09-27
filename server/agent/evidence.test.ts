@@ -23,6 +23,14 @@ const evidence = [{
   createdAt: new Date().toISOString(),
 }];
 
+const standardEvidence = {
+  ownerId: "owner",
+  runId: "run",
+  kind: "curriculum_standard_search" as const,
+  source: { id: "standard-1", title: "义务教育语文课程标准", kind: "public" as const, page: 33 },
+  createdAt: new Date().toISOString(),
+};
+
 describe("bindPatchToObservedEvidence", () => {
   it("binds observed evidence when the semantic proposal has no model-authored citations", () => {
     expect(bindPatchToObservedEvidence({
@@ -53,5 +61,24 @@ describe("bindPatchToObservedEvidence", () => {
       evidenceRequired: true,
     });
     expect(result.citations).toEqual([evidence[0].source]);
+  });
+
+  it("always binds every required evidence kind even when the model cites only another source", () => {
+    const result = bindPatchToObservedEvidence({
+      patch: { ...patch, citations: [evidence[0].source] },
+      evidence: [...evidence, standardEvidence],
+      evidenceRequired: true,
+      requiredEvidenceKinds: ["curriculum_standard_search"],
+    });
+    expect(result.citations).toEqual([evidence[0].source, standardEvidence.source]);
+  });
+
+  it("fails closed when a required evidence kind was never observed", () => {
+    expect(() => bindPatchToObservedEvidence({
+      patch,
+      evidence,
+      evidenceRequired: true,
+      requiredEvidenceKinds: ["curriculum_standard_search"],
+    })).toThrow("evidence_required");
   });
 });

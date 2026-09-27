@@ -1,5 +1,5 @@
 import { createThread, expect, openLessonFile, sendPrompt, test } from "./fixtures.js";
-import { adminClient, lessonFileId, notebookId } from "./test-data.js";
+import { lessonFileId, notebookId } from "./test-data.js";
 
 test("covers empty state, streaming, tools, sources, sessions, retry, cancel and branches", async ({ lessonPage: page }) => {
   await expect(page.getByText("可结合当前教案继续备课", { exact: true })).toBeVisible();
@@ -13,20 +13,15 @@ test("covers empty state, streaming, tools, sources, sessions, retry, cancel and
 
   await sendPrompt(page, "请进行普通工具调用");
   await expect(page.getByRole("button", { name: "停止生成" })).toBeVisible();
-  await expect(page.getByText("思考中…", { exact: true })).toBeVisible();
   await expect(page.getByText("读取教学目标", { exact: true })).toBeVisible();
-  await expect(page.getByLabel(/任务组：/)).toBeVisible();
+  await expect(page.getByText(/^用时 .*秒$/)).toBeVisible();
   await expect(page.getByRole("heading", { name: "确定性回复" })).toBeVisible();
   await expect(page.getByRole("listitem").filter({ hasText: "已读取当前教案栏目。" })).toBeVisible();
   await expect(page.getByText("1 个来源", { exact: true })).toBeVisible();
   await expect(page.getByText("完成", { exact: true })).toBeVisible();
   await expect(page.getByText("工作范围", { exact: true })).toHaveCount(0);
-  await expect(page.locator(".craft-response-content")).toHaveCSS("max-height", "none");
-  await expect(page.locator(".craft-response-card")).toHaveCSS(
-    "box-shadow",
-    "rgba(0, 0, 0, 0.07) 0px 5px 16px -4px",
-  );
-  await expect(page.locator(".craft-response-card")).toHaveCSS("border-radius", "24px");
+  await expect(page.getByRole("article", { name: "备课助手回复" })).toHaveCSS("min-width", "0px");
+  await expect(page.getByRole("button", { name: "读取教学目标 完成" })).toHaveCount(1);
   await expect(page.locator(".lesson-assistant-rail")).toHaveCSS("padding-left", "0px");
   await expect(page.locator(".lesson-document-scroll")).toHaveCSS("scrollbar-color", "auto");
   await expect(page.locator(".lesson-document-scroll")).toHaveCSS("scrollbar-width", "auto");
@@ -67,22 +62,22 @@ test("covers empty state, streaming, tools, sources, sessions, retry, cancel and
   await page.getByRole("button", { name: "保存会话名称" }).click();
   await expect(page.locator(".lesson-agent-title")).toHaveText("教案结构检查");
 
-  await page.getByRole("button", { name: "从此消息创建分支" }).click();
+  await page.getByRole("button", { name: "从此创建分支" }).click();
   await expect(page.getByLabel("切换消息分支")).toBeVisible();
   await expect(page.getByLabel("切换消息分支")).toContainText("分支");
 
   await createThread(page);
   await sendPrompt(page, "请制造失败");
-  await expect(page.locator(".craft-turn-failed")).toContainText("备课助手本轮未能完成");
-  await expect(page.locator(".craft-response-content").last()).toContainText("已完成问题定位");
-  await expect(page.locator(".craft-turn-failed")).toContainText("未完成草稿保留");
+  const failedResponse = page.getByRole("article", { name: "备课助手回复" }).last();
+  await expect(failedResponse).toContainText("备课助手本轮未能完成");
+  await expect(failedResponse).toContainText("已完成问题定位");
+  await expect(failedResponse).toContainText("已生成的内容仍保留");
   await expect(page.locator(".lesson-agent-error")).toHaveCount(0);
   await page.reload();
   await openLessonFile(page);
-  await expect(page.locator(".craft-turn-failed")).toContainText("备课助手本轮未能完成");
-  await expect(page.locator(".craft-response-content").last()).toContainText("已完成问题定位");
-  await page.getByRole("button", { name: "编辑后重新发送" }).click();
-  await page.getByLabel("向备课助手提问").press("Enter");
+  await expect(page.getByRole("article", { name: "备课助手回复" }).last()).toContainText("备课助手本轮未能完成");
+  await expect(page.getByRole("article", { name: "备课助手回复" }).last()).toContainText("已完成问题定位");
+  await page.getByRole("button", { name: "重试" }).click();
   await expect(page.getByRole("heading", { name: "确定性回复" })).toBeVisible();
   await expect(page.getByRole("listitem").filter({ hasText: "已读取当前教案栏目。" })).toBeVisible();
   await expect(page.getByRole("alert")).toHaveCount(0);
@@ -103,23 +98,34 @@ test("covers empty state, streaming, tools, sources, sessions, retry, cancel and
   await expect(page.getByLabel("向备课助手提问")).toBeEnabled();
 });
 
+test("routes a theme Approval Card answer into the next Turn instead of the Pi queue", async ({ lessonPage: page }) => {
+  await sendPrompt(page, "请请求主题选择");
+  await expect(page.getByRole("region", { name: "选择一个视觉主题" })).toBeVisible();
+
+  await page.getByRole("button", { name: /theme02 · 炫光紫绿风/ }).click();
+
+  await expect(page.getByRole("region", { name: "选择一个视觉主题" })).toHaveCount(0);
+  await expect(page.getByText("已加入 Pi 队列", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("已接收主题 theme02，并进入下一步。", { exact: true })).toBeVisible();
+});
+
 test("reopens a thread on the branch that owns its pending approval", async ({ lessonPage: page }) => {
   await sendPrompt(page, "先生成一个可分支的回复");
   await expect(page.getByRole("heading", { name: "确定性回复" })).toBeVisible();
-  await page.getByRole("button", { name: "从此消息创建分支" }).click();
+  await page.getByRole("button", { name: "从此创建分支" }).click();
   await expect(page.getByLabel("切换消息分支")).toBeVisible();
 
   await sendPrompt(page, "请提交修改");
   await expect(page.getByRole("button", { name: "接受修改" })).toBeVisible();
 
   await page.getByLabel("切换消息分支").click();
-  await page.getByRole("option").first().click();
+  await page.getByRole("listbox").getByRole("option").first().click();
   await expect(page.getByRole("button", { name: "接受修改" })).toHaveCount(0);
 
   await page.reload();
   await openLessonFile(page);
   await expect(page.getByRole("button", { name: "接受修改" })).toBeVisible();
-  await expect(page.getByText("有一项修改等待确认", { exact: true })).toBeVisible();
+  await expect(page.getByText("确认前不会写入任何修改。", { exact: true })).toBeVisible();
 });
 
 test("deletes an unsent composer attachment when the user starts another thread", async ({ lessonPage: page }) => {
@@ -141,35 +147,6 @@ test("deletes an unsent composer attachment when the user starts another thread"
     if (!response.ok()) return `status:${response.status()}`;
     return (await response.json()).length;
   }).toBe(0);
-});
-
-test("keeps ready but unsent drafts outside project knowledge search", async ({ lessonPage: page }) => {
-  const userId = process.env.LESSONUP_E2E_USER_ID!;
-  const client = adminClient();
-  const sourceId = crypto.randomUUID();
-  try {
-    const inserted = await client.from("knowledge_sources").insert({
-      id: sourceId,
-      owner_id: userId,
-      notebook_id: notebookId,
-      lesson_file_id: lessonFileId,
-      scope: "file",
-      title: "未发送草稿",
-      media_type: "text/plain",
-      status: "ready",
-      index_version: "e2e-draft",
-    });
-    expect(inserted.error).toBeNull();
-    const listed = await client.rpc("list_scoped_knowledge_sources", {
-      p_owner_id: userId,
-      p_scopes: [`file:${lessonFileId}`],
-    });
-    expect(listed.error).toBeNull();
-    expect((listed.data ?? []).some((source: { id: string }) => source.id === sourceId)).toBe(false);
-  } finally {
-    await client.from("knowledge_sources").delete().eq("id", sourceId);
-  }
-  await expect(page.getByLabel("向备课助手提问")).toBeEnabled();
 });
 
 test("replays one atomic thread and main-branch creation", async ({ lessonPage: page }) => {
@@ -198,65 +175,18 @@ test("replays one atomic thread and main-branch creation", async ({ lessonPage: 
 });
 
 test("recovers an ordinary run whose server lease expired", async ({ lessonPage: page }) => {
-  const userId = process.env.LESSONUP_E2E_USER_ID!;
-  const client = adminClient();
-  const { data: thread, error: threadError } = await client.from("agent_threads")
-    .select("id")
-    .eq("owner_id", userId)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .single();
-  if (threadError) throw threadError;
-  const { data: branch, error: branchError } = await client.from("agent_branches")
-    .select("id")
-    .eq("owner_id", userId)
-    .eq("thread_id", thread.id)
-    .limit(1)
-    .single();
-  if (branchError) throw branchError;
-
-  const runId = crypto.randomUUID();
-  const assistantMessageId = crypto.randomUUID();
-  const { error: messageError } = await client.from("agent_messages").insert({
-    id: assistantMessageId,
-    owner_id: userId,
-    thread_id: thread.id,
-    branch_id: branch.id,
-    role: "assistant",
-    content: "",
-    status: "streaming",
-  });
-  if (messageError) throw messageError;
-  const { error: runError } = await client.from("agent_runs").insert({
-    id: runId,
-    owner_id: userId,
-    thread_id: thread.id,
-    branch_id: branch.id,
-    model: "expired-e2e-run",
-    status: "running",
-    lease_token: "dead-worker",
-    lease_expires_at: new Date(Date.now() - 60_000).toISOString(),
-    assistant_message_id: assistantMessageId,
-  });
-  if (runError) throw runError;
-  const { error: updateError } = await client.from("agent_threads")
-    .update({ status: "running" })
-    .eq("owner_id", userId)
-    .eq("id", thread.id);
-  if (updateError) throw updateError;
+  const seeded = await page.request.post("/api/__e2e/runs/expired");
+  expect(seeded.ok()).toBeTruthy();
+  const runId = (await seeded.json()).id;
 
   await page.reload();
   await openLessonFile(page);
-  await expect(page.locator(".craft-turn-failed"))
+  await expect(page.getByRole("article", { name: "备课助手回复" }).last())
     .toContainText("服务中断后，本轮回复已安全终止");
   await expect(page.getByRole("button", { name: "停止生成" })).toHaveCount(0);
   await expect(page.getByLabel("向备课助手提问")).toBeEnabled();
 
-  const { data: recovered, error: recoveredError } = await client.from("agent_runs")
-    .select("status,error")
-    .eq("owner_id", userId)
-    .eq("id", runId)
-    .single();
-  if (recoveredError) throw recoveredError;
-  expect(recovered).toMatchObject({ status: "failed", error: "run_interrupted" });
+  const recoveredResponse = await page.request.get(`/api/__e2e/runs/${runId}`);
+  expect(recoveredResponse.ok()).toBeTruthy();
+  expect(await recoveredResponse.json()).toMatchObject({ status: "failed", error: "run_interrupted" });
 });

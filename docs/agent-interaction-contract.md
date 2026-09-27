@@ -25,16 +25,38 @@ text delta, semantic tool label, source, approval, completion, cancellation and
 failure. Raw provider events, reasoning, tool arguments and private tool output
 never reach the browser.
 
-Single-section reads include the real section name. Legacy repeated reads are
-deduplicated; four or more distinct section reads render as one truthful
-whole-document activity.
+Every safe public tool call keeps its original call identity, semantic label,
+turn, progress, and terminal outcome. The browser may group calls by their Pi
+turn, but must not deduplicate or collapse them into a synthetic activity.
 
 ## Presentation
 
-The entire agent conversation surface uses the local Craft Agents adapter:
-turns, execution activity, Markdown, sources, approvals, attachments and
-composer. It consumes only normalized LessonUp events. General controls remain
-shadcn/Base Nova.
+The entire agent conversation surface uses local Beautiful UI components:
+streamed response text, Tool Chips, Approval Card, sources, attachments and
+Prompt Bar. It consumes the safe normalized projection of Pi's actual
+Agent/Turn/Assistant/Tool lifecycle rather than a second phase state machine.
+General controls remain shadcn/Base Nova.
 
-“思考中” describes a run phase only. It never represents or reveals the
-provider's chain of thought.
+The UI does not display provider reasoning or fabricate a “thinking” trace.
+It can state that an Agent, turn, assistant message, or tool call is active
+only when the matching normalized lifecycle event has been observed.
+
+Each Turn has two presentation modes derived from that same event stream:
+
+- While running, show live elapsed time, any safe assistant text already
+  emitted, the ordered public tool activity, and a current focus only when it
+  can be derived from an active public tool or approval interruption. The
+  result is still unknown.
+- Once completed, failed, or cancelled, freeze elapsed time and clear every
+  active focus indicator. Keep the activity trace available in collapsed form,
+  present the durable assistant text as the result summary, then show owned
+  artifacts and available actions. Empty artifacts are omitted.
+
+`visible_thinking` is not an alias for provider reasoning. It may contain only
+safe assistant-authored text or a server-projected public activity summary; if
+neither exists, it remains empty and the native loading state is shown.
+
+A response to a visible human-in-the-loop interaction is never routed through
+Pi's `steer` or `follow_up` queue. It consumes that durable pending interaction
+and starts its defined continuation/new Turn. The queue is reserved for an
+ordinary user message added while a Turn is already executing.

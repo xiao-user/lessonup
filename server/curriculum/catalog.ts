@@ -1,17 +1,8 @@
-import { createGunzip } from "node:zlib";
-import { createReadStream } from "node:fs";
-import { access } from "node:fs/promises";
-import path from "node:path";
-import { createInterface } from "node:readline";
-import { fileURLToPath } from "node:url";
 import type {
   CurriculumNodeMatch,
   CurriculumNodeRecord,
   CurriculumTextbookRecord,
 } from "../domain.js";
-
-const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-export const defaultCurriculumDataDir = path.resolve(moduleDir, "../../data/curriculum");
 
 export type CurriculumTextbookFilter = {
   stage?: string;
@@ -246,88 +237,4 @@ export function searchCurriculumNodeRecords(args: {
       }
       return { textbook: books.get(node.textbookId)!, node, path };
     });
-}
-
-async function readJsonlGz<T>(filePath: string): Promise<T[]> {
-  await access(filePath);
-  const stream = createReadStream(filePath).pipe(createGunzip());
-  const lines = createInterface({ input: stream, crlfDelay: Infinity });
-  const rows: T[] = [];
-  for await (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    rows.push(JSON.parse(trimmed) as T);
-  }
-  return rows;
-}
-
-type StoredTextbook = {
-  id: string;
-  title: string;
-  stage: string;
-  subject: string;
-  edition: string;
-  grade: string;
-  volume: string;
-  publisher_id: string;
-  ebook_id?: string | null;
-  detail_url?: string | null;
-  tree_url?: string | null;
-  source_pdf_url?: string | null;
-  source_list_url?: string | null;
-  node_count: number;
-  source_updated_at?: string | null;
-};
-
-type StoredNode = {
-  textbook_id: string;
-  node_id: string;
-  parent_id?: string | null;
-  level: number;
-  sort_no: number;
-  title: string;
-  page_number?: number | null;
-};
-
-export function mapStoredTextbook(row: StoredTextbook): CurriculumTextbookRecord {
-  return {
-    id: row.id,
-    title: row.title,
-    stage: row.stage,
-    subject: row.subject,
-    edition: row.edition,
-    grade: row.grade,
-    volume: row.volume ?? "",
-    publisherId: row.publisher_id ?? "",
-    ebookId: row.ebook_id ?? null,
-    detailUrl: row.detail_url ?? null,
-    treeUrl: row.tree_url ?? null,
-    sourcePdfUrl: row.source_pdf_url ?? null,
-    sourceListUrl: row.source_list_url ?? null,
-    nodeCount: row.node_count,
-    sourceUpdatedAt: row.source_updated_at ?? null,
-  };
-}
-
-export function mapStoredNode(row: StoredNode): CurriculumNodeRecord {
-  return {
-    textbookId: row.textbook_id,
-    nodeId: row.node_id,
-    parentId: row.parent_id ?? null,
-    level: row.level,
-    sortNo: row.sort_no,
-    title: row.title,
-    pageNumber: row.page_number ?? null,
-  };
-}
-
-export async function loadCurriculumCatalogFromDataDir(dataDir = defaultCurriculumDataDir) {
-  const [textbooks, nodes] = await Promise.all([
-    readJsonlGz<StoredTextbook>(path.join(dataDir, "textbooks.jsonl.gz")),
-    readJsonlGz<StoredNode>(path.join(dataDir, "nodes.jsonl.gz")),
-  ]);
-  return {
-    textbooks: textbooks.map(mapStoredTextbook),
-    nodes: nodes.map(mapStoredNode),
-  };
 }

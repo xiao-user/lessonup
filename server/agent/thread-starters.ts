@@ -5,7 +5,7 @@ import type {
   NotebookRecord,
   SemesterFrameworkAggregate,
 } from "../domain.js";
-import { requestDeepSeekFlashText } from "./deepseek-provider.js";
+import { requestPiText } from "../agent-runtime/pi/text.js";
 
 const responseSchema = z.object({
   suggestions: z.array(z.string().trim().min(2).max(80)).min(1).max(3),
@@ -34,12 +34,11 @@ function isFrameworkStarterResource(
   return args.framework !== undefined;
 }
 
+const excerpt = (value: unknown, limit = 500) => String(value ?? "").trim().slice(0, limit);
+
 export async function generateThreadStarters(args: ThreadStarterResource) {
   const isFramework = isFrameworkStarterResource(args);
-  const request = (repair?: string) => requestDeepSeekFlashText({
-    temperature: 0.2,
-    maxOutputTokens: 512,
-    json: true,
+  const request = (repair?: string) => requestPiText({
     instructions: [
       "你为教师的新备课会话生成 3 个可直接发送的问题。",
       isFramework
@@ -65,24 +64,22 @@ export async function generateThreadStarters(args: ThreadStarterResource) {
             lessonDurationMinutes: args.framework.framework.lessonDurationMinutes,
             capacityRatio: args.framework.framework.capacityRatio,
             planningHorizonWeeks: args.framework.framework.planningHorizonWeeks,
-            contextProfile: args.framework.framework.contextProfile,
-            units: args.framework.units.map((unit) => ({
-              id: unit.id,
-              curriculumNodeId: unit.curriculumNodeId,
+            unitCount: args.framework.units.length,
+            blueprintCount: args.framework.blueprints.length,
+            units: args.framework.units.slice(0, 8).map((unit) => ({
               sortNo: unit.sortNo,
               plannedStartWeek: unit.plannedStartWeek,
               plannedEndWeek: unit.plannedEndWeek,
               plannedPeriods: unit.plannedPeriods,
-              learningGoals: unit.learningGoals,
+              learningGoals: excerpt(unit.learningGoals),
               status: unit.status,
             })),
-            blueprints: args.framework.blueprints.map((blueprint) => ({
-              semesterUnitId: blueprint.semesterUnitId,
+            blueprints: args.framework.blueprints.slice(0, 8).map((blueprint) => ({
               title: blueprint.title,
               plannedPeriod: blueprint.plannedPeriod,
-              mainActivity: blueprint.mainActivity,
-              observableProduct: blueprint.observableProduct,
-              assessmentEvidence: blueprint.assessmentEvidence,
+              mainActivity: excerpt(blueprint.mainActivity, 240),
+              observableProduct: excerpt(blueprint.observableProduct, 240),
+              assessmentEvidence: excerpt(blueprint.assessmentEvidence, 240),
               plannedMinutes: blueprint.plannedMinutes,
               status: blueprint.status,
             })),
@@ -97,7 +94,17 @@ export async function generateThreadStarters(args: ThreadStarterResource) {
           lessonFile: {
             title: args.file.title,
             documentVersion: args.file.documentVersion,
-            document: args.file.document,
+            outline: Object.fromEntries(Object.entries(args.file.document).map(([field, value]) => [
+              field,
+              { empty: !String(value).trim(), characters: String(value).length },
+            ])),
+            excerpts: {
+              objectives: excerpt(args.file.document.objectives),
+              focus: excerpt(args.file.document.focus),
+              process: excerpt(args.file.document.process),
+              assessment: excerpt(args.file.document.assessment),
+              reflection: excerpt(args.file.document.reflection),
+            },
           },
         }),
     signal: AbortSignal.timeout(8_000),

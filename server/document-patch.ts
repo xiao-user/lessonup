@@ -1,6 +1,7 @@
 import {
   documentPatchSchema,
   type DocumentPatch,
+  type DocumentFieldPatchProposal,
   type DocumentPatchProposal,
   type LessonPlan,
 } from "./domain.js";
@@ -87,14 +88,16 @@ export function canonicalizeDocumentPatchRanges(
 }
 
 export function materializeDocumentPatchProposal(args: {
-  proposal: DocumentPatchProposal;
+  proposal: DocumentPatchProposal | DocumentFieldPatchProposal;
   fileId: string;
   documentVersion: number;
   plan: LessonPlan;
 }): DocumentPatch {
   const operations = args.proposal.operations.flatMap((operation) => {
     const source = args.plan[operation.field];
-    const expectedText = operation.expectedText ?? source;
+    const expectedText = "expectedText" in operation
+      ? operation.expectedText ?? source
+      : source;
     // A complete lesson rewrite often repeats stable metadata (unit, period,
     // topic) while changing the instructional fields. Those harmless no-op
     // fields must not invalidate every useful operation in the same proposal.

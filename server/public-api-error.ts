@@ -15,6 +15,7 @@ const notFound = new Set([
   "knowledge_source_not_found",
   "curriculum_node_not_found",
   "curriculum_semantic_entity_not_found",
+  "presentation_not_found",
 ]);
 
 const conflicts = new Set([
@@ -38,18 +39,19 @@ const conflicts = new Set([
 
 const forbidden = new Set([
   "scope_denied",
-  "worker_scope_denied",
   "thread_scope_invalid",
   "lesson_scope_invalid",
   "semester_framework_scope_invalid",
   "notebook_scope_invalid",
   "fork_message_scope_invalid",
+  "presentation_source_scope_invalid",
 ]);
 
 const unavailable = new Set([
   "agent_not_configured",
   "knowledge_storage_not_configured",
   "knowledge_indexing_not_configured",
+  "presentation_renderer_unavailable",
 ]);
 
 const badRequest = new Set([
@@ -66,6 +68,7 @@ const badRequest = new Set([
   "curriculum_node_outside_semester_unit",
   "invalid_blueprint_difficulties",
   "invalid_design_basis_projection",
+  "presentation_markup_not_allowed",
 ]);
 
 export function publicApiError(error: unknown) {
@@ -87,5 +90,17 @@ export function publicApiError(error: unknown) {
   if (code === "knowledge_file_too_large") return { code, status: 413 as const };
   if (code === "unsupported_knowledge_file") return { code, status: 415 as const };
   if (badRequest.has(code)) return { code, status: 400 as const };
+  // Keep native Dashi diagnostics on the server, while allowing the classroom
+  // presentation UI to give a truthful retry message instead of a generic
+  // internal error.
+  if (code === "dashi_goal_visible_slots_missing") {
+    return { code: "dashi_visible_content_missing", status: 422 as const };
+  }
+  if (code === "dashi_goal_slide_count_mismatch") {
+    return { code: "dashi_content_shape_invalid", status: 422 as const };
+  }
+  if (code.startsWith("dashi_goal_")) return { code: "dashi_presentation_failed", status: 422 as const };
+  if (code.startsWith("dashi_native_")) return { code: "dashi_presentation_failed", status: 502 as const };
+  if (code === "dashi_presentation_not_rendered") return { code: "dashi_presentation_failed", status: 502 as const };
   return { code: "internal_error", status: 500 as const };
 }

@@ -29,7 +29,7 @@ export function formatTextbookVolumeLabel(book) {
 export function formatCurriculumNodeTitle(title = "") {
   return title
     .trim()
-    .replace(/^\s*(?:第?\s*\d+\s*[课、.．:：-]?|\d+(?:\.\d+)*\s*[*＊]?\s*|[一二三四五六七八九十]+\s*[、.．])\s*/, "")
+    .replace(/^\s*(?:第?\s*\d+\s*[*＊]?\s*[课、.．:：-]?|\d+(?:\.\d+)*\s*[*＊]?\s*|[一二三四五六七八九十]+\s*[、.．])\s*/, "")
     .trim() || title.trim();
 }
 

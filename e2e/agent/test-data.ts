@@ -1,7 +1,3 @@
-import "dotenv/config";
-import { createClient } from "@supabase/supabase-js";
-
-export const e2eEmail = "lessonup-agent-e2e@local.test";
 export const notebookId = "chinese";
 export const lessonFileId = "c1";
 export const initialObjective = "1. 理解本课核心概念，并能够用自己的语言进行解释。";
@@ -22,74 +18,18 @@ export const initialDocument = {
   reflection: "课后记录目标达成情况、学生生成的问题，以及下一课时需要调整的教学环节。",
 };
 
-export function adminClient() {
-  const url = process.env.SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !serviceKey) throw new Error("agent_e2e_requires_local_supabase_env");
-  return createClient(url, serviceKey, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
-}
-
-export async function findE2EUserId() {
-  const client = adminClient();
-  for (let page = 1; page <= 10; page += 1) {
-    const { data, error } = await client.auth.admin.listUsers({ page, perPage: 100 });
-    if (error) throw error;
-    const user = data.users.find((candidate) => candidate.email === e2eEmail);
-    if (user) return user.id;
-    if (data.users.length < 100) break;
-  }
-  return null;
-}
-
-export async function resetE2EState(userId: string) {
-  const client = adminClient();
-  const { data: designBasis, error: designBasisError } = await client
-    .from("lesson_design_bases")
-    .select("id")
-    .eq("owner_id", userId)
-    .eq("lesson_file_id", lessonFileId)
-    .maybeSingle();
-  if (designBasisError) throw designBasisError;
-  const queries = [
-    client.from("agent_threads").delete().eq("owner_id", userId),
-    client.from("lesson_file_versions").delete().eq("owner_id", userId).eq("lesson_file_id", lessonFileId),
-    ...(designBasis ? [
-      client.from("lesson_design_basis_versions").delete()
-        .eq("owner_id", userId).eq("basis_id", designBasis.id),
-      client.from("lesson_design_basis_entries").delete()
-        .eq("owner_id", userId).eq("basis_id", designBasis.id),
-    ] : []),
-  ];
-  for (const query of queries) {
-    const { error } = await query;
-    if (error) throw error;
-  }
-  const { error: updateError } = await client.from("lesson_files").update({
-    document: initialDocument,
-    context_profile: {},
-    document_version: 0,
-    page_count: 1,
-  }).eq("owner_id", userId).eq("id", lessonFileId);
-  if (updateError) throw updateError;
-  if (designBasis) {
-    const { error: basisResetError } = await client.from("lesson_design_bases").update({
-      learner_context: {},
-      teacher_notes: "",
-      status: "draft",
-      version: 0,
-    }).eq("owner_id", userId).eq("id", designBasis.id);
-    if (basisResetError) throw basisResetError;
-  }
-  const { error: versionError } = await client.from("lesson_file_versions").insert({
-    owner_id: userId,
-    lesson_file_id: lessonFileId,
-    document_version: 0,
-    document: initialDocument,
-    page_count: 1,
-    actor: "import",
-    idempotency_key: `e2e-reset:${crypto.randomUUID()}`,
-  });
-  if (versionError) throw versionError;
-}
+export const initialNotebookGraph = [{
+  id: notebookId,
+  title: "语文备课本",
+  className: "五年级 2 班",
+  year: "2025—2026 学年",
+  subject: "语文",
+  files: [{
+    id: lessonFileId,
+    title: "春日的第一声鸟鸣",
+    type: "阅读课",
+    image: "/assets/lesson-spring-bird.png",
+    pages: 1,
+    lessonPlan: initialDocument,
+  }],
+}];

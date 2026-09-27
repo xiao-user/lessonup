@@ -1,5 +1,5 @@
 // @ts-check
-import { getAccessToken } from "./supabase.js";
+import { getAccessToken } from "./session.js";
 
 const jsonHeaders = { "content-type": "application/json" };
 
@@ -126,6 +126,9 @@ export const agentApi = {
   listFrameworkClassFeedback: (frameworkId) => request(
     `/api/semester-frameworks/${encodeURIComponent(frameworkId)}/class-feedback`,
   ),
+  getPendingSemesterFrameworkWritebackIntent: (frameworkId) => request(
+    `/api/semester-frameworks/${encodeURIComponent(frameworkId)}/writeback-intent`,
+  ),
   createLessonFile: (input, idempotencyKey = crypto.randomUUID()) => request("/api/lesson-files", {
     method: "POST",
     headers: { "idempotency-key": idempotencyKey },
@@ -134,6 +137,17 @@ export const agentApi = {
   updateLessonFile: (fileId, input) => request(
     `/api/lesson-files/${encodeURIComponent(fileId)}`,
     { method: "PATCH", body: JSON.stringify(input) },
+  ),
+  getPendingLessonGenerationIntent: (fileId) => request(
+    `/api/lesson-files/${encodeURIComponent(fileId)}/generation-intent`,
+  ),
+  enqueueLessonGenerationIntent: (fileId, prompt, idempotencyKey = crypto.randomUUID()) => request(
+    `/api/lesson-files/${encodeURIComponent(fileId)}/generation-intent`,
+    {
+      method: "POST",
+      headers: { "idempotency-key": idempotencyKey },
+      body: JSON.stringify({ prompt }),
+    },
   ),
   listCurriculumFacets: () => request("/api/curriculum/facets"),
   getCurrentCurriculumCatalogRelease: () => request(
@@ -229,6 +243,31 @@ export const agentApi = {
     `/api/lesson-files/${encodeURIComponent(fileId)}/page-count`,
     { method: "PATCH", body: JSON.stringify(input) },
   ),
+  getClassroomPresentationGeneration: (fileId) => request(
+    `/api/lesson-files/${encodeURIComponent(fileId)}/presentations/generation`,
+  ),
+  listClassroomPresentations: (fileId) => request(
+    `/api/lesson-files/${encodeURIComponent(fileId)}/presentations`,
+  ),
+  listMyClassroomPresentations: () => request("/api/presentations"),
+  getClassroomPresentation: (presentationId) => request(
+    `/api/presentations/${encodeURIComponent(presentationId)}`,
+  ),
+  getClassroomPresentationDeck: (presentationId) => request(
+    `/api/presentations/${encodeURIComponent(presentationId)}/deck`,
+  ),
+  saveClassroomPresentationDeck: (presentationId, input) => request(
+    `/api/presentations/${encodeURIComponent(presentationId)}/deck`,
+    { method: "PATCH", body: JSON.stringify(input) },
+  ),
+  createPresentationAccess: (presentationId) => request(
+    `/api/presentations/${encodeURIComponent(presentationId)}/access`,
+    { method: "POST", body: JSON.stringify({}) },
+  ),
+  deleteClassroomPresentation: (presentationId) => request(
+    `/api/presentations/${encodeURIComponent(presentationId)}`,
+    { method: "DELETE" },
+  ),
   listThreads: (resource) => {
     const scope = typeof resource === "string" ? { lessonFileId: resource } : resource;
     const params = new URLSearchParams();
@@ -250,11 +289,21 @@ export const agentApi = {
   updateThread: (threadId, input) => request(`/api/agent/threads/${threadId}`, { method: "PATCH", body: JSON.stringify(input) }),
   deleteThread: (threadId) => request(`/api/agent/threads/${threadId}`, { method: "DELETE" }),
   listBranches: (threadId) => request(`/api/agent/threads/${threadId}/branches`),
+  getConversationSnapshot: (threadId, branchId) => request(
+    `/api/agent/threads/${threadId}/conversation-snapshot?branchId=${encodeURIComponent(branchId)}`,
+  ),
   listMessages: (threadId, branchId) => request(`/api/agent/threads/${threadId}/messages?branchId=${branchId}`),
   listApprovals: (threadId, branchId) => request(`/api/agent/threads/${threadId}/approvals?branchId=${branchId}`),
-  getLatestActivity: (threadId, branchId) => request(`/api/agent/threads/${threadId}/activity?branchId=${branchId}`),
   createBranch: (messageId, input) => request(`/api/agent/messages/${messageId}/branch`, { method: "POST", body: JSON.stringify(input) }),
   cancelRun: (runId) => request(`/api/agent/runs/${runId}/cancel`, { method: "POST", body: JSON.stringify({}) }),
+  queueRunInput: (runId, input) => request(`/api/agent/runs/${runId}/input`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  }),
+  clearRunInput: (runId, delivery = "all") => request(
+    `/api/agent/runs/${runId}/input?delivery=${delivery}`,
+    { method: "DELETE" },
+  ),
   uploadKnowledge: (file, scope, idempotencyKey = crypto.randomUUID()) => {
     const body = new FormData();
     body.append("file", file);

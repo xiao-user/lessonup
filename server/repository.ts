@@ -1,4 +1,12 @@
-import type { AgentInputItem, Session } from "@openai/agents";
+export type AgentSessionItem = Record<string, unknown>;
+type AgentInputItem = AgentSessionItem;
+interface Session {
+  getSessionId(): Promise<string>;
+  getItems(limit?: number): Promise<AgentInputItem[]>;
+  addItems(items: AgentInputItem[]): Promise<void>;
+  popItem(): Promise<AgentInputItem | undefined>;
+  clearSession(): Promise<void>;
+}
 import type {
   AgentApprovalRecord,
   AgentBranchRecord,
@@ -20,6 +28,7 @@ import type {
   CurriculumSemanticPathStep,
   CurriculumSemanticRelation,
   CurriculumTextbookRecord,
+  CurriculumStandardSearchCacheRecord,
   CreateSemesterFrameworkInput,
   CreateLessonBlueprintInput,
   DeleteLessonBlueprintInput,
@@ -30,6 +39,8 @@ import type {
   LessonClassFeedbackRecord,
   LessonDesignBasisAggregate,
   LessonDesignBasisPatch,
+  LessonGenerationIntentRecord,
+  SemesterFrameworkWritebackIntentRecord,
   LessonFileRecord,
   LessonContextProfile,
   LessonPlan,
@@ -44,7 +55,12 @@ import type {
   UpdateLessonBlueprintInput,
 } from "./domain.js";
 import type { CurriculumFacets, CurriculumTextbookFilter } from "./curriculum/catalog.js";
-import { durableSessionHistoryItems } from "./agent/session-history.js";
+import type {
+  BeginClassroomPresentationGenerationResult,
+  ClassroomPresentationGeneration,
+  DirectClassroomPresentationRecord,
+} from "./presentations/domain.js";
+import type { DashiGoal } from "./presentations/dashi-goal.js";
 
 export type ImportedNotebook = Omit<
   NotebookRecord,
@@ -65,10 +81,47 @@ export type ImportedNotebook = Omit<
   }>;
 };
 
+export type ConversationSnapshot = {
+  schemaVersion: 1;
+  capturedAt: string;
+  aggregateVersion: string;
+  thread: AgentThreadRecord;
+  branch: AgentBranchRecord;
+  branches: AgentBranchRecord[];
+  messages: AgentMessageRecord[];
+  latestRun: AgentRunRecord | null;
+  events: NormalizedAgentEvent[];
+  throughSequence: number;
+  approvals: AgentApprovalRecord[];
+};
+
+export type LessonFileContextRecord = Pick<LessonFileRecord,
+  "id" | "ownerId" | "notebookId" | "documentVersion" | "contextProfile"
+>;
+
 export type CreateThreadInput = { notebookId: string; title?: string } & (
   | { resourceType?: "lesson_file"; lessonFileId: string; semesterFrameworkId?: never }
   | { resourceType: "semester_framework"; lessonFileId?: never; semesterFrameworkId: string }
 );
+
+/**
+ * Provider-neutral storage boundary for runtimes that own their full protocol
+ * transcript. Pi snapshots use their own canonical store instead of the
+ * legacy provider-session table because the protocols are not wire compatible.
+ * D1 stores the protocol as append-only sequence rows; the session header
+ * holds only the CAS revision. Callers still submit the desired prefix.
+ */
+export type AgentRuntimeName = "pi";
+
+export type AgentRuntimeSessionSnapshot = {
+  ownerId: string;
+  threadId: string;
+  branchId: string;
+  runtime: AgentRuntimeName;
+  revision: number;
+  messages: unknown[];
+  updatedAt: string;
+};
 
 export interface LessonRepository {
   importNotebookGraph(ownerId: string, notebooks: ImportedNotebook[]): Promise<{ imported: number }>;
@@ -98,6 +151,8 @@ export interface LessonRepository {
     contextProfile?: LessonContextProfile;
     lessonBlueprintId?: string;
     pageCount: number;
+    /** Persisted with the new lesson aggregate; never held only in React. */
+    initialAgentPrompt?: string;
   }, idempotencyKey?: string): Promise<LessonFileRecord>;
   updateLessonFile(ownerId: string, fileId: string, patch: Partial<Pick<
     LessonFileRecord,
@@ -105,6 +160,23 @@ export interface LessonRepository {
   >>): Promise<LessonFileRecord>;
   deleteLessonFile(ownerId: string, fileId: string): Promise<void>;
   getLessonFile(ownerId: string, fileId: string): Promise<LessonFileRecord | null>;
+  getLessonFileContext(ownerId: string, fileId: string): Promise<LessonFileContextRecord | null>;
+  getPendingLessonGenerationIntent(
+    ownerId: string,
+    lessonFileId: string,
+  ): Promise<LessonGenerationIntentRecord | null>;
+  enqueueLessonGenerationIntent(input: {
+    ownerId: string;
+    lessonFileId: string;
+    prompt: string;
+    idempotencyKey: string;
+  }): Promise<LessonGenerationIntentRecord>;
+  claimLessonGenerationIntent(input: {
+    ownerId: string;
+    lessonFileId: string;
+    intentId: string;
+    runId: string;
+  }): Promise<LessonGenerationIntentRecord>;
   saveLessonDocument(args: {
     ownerId: string;
     fileId: string;
@@ -143,6 +215,71 @@ export interface LessonRepository {
     idempotencyKey: string;
   }): Promise<LessonDesignBasisAggregate>;
 
+  findClassroomPresentationByRequest(
+    ownerId: string,
+    idempotencyKey: string,
+  ): Promise<DirectClassroomPresentationRecord | null>;
+  saveClassroomPresentation(
+    presentation: DirectClassroomPresentationRecord,
+  ): Promise<DirectClassroomPresentationRecord>;
+  listClassroomPresentations(
+    ownerId: string,
+    lessonFileId: string,
+  ): Promise<DirectClassroomPresentationRecord[]>;
+  listClassroomPresentationsForOwner(ownerId: string): Promise<DirectClassroomPresentationRecord[]>;
+  listRecentClassroomPresentations(
+    ownerId: string,
+    limit?: number,
+  ): Promise<DirectClassroomPresentationRecord[]>;
+  getClassroomPresentation(
+    ownerId: string,
+    presentationId: string,
+  ): Promise<DirectClassroomPresentationRecord | null>;
+  updateClassroomPresentationArtifact(args: {
+    ownerId: string;
+    presentationId: string;
+    storageKey: string;
+    byteSize: number;
+    updatedAt: string;
+  }): Promise<DirectClassroomPresentationRecord>;
+  updateClassroomPresentationGoal(args: {
+    ownerId: string;
+    presentationId: string;
+    expectedChecksum: string;
+    goal: DashiGoal;
+    checksum: string;
+    updatedAt: string;
+    artifact?: { storageKey: string; byteSize: number };
+  }): Promise<DirectClassroomPresentationRecord>;
+  deleteClassroomPresentation(ownerId: string, presentationId: string): Promise<void>;
+  beginClassroomPresentationGeneration(
+    generation: ClassroomPresentationGeneration,
+  ): Promise<BeginClassroomPresentationGenerationResult>;
+  getLatestClassroomPresentationGeneration(
+    ownerId: string,
+    lessonFileId: string,
+  ): Promise<ClassroomPresentationGeneration | null>;
+  completeClassroomPresentationGeneration(args: {
+    ownerId: string;
+    generationId: string;
+    presentationId: string;
+    completedAt: string;
+    durationMs: number;
+  }): Promise<ClassroomPresentationGeneration>;
+  failClassroomPresentationGeneration(args: {
+    ownerId: string;
+    generationId: string;
+    errorCode: string;
+    completedAt: string;
+    durationMs: number;
+  }): Promise<ClassroomPresentationGeneration>;
+  /**
+   * Direct Dashi work is owned by one API process. If that process exits, its
+   * detached promises cannot resume safely, so surface those records as
+   * retryable failures on the next boot rather than leaving a false spinner.
+   */
+  recoverInterruptedClassroomPresentationGenerations(completedAt: string): Promise<number>;
+
   listThreads(
     ownerId: string,
     resource: string | AgentResourceRef,
@@ -150,6 +287,7 @@ export interface LessonRepository {
   ): Promise<AgentThreadRecord[]>;
   createThread(ownerId: string, input: CreateThreadInput, idempotencyKey?: string): Promise<{ thread: AgentThreadRecord; branch: AgentBranchRecord }>;
   getThread(ownerId: string, threadId: string): Promise<AgentThreadRecord | null>;
+  getConversationSnapshot(ownerId: string, threadId: string, branchId: string): Promise<ConversationSnapshot | null>;
   updateThread(ownerId: string, threadId: string, patch: Partial<Pick<
     AgentThreadRecord,
     "title" | "archivedAt" | "deletedAt" | "status" | "starterSuggestions"
@@ -158,6 +296,10 @@ export interface LessonRepository {
   createBranch(ownerId: string, threadId: string, parentBranchId?: string, forkedFromMessageId?: string): Promise<AgentBranchRecord>;
   listBranches(ownerId: string, threadId: string): Promise<AgentBranchRecord[]>;
   getBranch(ownerId: string, threadId: string, branchId: string): Promise<AgentBranchRecord | null>;
+  updateBranch(ownerId: string, threadId: string, branchId: string, patch: Partial<Pick<
+    AgentBranchRecord,
+    "pendingInteraction"
+  >>): Promise<AgentBranchRecord>;
   listMessages(ownerId: string, threadId: string, branchId: string, cursor?: string, limit?: number): Promise<AgentMessageRecord[]>;
   getMessage(ownerId: string, messageId: string): Promise<AgentMessageRecord | null>;
   appendMessage(input: Omit<AgentMessageRecord, "id" | "createdAt"> & { id?: string }): Promise<AgentMessageRecord>;
@@ -167,8 +309,19 @@ export interface LessonRepository {
   >>): Promise<AgentMessageRecord>;
 
   createRun(input: Omit<AgentRunRecord, "startedAt"> & { startedAt?: string }): Promise<AgentRunRecord>;
+  createRunWithInitialMessages(input: {
+    run: AgentRunRecord;
+    userMessage?: AgentMessageRecord;
+    assistantMessage: AgentMessageRecord;
+  }): Promise<{
+    run: AgentRunRecord;
+    userMessage?: AgentMessageRecord;
+    assistantMessage: AgentMessageRecord;
+  }>;
   getRun(ownerId: string, runId: string): Promise<AgentRunRecord | null>;
+  getRunByClientCommand(ownerId: string, threadId: string, clientCommandId: string): Promise<AgentRunRecord | null>;
   getLatestRun(ownerId: string, threadId: string, branchId: string): Promise<AgentRunRecord | null>;
+  getLatestCompletedRun(ownerId: string, threadId: string, branchId: string): Promise<AgentRunRecord | null>;
   updateRun(ownerId: string, runId: string, patch: Partial<AgentRunRecord>): Promise<AgentRunRecord>;
   heartbeatRun(args: {
     ownerId: string;
@@ -231,6 +384,7 @@ export interface LessonRepository {
     assistantMessageId?: string;
     content?: string;
     sources?: SourceRef[];
+    sessionItems?: AgentInputItem[];
     sessionCursor?: number;
     tokenUsage?: Record<string, number>;
     encryptedRunState?: string;
@@ -261,10 +415,45 @@ export interface LessonRepository {
   ): Promise<void>;
   popSessionItem(ownerId: string, threadId: string, branchId: string): Promise<AgentInputItem | undefined>;
   clearSession(ownerId: string, threadId: string, branchId: string): Promise<void>;
+  getAgentRuntimeSession(
+    ownerId: string,
+    threadId: string,
+    branchId: string,
+    runtime: AgentRuntimeName,
+  ): Promise<AgentRuntimeSessionSnapshot | null>;
+  saveAgentRuntimeSession(args: {
+    ownerId: string;
+    threadId: string;
+    branchId: string;
+    runtime: AgentRuntimeName;
+    expectedRevision: number;
+    messages: unknown[];
+    rewriteFrom?: number;
+  }): Promise<AgentRuntimeSessionSnapshot>;
   getThreadMemory(ownerId: string, threadId: string, branchId: string): Promise<{ summary: string; cursor: number } | null>;
   saveThreadMemory(ownerId: string, threadId: string, branchId: string, summary: string, cursor: number): Promise<void>;
 
   searchKnowledge(ownerId: string, scopes: string[], query: string, limit: number, embedding?: number[]): Promise<KnowledgeResult[]>;
+  searchCurriculumStandards(input: {
+    query: string;
+    subject: string;
+    stage?: string;
+    grade?: string;
+    limit: number;
+    embedding?: number[];
+  }): Promise<KnowledgeResult[]>;
+  getPublishedCurriculumStandardFingerprint(): Promise<string | null>;
+  getCurriculumStandardSearchCache(input: {
+    contextFingerprint: string;
+    querySha256: string;
+    limit: number;
+  }): Promise<CurriculumStandardSearchCacheRecord | null>;
+  saveCurriculumStandardSearchCache(input: {
+    contextFingerprint: string;
+    querySha256: string;
+    limit: number;
+    results: KnowledgeResult[];
+  }): Promise<CurriculumStandardSearchCacheRecord>;
   getKnowledgePassage(ownerId: string, scopes: string[], chunkId: string): Promise<KnowledgeResult | null>;
   getKnowledgeSourcePassages(ownerId: string, scopes: string[], sourceId: string, limit: number): Promise<KnowledgeResult[]>;
   listProjectSources(ownerId: string, scopes: string[]): Promise<SourceRef[]>;
@@ -281,6 +470,7 @@ export interface LessonRepository {
     sources: SourceRef[],
   ): Promise<void>;
   listRunEvidence(ownerId: string, runId: string): Promise<AgentRunEvidenceRecord[]>;
+  filterCurrentCurriculumStandardSources(sources: SourceRef[]): Promise<SourceRef[]>;
 
   createSemesterFramework(
     ownerId: string,
@@ -345,6 +535,22 @@ export interface LessonRepository {
       semesterFrameworkId?: string;
     },
   ): Promise<LessonClassFeedbackRecord[]>;
+  getPendingSemesterFrameworkWritebackIntent(
+    ownerId: string,
+    frameworkId: string,
+  ): Promise<SemesterFrameworkWritebackIntentRecord | null>;
+  enqueueSemesterFrameworkWritebackIntent(input: {
+    ownerId: string;
+    frameworkId: string;
+    feedbackId: string;
+    prompt: string;
+  }): Promise<SemesterFrameworkWritebackIntentRecord>;
+  claimSemesterFrameworkWritebackIntent(input: {
+    ownerId: string;
+    frameworkId: string;
+    intentId: string;
+    runId: string;
+  }): Promise<SemesterFrameworkWritebackIntentRecord>;
 
   getCurrentCurriculumCatalogRelease(): Promise<CurriculumCatalogReleaseRecord | null>;
   getCurriculumCatalogRelease(releaseId: string): Promise<CurriculumCatalogReleaseRecord | null>;
@@ -402,6 +608,9 @@ export interface LessonRepository {
 
 export class RepositorySession implements Session {
   private appendIndex = 0;
+  private bufferedItems?: AgentInputItem[];
+  private bufferedDirty = false;
+  private transactionState: "open" | "committed" | "discarded" = "open";
 
   constructor(
     private readonly repository: LessonRepository,
@@ -410,13 +619,29 @@ export class RepositorySession implements Session {
     private readonly branchId: string,
     private readonly persistenceKey?: string,
     private readonly historyLoader?: () => Promise<AgentInputItem[]>,
+    private readonly buffered = false,
   ) {}
 
   async getSessionId() {
     return `${this.threadId}:${this.branchId}`;
   }
 
+  private async transactionItems() {
+    if (!this.bufferedItems) {
+      this.bufferedItems = await this.repository.getSessionItems(
+        this.ownerId,
+        this.threadId,
+        this.branchId,
+      );
+    }
+    return this.bufferedItems;
+  }
+
   async getItems(limit?: number) {
+    if (this.buffered && (this.bufferedDirty || limit !== undefined)) {
+      const items = await this.transactionItems();
+      return limit === undefined ? structuredClone(items) : structuredClone(items.slice(-limit));
+    }
     if (limit === undefined && this.historyLoader) {
       return this.historyLoader();
     }
@@ -424,12 +649,21 @@ export class RepositorySession implements Session {
   }
 
   async addItems(items: AgentInputItem[]) {
-    const durableItems = durableSessionHistoryItems(items);
+    if (this.transactionState !== "open") {
+      throw new Error("session_transaction_closed");
+    }
+    const durableItems = structuredClone(items);
     if (durableItems.length) {
       const idempotencyKey = this.persistenceKey
         ? `${this.persistenceKey}:${this.appendIndex}`
         : undefined;
       this.appendIndex += 1;
+      if (this.buffered) {
+        const transactionItems = await this.transactionItems();
+        transactionItems.push(...structuredClone(durableItems));
+        this.bufferedDirty = true;
+        return;
+      }
       if (idempotencyKey) {
         await this.repository.addSessionItems(
           this.ownerId,
@@ -449,11 +683,60 @@ export class RepositorySession implements Session {
     }
   }
 
+  /**
+   * Flushes all Session writes as one logical unit after the SDK run reaches a
+   * stable result. Approval continuations use this mode so a provider failure
+   * cannot leak a partial tool/result protocol unit into the durable branch.
+   */
+  async commit() {
+    if (!this.buffered || this.transactionState === "committed") return;
+    if (this.transactionState === "discarded") {
+      throw new Error("session_transaction_discarded");
+    }
+    if (this.bufferedDirty) {
+      await this.repository.replaceSessionItems(
+        this.ownerId,
+        this.threadId,
+        this.branchId,
+        await this.transactionItems(),
+      );
+    }
+    this.transactionState = "committed";
+    this.bufferedItems = undefined;
+    this.bufferedDirty = false;
+  }
+
+  async snapshot() {
+    if (!this.buffered || this.transactionState === "discarded" || !this.bufferedDirty) {
+      return undefined;
+    }
+    return structuredClone(await this.transactionItems());
+  }
+
+  discard() {
+    if (!this.buffered || this.transactionState !== "open") return;
+    this.transactionState = "discarded";
+    this.bufferedItems = undefined;
+    this.bufferedDirty = false;
+  }
+
   async popItem() {
+    if (this.buffered && this.transactionState === "open") {
+      const items = await this.transactionItems();
+      const item = items.pop();
+      if (item) this.bufferedDirty = true;
+      return item;
+    }
     return this.repository.popSessionItem(this.ownerId, this.threadId, this.branchId);
   }
 
   async clearSession() {
+    if (this.buffered && this.transactionState === "open") {
+      const items = await this.transactionItems();
+      items.splice(0, items.length);
+      this.bufferedDirty = true;
+      return;
+    }
     await this.repository.clearSession(this.ownerId, this.threadId, this.branchId);
   }
 }

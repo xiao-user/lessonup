@@ -17,6 +17,40 @@ const importFor = (repository: MemoryLessonRepository, ownerId: string) => repos
 }]);
 
 describe("memory repository isolation", () => {
+  it("keeps separate run evidence for distinct chunks from one source", async () => {
+    const repository = new MemoryLessonRepository();
+    await repository.createRun({
+      id: "run-evidence-chunks",
+      ownerId: "user-a",
+      threadId: "thread-evidence-chunks",
+      branchId: "branch-evidence-chunks",
+      status: "running",
+    } as never);
+
+    await repository.recordRunEvidence("user-a", "run-evidence-chunks", "curriculum_standard_search", [
+      {
+        id: "standard-source",
+        title: "义务教育语文课程标准",
+        kind: "public",
+        chunkId: "standard:page-21",
+        page: 21,
+      },
+      {
+        id: "standard-source",
+        title: "义务教育语文课程标准",
+        kind: "public",
+        chunkId: "standard:page-33",
+        page: 33,
+      },
+    ]);
+
+    const evidence = await repository.listRunEvidence("user-a", "run-evidence-chunks");
+    expect(evidence.map((item) => item.source.chunkId)).toEqual([
+      "standard:page-21",
+      "standard:page-33",
+    ]);
+  });
+
   it("returns a bounded preview derived from canonical lesson content", async () => {
     const repository = new MemoryLessonRepository();
     await importFor(repository, "user-a");
@@ -75,6 +109,36 @@ describe("memory repository isolation", () => {
       entries: [],
     });
     expect(await repository.getLessonDesignBasis("user-b", "f1")).toBeNull();
+  });
+
+  it("claims a classroom-feedback writeback command once without client state", async () => {
+    const repository = new MemoryLessonRepository();
+    await importFor(repository, "user-a");
+    const frameworkId = "11111111-1111-4111-8111-111111111111";
+    const feedback = await repository.createLessonClassFeedback("user-a", {
+      lessonFileId: "f1",
+      semesterFrameworkId: frameworkId,
+      kind: "continuity_outcome",
+      statement: "复习活动完成偏弱，需要在下一课时补充短任务。",
+      continuityFingerprint: "feedback-continuity",
+      continuityDirection: "review",
+      continuityOutcome: "weak",
+    });
+    const intent = await repository.enqueueSemesterFrameworkWritebackIntent({
+      ownerId: "user-a",
+      frameworkId,
+      feedbackId: feedback.id,
+      prompt: "【衔接回写】\n请根据课堂反馈更新下一课时蓝图。",
+    });
+    expect(await repository.getPendingSemesterFrameworkWritebackIntent("user-a", frameworkId))
+      .toMatchObject({ id: intent.id, feedbackId: feedback.id });
+    await repository.claimSemesterFrameworkWritebackIntent({
+      ownerId: "user-a",
+      frameworkId,
+      intentId: intent.id,
+      runId: "22222222-2222-4222-8222-222222222222",
+    });
+    expect(await repository.getPendingSemesterFrameworkWritebackIntent("user-a", frameworkId)).toBeNull();
   });
 
   it("applies a complete lesson-design change atomically", async () => {
@@ -481,6 +545,8 @@ describe("memory repository isolation", () => {
       notebookId: "n1",
       lessonFileId: "f1",
     });
+    await repository.createRun({ id: "run-recovery", ownerId: "user-a", threadId: thread.id,
+      branchId: branch.id, model: "test", status: "awaiting_approval", startedAt: new Date().toISOString() });
     await repository.saveApproval({
       id: "approval-recovery",
       ownerId: "user-a",
@@ -713,7 +779,7 @@ describe("memory repository isolation", () => {
     expect(await repository.getRun("user-a", "run-expired"))
       .toMatchObject({ status: "failed", error: "approval_expired" });
     expect(await repository.getThread("user-a", thread.id))
-      .toMatchObject({ status: "failed" });
+      .toMatchObject({ status: "idle" });
   });
 
   it("recovers an expired ordinary run and explains the failed assistant turn", async () => {
@@ -755,7 +821,78 @@ describe("memory repository isolation", () => {
       error: "run_interrupted",
     });
     expect(await repository.getThread("user-a", thread.id)).toMatchObject({
-      status: "failed",
+      status: "idle",
+    });
+  });
+
+  it("recovers an expired run that already has a pending card as awaiting_approval", async () => {
+    const repository = new MemoryLessonRepository();
+    await importFor(repository, "user-a");
+    const { thread, branch } = await repository.createThread("user-a", {
+      notebookId: "n1",
+      lessonFileId: "f1",
+    });
+    const assistant = await repository.appendMessage({
+      id: "assistant-expired-approval",
+      ownerId: "user-a",
+      threadId: thread.id,
+      branchId: branch.id,
+      role: "assistant",
+      content: "已准备确认卡",
+      status: "streaming",
+    });
+    await repository.createRun({
+      id: "expired-with-pending-card",
+      ownerId: "user-a",
+      threadId: thread.id,
+      branchId: branch.id,
+      model: "test",
+      status: "running",
+      assistantMessageId: assistant.id,
+      leaseToken: "expired-lease",
+      leaseExpiresAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    await repository.saveApproval({
+      id: "pending-after-isolate-death",
+      ownerId: "user-a",
+      runId: "expired-with-pending-card",
+      threadId: thread.id,
+      branchId: branch.id,
+      assistantMessageId: assistant.id,
+      toolCallId: "tool-pending",
+      state: "pending",
+      encryptedRunState: "encrypted",
+      agentDefinitionVersion: "1",
+      documentVersion: 0,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      createdAt: new Date().toISOString(),
+      patch: {
+        fileId: "f1",
+        baseDocumentVersion: 0,
+        summary: "改评价",
+        operations: [{
+          op: "replace_text",
+          field: "assessment",
+          start: 0,
+          end: 0,
+          expectedText: "",
+          replacement: "用两处证据回答",
+        }],
+      },
+    });
+    await repository.updateThread("user-a", thread.id, { status: "running" });
+
+    await expect(repository.recoverExpiredRuns("user-a", thread.id)).resolves.toBe(1);
+    expect(await repository.getRun("user-a", "expired-with-pending-card")).toMatchObject({
+      status: "awaiting_approval",
+      error: undefined,
+    });
+    expect(await repository.getMessage("user-a", assistant.id)).toMatchObject({
+      status: "completed",
+      content: "已准备确认卡",
+    });
+    expect(await repository.getThread("user-a", thread.id)).toMatchObject({
+      status: "awaiting_approval",
     });
   });
 
@@ -794,7 +931,7 @@ describe("memory repository isolation", () => {
       error: "run_interrupted",
     });
     expect(await repository.getThread("user-a", thread.id)).toMatchObject({
-      status: "failed",
+      status: "idle",
     });
   });
 

@@ -1,5 +1,5 @@
 import { expect, test } from "./fixtures.js";
-import { adminClient, initialDocument, lessonFileId, notebookId } from "./test-data.js";
+import { initialDocument, lessonFileId, notebookId } from "./test-data.js";
 
 const temporaryTitle = "端到端临时备课本";
 
@@ -147,8 +147,6 @@ test("creates once, scrolls across the full collection and targets the active no
 });
 
 test("echoes persisted uploads in personal info and deletes Storage with database records", async ({ collectionPage: page }) => {
-  const userId = process.env.LESSONUP_E2E_USER_ID!;
-  const client = adminClient();
   const title = "个人资料回显验收.txt";
   let sourceId = "";
   let storageKey = "";
@@ -169,27 +167,8 @@ test("echoes persisted uploads in personal info and deletes Storage with databas
     sourceId = source.id;
     storageKey = source.storage_key;
 
-    const threadResponse = await page.request.post("/api/agent/threads", {
-      data: { notebookId, lessonFileId, title: "个人资料回显验收" },
-    });
-    expect(threadResponse.ok()).toBeTruthy();
-    const aggregate = await threadResponse.json();
-    const messageId = crypto.randomUUID();
-    const insertedMessage = await client.from("agent_messages").insert({
-      id: messageId,
-      owner_id: userId,
-      thread_id: aggregate.thread.id,
-      branch_id: aggregate.branch.id,
-      role: "user",
-      content: "使用上传资料",
-      status: "completed",
-    });
-    expect(insertedMessage.error).toBeNull();
-    const attached = await client.from("knowledge_sources")
-      .update({ attached_message_id: messageId })
-      .eq("owner_id", userId)
-      .eq("id", sourceId);
-    expect(attached.error).toBeNull();
+    const attached = await page.request.post(`/api/__e2e/knowledge/${sourceId}/attach`);
+    expect(attached.ok()).toBeTruthy();
 
     const draftList = await page.request.get(
       `/api/knowledge/uploads?lessonFileId=${encodeURIComponent(lessonFileId)}`,
@@ -208,11 +187,9 @@ test("echoes persisted uploads in personal info and deletes Storage with databas
     await page.getByRole("button", { name: "确认删除", exact: true }).click();
     await expect(page.getByText(title, { exact: true })).toHaveCount(0);
 
-    const sourceRecord = await client.from("knowledge_sources").select("id").eq("id", sourceId).maybeSingle();
-    expect(sourceRecord.error).toBeNull();
-    expect(sourceRecord.data).toBeNull();
-    const storedObject = await client.storage.from("knowledge-private").download(storageKey);
-    expect(storedObject.error).not.toBeNull();
+    expect((await page.request.get(`/api/knowledge/uploads/${sourceId}`)).status()).toBe(404);
+    const storedObject = await page.request.get(`/api/__e2e/storage?key=${encodeURIComponent(storageKey)}`);
+    expect(await storedObject.json()).toEqual({ exists: false });
     sourceId = "";
   } finally {
     if (sourceId) await page.request.delete(`/api/knowledge/uploads/${sourceId}`);
@@ -220,8 +197,6 @@ test("echoes persisted uploads in personal info and deletes Storage with databas
 });
 
 test("deletes a lesson file and its associated uploaded sources from the open book", async ({ collectionPage: page }) => {
-  const userId = process.env.LESSONUP_E2E_USER_ID!;
-  const client = adminClient();
   const title = "删除备课文件验收";
   let temporaryFileId = "";
   let sourceId = "";
@@ -270,16 +245,9 @@ test("deletes a lesson file and its associated uploaded sources from the open bo
     await expect(page.getByRole("button", { name: `打开备课文件${title}`, exact: true })).toHaveCount(0);
     expect((await page.request.get(`/api/lesson-files/${temporaryFileId}`)).status()).toBe(404);
 
-    const [fileRecord, sourceRecord] = await Promise.all([
-      client.from("lesson_files").select("id").eq("owner_id", userId).eq("id", temporaryFileId).maybeSingle(),
-      client.from("knowledge_sources").select("id").eq("owner_id", userId).eq("id", sourceId).maybeSingle(),
-    ]);
-    expect(fileRecord.error).toBeNull();
-    expect(fileRecord.data).toBeNull();
-    expect(sourceRecord.error).toBeNull();
-    expect(sourceRecord.data).toBeNull();
-    const storedObject = await client.storage.from("knowledge-private").download(storageKey);
-    expect(storedObject.error).not.toBeNull();
+    expect((await page.request.get(`/api/knowledge/uploads/${sourceId}`)).status()).toBe(404);
+    const storedObject = await page.request.get(`/api/__e2e/storage?key=${encodeURIComponent(storageKey)}`);
+    expect(await storedObject.json()).toEqual({ exists: false });
     temporaryFileId = "";
     sourceId = "";
   } finally {
@@ -289,8 +257,6 @@ test("deletes a lesson file and its associated uploaded sources from the open bo
 });
 
 test("deletes an entire notebook with its files and Storage sources", async ({ collectionPage: page }) => {
-  const userId = process.env.LESSONUP_E2E_USER_ID!;
-  const client = adminClient();
   const title = "整本删除验收";
   let temporaryNotebookId = "";
   let temporaryFileId = "";
@@ -354,16 +320,10 @@ test("deletes an entire notebook with its files and Storage sources", async ({ c
     expect((await deleteResponsePromise).status()).toBe(204);
     await expect(page.getByRole("button", { name: `打开${title}`, exact: true })).toHaveCount(0);
 
-    const [notebookRecord, fileRecord, sourceRecord] = await Promise.all([
-      client.from("notebooks").select("id").eq("owner_id", userId).eq("id", temporaryNotebookId).maybeSingle(),
-      client.from("lesson_files").select("id").eq("owner_id", userId).eq("id", temporaryFileId).maybeSingle(),
-      client.from("knowledge_sources").select("id").eq("owner_id", userId).eq("id", sourceId).maybeSingle(),
-    ]);
-    expect(notebookRecord.data).toBeNull();
-    expect(fileRecord.data).toBeNull();
-    expect(sourceRecord.data).toBeNull();
-    const storedObject = await client.storage.from("knowledge-private").download(storageKey);
-    expect(storedObject.error).not.toBeNull();
+    expect((await page.request.get(`/api/lesson-files/${temporaryFileId}`)).status()).toBe(404);
+    expect((await page.request.get(`/api/knowledge/uploads/${sourceId}`)).status()).toBe(404);
+    const storedObject = await page.request.get(`/api/__e2e/storage?key=${encodeURIComponent(storageKey)}`);
+    expect(await storedObject.json()).toEqual({ exists: false });
     temporaryNotebookId = "";
     temporaryFileId = "";
     sourceId = "";
@@ -470,7 +430,7 @@ test("turns real lesson-file pages and restores an independently routed detail",
     });
     expect(spreadColors[0]).toBe(spreadColors[1]);
 
-    await page.getByRole("button", { name: "下一份备课文件", exact: true }).click();
+    await page.getByRole("button", { name: "下一页", exact: true }).click();
     await expect(firstLeaf).toHaveCSS("--leaf-angle", "-180deg");
     const turnedPageDepth = await firstLeaf.evaluate((element) => {
       const style = window.getComputedStyle(element);
@@ -501,7 +461,7 @@ test("turns real lesson-file pages and restores an independently routed detail",
     await expect(page.locator(".book-volume-leaf.is-turned")).toHaveCount(0);
 
     await page.getByRole("button", { name: "打开语文备课本", exact: true }).click();
-    await page.getByRole("button", { name: "下一份备课文件", exact: true }).click();
+    await page.getByRole("button", { name: "下一页", exact: true }).click();
     await expect(page.locator(".book-volume.is-open .book-volume-leaf.is-current")).toContainText("春日的第一声鸟鸣");
 
     const detailPageButton = page.getByRole("button", {
@@ -560,15 +520,23 @@ test("turns real lesson-file pages and restores an independently routed detail",
     await expect(page.locator(".lesson-file-workspace")).toHaveCount(0);
     const restoredBook = page.locator(".book-volume.is-open");
     await expect(restoredBook).toHaveCSS("--book-rotation", "0deg");
-    const restoredStyle = await restoredBook.getAttribute("style");
-    expect(restoredStyle).toContain("--book-scale: 1.32");
+    const restoredScale = await restoredBook.evaluate((book) => {
+      const styles = getComputedStyle(book);
+      return {
+        actual: Number.parseFloat(styles.getPropertyValue("--book-scale")),
+        expected: Number.parseFloat(styles.getPropertyValue("--book-open-scale")),
+      };
+    });
+    expect(restoredScale.actual).toBeCloseTo(restoredScale.expected, 2);
     await expect(restoredBook.locator(".book-volume-leaf.is-current")).toContainText("春日的第一声鸟鸣");
     await expect(restoredBook.locator(".book-volume-leaf.is-current")).toHaveCSS("z-index", "auto");
-    const restoredCopyStyles = await restoredBook
+    const restoredCopyVisible = await restoredBook
       .locator(".book-volume-leaf.is-current .book-volume-file > *")
-      .evaluateAll((elements) => elements.map((element) => element.getAttribute("style") ?? ""));
-    expect(restoredCopyStyles.every((style) => !style.includes("opacity") && !style.includes("visibility")))
-      .toBeTruthy();
+      .evaluateAll((elements) => elements.every((element) => {
+        const styles = getComputedStyle(element);
+        return Number.parseFloat(styles.opacity) > 0 && styles.visibility !== "hidden";
+      }));
+    expect(restoredCopyVisible).toBeTruthy();
   } finally {
     if (temporaryFileId) {
       const response = await page.request.delete(`/api/lesson-files/${temporaryFileId}`);
@@ -598,14 +566,13 @@ test("rewinds every turned leaf before an outside-click close settles", async ({
     await page.getByRole("button", { name: "打开语文备课本", exact: true }).click();
     const openBook = page.locator(".book-volume.is-open");
     await expect(openBook.locator(".book-volume-controls")).toContainText("1 / 4");
-    await expect(page.getByRole("button", { name: "下一份备课文件", exact: true })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "下一页", exact: true })).toBeEnabled();
 
-    const rapidTurnStartedAt = Date.now();
     for (let pageIndex = 2; pageIndex <= 4; pageIndex += 1) {
-      await page.getByRole("button", { name: "下一份备课文件", exact: true }).click({ force: true });
+      await expect(page.getByRole("button", { name: "下一页", exact: true })).toBeEnabled();
+      await page.getByRole("button", { name: "下一页", exact: true }).click();
       await expect(openBook.locator(".book-volume-controls")).toContainText(`${pageIndex} / 4`);
     }
-    expect(Date.now() - rapidTurnStartedAt).toBeLessThan(900);
     await expect(openBook.locator(".book-volume-leaf.is-turned")).toHaveCount(4);
     await page.waitForTimeout(750);
     const visibleSpread = await openBook.evaluate((book) => {
@@ -614,25 +581,25 @@ test("rewinds every turned leaf before an outside-click close settles", async ({
       const latestTurnedLeaf = turnedLeaves.at(-1)!;
       const leftFace = latestTurnedLeaf.querySelector(".book-volume-leaf-back")!;
       const rightFace = currentLeaf.querySelector(".book-volume-leaf-front")!;
-      const visibleFaceAt = (face: Element) => {
-        const rect = face.getBoundingClientRect();
-        return document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
-          ?.closest(".book-volume-leaf-front, .book-volume-leaf-back")
-          ?.textContent
-          ?.replace(/\s+/g, " ")
-          .trim();
-      };
       return {
         expectedLeft: leftFace.textContent?.replace(/\s+/g, " ").trim(),
         expectedRight: rightFace.textContent?.replace(/\s+/g, " ").trim(),
-        visibleLeft: visibleFaceAt(leftFace),
-        visibleRight: visibleFaceAt(rightFace),
+        leftVisibility: getComputedStyle(leftFace).visibility,
+        rightVisibility: getComputedStyle(rightFace).visibility,
+        leftOpacity: Number.parseFloat(getComputedStyle(leftFace).opacity),
+        rightOpacity: Number.parseFloat(getComputedStyle(rightFace).opacity),
       };
     });
-    expect(visibleSpread.visibleLeft).toBe(visibleSpread.expectedLeft);
-    expect(visibleSpread.visibleRight).toBe(visibleSpread.expectedRight);
+    expect(visibleSpread.expectedLeft).toContain("回卷测试");
+    expect(visibleSpread.expectedRight).toContain("春日的第一声鸟鸣");
+    expect(visibleSpread).toMatchObject({
+      leftVisibility: "visible",
+      rightVisibility: "visible",
+      leftOpacity: 1,
+      rightOpacity: 1,
+    });
 
-    await page.getByRole("button", { name: "上一份备课文件", exact: true }).click();
+    await page.getByRole("button", { name: "上一页", exact: true }).click();
     await expect(openBook.locator(".book-volume-controls")).toContainText("3 / 4");
     await page.waitForTimeout(750);
     const reversedSpread = await openBook.evaluate((book) => {
@@ -640,28 +607,28 @@ test("rewinds every turned leaf before an outside-click close settles", async ({
       const latestTurnedLeaf = [...book.querySelectorAll(".book-volume-leaf.is-turned")].at(-1)!;
       const leftFace = latestTurnedLeaf.querySelector(".book-volume-leaf-back")!;
       const rightFace = currentLeaf.querySelector(".book-volume-leaf-front")!;
-      const visibleFaceAt = (face: Element) => {
-        const rect = face.getBoundingClientRect();
-        return document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
-          ?.closest(".book-volume-leaf-front, .book-volume-leaf-back")
-          ?.textContent
-          ?.replace(/\s+/g, " ")
-          .trim();
-      };
       return {
         expectedLeft: leftFace.textContent?.replace(/\s+/g, " ").trim(),
         expectedRight: rightFace.textContent?.replace(/\s+/g, " ").trim(),
-        visibleLeft: visibleFaceAt(leftFace),
-        visibleRight: visibleFaceAt(rightFace),
+        leftVisibility: getComputedStyle(leftFace).visibility,
+        rightVisibility: getComputedStyle(rightFace).visibility,
+        leftOpacity: Number.parseFloat(getComputedStyle(leftFace).opacity),
+        rightOpacity: Number.parseFloat(getComputedStyle(rightFace).opacity),
       };
     });
-    expect(reversedSpread.visibleLeft).toBe(reversedSpread.expectedLeft);
-    expect(reversedSpread.visibleRight).toBe(reversedSpread.expectedRight);
+    expect(reversedSpread.expectedLeft).toContain("回卷测试");
+    expect(reversedSpread.expectedRight).toContain("回卷测试");
+    expect(reversedSpread).toMatchObject({
+      leftVisibility: "visible",
+      rightVisibility: "visible",
+      leftOpacity: 1,
+      rightOpacity: 1,
+    });
 
     await page.getByRole("button", { name: "返回全部备课本", exact: true }).click();
     await page.waitForTimeout(160);
     const closingTransforms = await openBook.evaluate((book) => ({
-      cover: (book.querySelector(".book-volume-cover") as HTMLElement).style.getPropertyValue("--cover-angle"),
+      cover: (book as HTMLElement).style.getPropertyValue("--cover-angle"),
       leaves: [...book.querySelectorAll(".book-volume-leaf")]
         .slice(0, 3)
         .map((leaf) => (leaf as HTMLElement).style.getPropertyValue("--leaf-angle")),

@@ -4,9 +4,7 @@ import { parseConfig } from "./config.js";
 
 const productionEnv = {
   NODE_ENV: "production",
-  SUPABASE_URL: "https://example.supabase.co",
-  SUPABASE_ANON_KEY: "anon-key",
-  SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+  LESSONUP_PERSISTENCE: "d1",
   LESSONUP_DEV_AUTH: "0",
 } satisfies NodeJS.ProcessEnv;
 
@@ -24,6 +22,27 @@ describe("server runtime configuration", () => {
       NODE_ENV: "production",
       MCP_TOKEN_SECRET: "mcp-token-secret-with-at-least-32-characters",
     });
-    expect(parsed.DEEPSEEK_API_KEY).toBeUndefined();
+    expect(parsed.MODEL_API_KEY).toBeUndefined();
+  });
+
+  it("accepts explicit model IDs for an OpenAI-compatible gateway", () => {
+    const parsed = parseConfig({
+      MODEL_API_KEY: "model-key",
+      MODEL_BASE_URL: "https://gateway.example/v1",
+      MODEL_ID: "model-a",
+      MODEL_API: "openai-responses",
+      MODEL_CONTEXT_WINDOW: "100000",
+      MODEL_MAX_TOKENS: "8000",
+    });
+    expect(parsed).toMatchObject({
+      MODEL_BASE_URL: "https://gateway.example/v1",
+      MODEL_ID: "model-a",
+      MODEL_API: "openai-responses",
+    });
+  });
+
+  it("rejects partial model configuration", () => {
+    expect(() => parseConfig({ MODEL_API_KEY: "model-key" }))
+      .toThrow("model_configuration_incomplete");
   });
 });

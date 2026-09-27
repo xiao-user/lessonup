@@ -8,7 +8,7 @@ import { createMcpScopeToken } from "../security/mcp-token.js";
 describe("MCP Streamable HTTP integration", () => {
   it("authenticates, negotiates the protocol, and calls a real knowledge tool", async () => {
     const repository = new MemoryLessonRepository();
-    const app = createApp(repository, { harness: null, threadStarterGenerator: null });
+    const app = createApp(repository, { agent: null, threadStarterGenerator: null });
     const token = await createMcpScopeToken({
       userId: "00000000-0000-4000-8000-00000000000a",
       runId: crypto.randomUUID(),

@@ -34,6 +34,9 @@ function unpackSourcePayload(value: unknown, depth = 0): Record<string, unknown>
   if (Array.isArray(object.sources)) {
     return unpackSourcePayload(object.sources, depth + 1);
   }
+  if (Array.isArray(object.results)) {
+    return unpackSourcePayload(object.results, depth + 1);
+  }
   return [];
 }
 
