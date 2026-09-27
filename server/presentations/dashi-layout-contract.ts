@@ -75,6 +75,46 @@ function valuesAtPath(value: unknown, segments: string[]): unknown[] {
   return child.flatMap((item) => valuesAtPath(item, rest));
 }
 
+function valueAtPath(value: unknown, path: string) {
+  let current = value;
+  for (const segment of path.split(".")) {
+    if (!segment || segment.endsWith("[]") || !current || typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+function setValueAtPath(value: Record<string, unknown>, path: string, nextValue: unknown) {
+  const segments = path.split(".");
+  if (!segments.length || segments.some((segment) => !segment || segment.endsWith("[]"))) return;
+  let current = value;
+  for (const segment of segments.slice(0, -1)) {
+    const child = current[segment];
+    if (!child || typeof child !== "object" || Array.isArray(child)) current[segment] = {};
+    current = current[segment] as Record<string, unknown>;
+  }
+  current[segments.at(-1)!] = nextValue;
+}
+
+/**
+ * Dashi renders sparse authored props on top of template defaults. If a model
+ * supplies fewer array items but leaves a template count at its default, the
+ * runtime deliberately pads the array with demo rows. Bind every exposed count
+ * to the authored array length before approval so classroom decks can never
+ * acquire unrelated template copy during rendering.
+ */
+function bindAuthoredArrayCounts(
+  props: Record<string, unknown>,
+  arrays: FillPlanArray[],
+) {
+  for (const plan of arrays) {
+    if (typeof plan.key !== "string" || typeof plan.countKey !== "string") continue;
+    const value = valueAtPath(props, plan.key);
+    if (!Array.isArray(value)) continue;
+    setValueAtPath(props, plan.countKey, value.length);
+  }
+}
+
 /**
  * Dashi merges omitted props with template defaults. Therefore every visible
  * copy field from the exact inspected layout must be present before a teacher
@@ -154,7 +194,13 @@ export function keepOnlyDashiAuthoredContent(
       }
       return {
         ...slide,
-        props: Object.fromEntries(Object.entries(slide.props).filter(([key]) => allowed.has(key))),
+        props: (() => {
+          const props = structuredClone(Object.fromEntries(
+            Object.entries(slide.props).filter(([key]) => allowed.has(key)),
+          ));
+          bindAuthoredArrayCounts(props, contract.fillPlan?.arrays ?? []);
+          return props;
+        })(),
       };
     }),
   };

@@ -142,21 +142,24 @@ describe("safeToolDetail", () => {
       prompt: "private prompt",
       result: "private result",
     });
-    expect(detail).toBe("使用已授权的备课能力处理当前任务，并将结果返回给 Pi。");
+    expect(detail).toBe("使用已授权的备课能力处理当前任务。");
     expect(detail).not.toContain("private");
   });
 });
 
 describe("safeToolCompletionDetail", () => {
-  it("summarizes a completed read without returning its raw result", () => {
+  it("keeps the factual start description instead of narrating the agent loop", () => {
+    const started = safeToolDetail("read_document", {});
+    expect(safeToolCompletionDetail("read_document", "读取整份教案", false, started)).toBe(started);
     expect(safeToolCompletionDetail("read_document", "读取整份教案")).toBe(
-      "读取整份教案已完成，Pi 将基于读取到的当前信息继续处理。",
+      "读取当前教案的完整内容，作为后续分析与修改依据。",
     );
+    expect(safeToolCompletionDetail("read_document", "读取整份教案")).not.toMatch(/Pi/);
   });
 
   it("distinguishes a proposal preflight failure", () => {
     expect(safeToolCompletionDetail("propose_document_patch", "准备修改建议", true)).toBe(
-      "修改建议未通过预检，Pi 可根据返回的问题在本轮继续调整。",
+      "修改建议未通过预检，可在本轮根据问题继续调整。",
     );
   });
 });

@@ -11,6 +11,48 @@ const document = {
 };
 
 describe("LessonUp API scope", () => {
+  it("keeps framework generation commands server-owned across a lesson-file read", async () => {
+    const repository = new MemoryLessonRepository();
+    const app = createApp(repository, { agent: null });
+    const userId = "00000000-0000-4000-8000-00000000000a";
+    await repository.importNotebookGraph(userId, [{
+      id: "generation-notebook",
+      title: "生成备课本",
+      className: "一班",
+      year: "2026",
+      subject: "语文",
+      files: [],
+    }]);
+    const created = await app.request("/api/lesson-files", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-lessonup-user": userId,
+        "idempotency-key": "generation-file-create",
+      },
+      body: JSON.stringify({
+        notebookId: "generation-notebook",
+        title: "春",
+        type: "课时蓝图教案",
+        document,
+        pageCount: 1,
+        initialAgentPrompt: "请依据当前课时蓝图生成完整教案。",
+      }),
+    });
+    expect(created.status).toBe(201);
+    const file = await created.json() as { id: string };
+
+    const intent = await app.request(`/api/lesson-files/${file.id}/generation-intent`, {
+      headers: { "x-lessonup-user": userId },
+    });
+    expect(intent.status).toBe(200);
+    await expect(intent.json()).resolves.toMatchObject({
+      lessonFileId: file.id,
+      state: "pending",
+      prompt: "请依据当前课时蓝图生成完整教案。",
+    });
+  });
+
   it("lists and opens approved Dashi-goal presentations without a direct generation API", async () => {
     const repository = new MemoryLessonRepository();
     const userA = "00000000-0000-4000-8000-00000000000a";
@@ -102,7 +144,7 @@ describe("LessonUp API scope", () => {
     });
     expect(ownerAccess.status).toBe(200);
     await expect(ownerAccess.json()).resolves.toMatchObject({
-      url: expect.stringMatching(new RegExp(`^/api/presentations/${generated.id}/preview/\\?token=`)),
+      url: expect.stringMatching(new RegExp(`^/classroom-presentations/${generated.id}$`)),
     });
 
     const deleteResponse = await app.request(`/api/presentations/${generated.id}`, {
@@ -643,5 +685,37 @@ describe("LessonUp API scope", () => {
     const payload = await response.json() as { run: { id: string }; events: Array<{ type: string }> };
     expect(payload.run.id).toBe("00000000-0000-4000-8000-0000000000aa");
     expect(payload.events).toEqual([expect.objectContaining({ type: "tool.started" })]);
+  });
+
+  it("restores a conversation through one versioned snapshot without private approval state", async () => {
+    const repository = new MemoryLessonRepository();
+    const userId = "00000000-0000-4000-8000-00000000000a";
+    await repository.importNotebookGraph(userId, [{
+      id: "snapshot-notebook", title: "备课本", className: "一班", year: "2026", subject: "数学",
+      files: [{ id: "snapshot-file", title: "课题", type: "概念课", pages: 1, lessonPlan: document }],
+    }]);
+    const { thread, branch } = await repository.createThread(userId, {
+      notebookId: "snapshot-notebook", lessonFileId: "snapshot-file",
+    });
+    await repository.appendMessage({
+      ownerId: userId, threadId: thread.id, branchId: branch.id,
+      role: "user", content: "检查目标", status: "completed",
+    });
+    const app = createApp(repository, { agent: null });
+    const response = await app.request(
+      `/api/agent/threads/${thread.id}/conversation-snapshot?branchId=${branch.id}`,
+      { headers: { "x-lessonup-user": userId } },
+    );
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as Record<string, unknown> & { messages: unknown[] };
+    expect(payload).toMatchObject({
+      schemaVersion: 1,
+      throughSequence: 0,
+      latestRun: null,
+    });
+    expect(payload.aggregateVersion).toEqual(expect.any(String));
+    expect(payload.messages).toHaveLength(1);
+    expect(JSON.stringify(payload)).not.toContain("encryptedRunState");
   });
 });

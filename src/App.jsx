@@ -14,13 +14,14 @@ import { DeleteLessonFileDialog, DeleteNotebookDialog } from "@/features/noteboo
 import { NotebookCollection } from "@/features/notebooks/notebook-collection";
 import { agentApi } from "@/lib/agent-api";
 import { createLessonPlanPreview } from "@/lib/lesson-preview";
-import { supabase } from "@/lib/supabase";
+import { signOut } from "@/lib/session";
 
 const loadLessonFileWorkspace = () => import("@/features/lesson-files/lesson-file-workspace");
 const loadCreateDialog = () => import("@/features/notebooks/create-dialog");
 const loadProfileDialog = () => import("@/features/auth/profile-dialog");
 const loadSemesterFrameworkWorkspace = () => import("@/features/semester-frameworks/semester-framework-workspace");
 const loadCreateSemesterFrameworkDialog = () => import("@/features/semester-frameworks/create-semester-framework-dialog");
+const loadClassroomPresentationPage = () => import("@/features/presentations/classroom-presentation-page");
 const LessonFileWorkspace = lazy(async () => {
   const module = await loadLessonFileWorkspace();
   return { default: module.LessonFileWorkspace };
@@ -40,6 +41,10 @@ const SemesterFrameworkWorkspace = lazy(async () => {
 const CreateSemesterFrameworkDialog = lazy(async () => {
   const module = await loadCreateSemesterFrameworkDialog();
   return { default: module.CreateSemesterFrameworkDialog };
+});
+const ClassroomPresentationPage = lazy(async () => {
+  const module = await loadClassroomPresentationPage();
+  return { default: module.ClassroomPresentationPage };
 });
 
 const notebookTones = ["teal", "sage", "amber", "coral"];
@@ -80,6 +85,15 @@ const getLessonFileRouteId = () => {
 };
 const getSemesterFrameworkRouteId = () => {
   const match = window.location.pathname.match(/^\/semester-frameworks\/([^/]+)\/?$/);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+};
+const getClassroomPresentationRouteId = () => {
+  const match = window.location.pathname.match(/^\/classroom-presentations\/([^/]+)\/?$/);
   if (!match) return null;
   try {
     return decodeURIComponent(match[1]);
@@ -142,6 +156,21 @@ const mergeRemoteFile = (notebooks, notebookId, fileId, remoteFile) => notebooks
 ));
 
 export function App() {
+  const presentationId = getClassroomPresentationRouteId();
+  if (presentationId) {
+    return (
+      <>
+        <Suspense fallback={null}>
+          <ClassroomPresentationPage presentationId={presentationId} />
+        </Suspense>
+        <Toaster position="bottom-center" />
+      </>
+    );
+  }
+  return <CollectionApp />;
+}
+
+function CollectionApp() {
   const [notebooks, setNotebooks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState(null);
@@ -156,7 +185,6 @@ export function App() {
   const [deletingNotebook, setDeletingNotebook] = useState(false);
   const [activeFramework, setActiveFramework] = useState(null);
   const [frameworkDialogNotebookId, setFrameworkDialogNotebookId] = useState(null);
-  const [pendingLessonGeneration, setPendingLessonGeneration] = useState(null);
   const collectionRef = useRef(null);
 
   const activeNotebook = notebooks.find((notebook) => notebook.id === activeFile?.notebookId);
@@ -291,6 +319,7 @@ export function App() {
           contextProfile: values.contextProfile,
           lessonBlueprintId,
           pageCount: 1,
+          initialAgentPrompt: directLessonGenerationPrompt(values.title),
         }, values.idempotencyKey);
         setNotebooks((current) => current.map((notebook) => notebook.id === targetId ? {
           ...notebook,
@@ -303,10 +332,6 @@ export function App() {
             updated: "刚刚",
           }, ...notebook.files],
         } : notebook));
-        setPendingLessonGeneration({
-          fileId: file.id,
-          prompt: directLessonGenerationPrompt(values.title),
-        });
         setDialogKind(null);
         setDialogNotebookId(null);
         toast.success(`已建立“${values.title}”，助手正在生成教案`);
@@ -556,15 +581,15 @@ export function App() {
     if (existingFile) {
       if (action === "regenerate") {
         const periodContext = lessonPeriodContext(blueprint, unitBlueprints, knowledgeRecord);
-        setPendingLessonGeneration({
-          fileId: existingFile.id,
-          prompt: blueprintGenerationPrompt(
+        await agentApi.enqueueLessonGenerationIntent(
+          existingFile.id,
+          blueprintGenerationPrompt(
             blueprint,
             unitTitle,
             periodContext,
             blueprint.plannedMinutes ?? framework.lessonDurationMinutes,
           ),
-        });
+        );
         toast.success(`助手将按最新蓝图重新生成“${blueprint.title}”`);
       }
       await openFromFramework(existingFile.id);
@@ -606,6 +631,12 @@ export function App() {
       },
       lessonBlueprintId: blueprint.id,
       pageCount: 1,
+      initialAgentPrompt: blueprintGenerationPrompt(
+        blueprint,
+        unitTitle,
+        periodContext,
+        blueprint.plannedMinutes ?? framework.lessonDurationMinutes,
+      ),
     }, crypto.randomUUID());
     setNotebooks((current) => current.map((candidate) => candidate.id === notebook.id ? {
       ...candidate,
@@ -618,15 +649,6 @@ export function App() {
         updated: "刚刚",
       }, ...candidate.files],
     } : candidate));
-    setPendingLessonGeneration({
-      fileId: file.id,
-      prompt: blueprintGenerationPrompt(
-        blueprint,
-        unitTitle,
-        periodContext,
-        blueprint.plannedMinutes ?? framework.lessonDurationMinutes,
-      ),
-    });
     const opened = await openFromFramework(file.id);
     if (opened) toast.success(`已建立“${blueprint.title}”，助手正在生成教案`);
   };
@@ -742,7 +764,7 @@ export function App() {
           void loadProfileDialog();
           window.requestAnimationFrame(() => setProfileOpen(true));
         }}
-        onSignOut={() => supabase?.auth.signOut()}
+        onSignOut={() => { void signOut(); }}
       />
       {activeNotebook && activeFileData && (
         <Suspense fallback={null}>
@@ -762,12 +784,6 @@ export function App() {
               updateLocalLessonPlan(saved.document, saved.pageCount, saved.documentVersion);
             }}
             onClose={closeLessonFile}
-            initialAgentPrompt={pendingLessonGeneration?.fileId === activeFileData.id
-              ? pendingLessonGeneration.prompt
-              : null}
-            onInitialAgentPromptConsumed={() => setPendingLessonGeneration((current) => (
-              current?.fileId === activeFileData.id ? null : current
-            ))}
             key={`${activeNotebook.id}-${activeFileData.id}`}
           />
         </Suspense>

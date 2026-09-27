@@ -9,6 +9,7 @@ import {
 } from "./grading.js";
 import {
   gradePerformance,
+  isSafePublicEvent,
   resolvePerformanceBudget,
   type AgentEvalPerformance,
 } from "./performance.js";
@@ -50,6 +51,7 @@ type RunActivity = {
     tokenUsage?: {
       requests?: number;
       inputTokens?: number;
+      cachedInputTokens?: number;
     };
   };
 };
@@ -76,6 +78,9 @@ const performanceBudget = resolvePerformanceBudget(process.env);
 const grader = createPiGraderClient({
   apiKey: graderConfig.apiKey,
   baseURL: graderConfig.baseURL,
+  api: graderConfig.api,
+  contextWindow: graderConfig.contextWindow,
+  maxTokens: graderConfig.maxTokens,
 });
 
 const approvalFieldLabels: Record<string, string> = {
@@ -153,6 +158,8 @@ async function consumeSse(pathname: string, body: unknown) {
 
   const events: AgentEvent[] = [];
   let firstOutputMs: number | null = null;
+  let firstSafeEventMs: number | null = null;
+  let firstProviderEventMs: number | null = null;
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -172,13 +179,19 @@ async function consumeSse(pathname: string, body: unknown) {
         if (event.type === "message.delta" && firstOutputMs === null) {
           firstOutputMs = Math.round(performance.now() - startedAt);
         }
+        if (isSafePublicEvent(event.type) && firstSafeEventMs === null) {
+          firstSafeEventMs = Math.round(performance.now() - startedAt);
+        }
+        if (event.type === "assistant.message.started" && firstProviderEventMs === null) {
+          firstProviderEventMs = Math.round(performance.now() - startedAt);
+        }
         events.push(event);
       }
       boundary = buffer.indexOf("\n\n");
     }
     if (done) break;
   }
-  return { events, firstOutputMs };
+  return { events, firstOutputMs, firstSafeEventMs, firstProviderEventMs };
 }
 
 const caseSource = await readFile(new URL("./cases.jsonl", import.meta.url), "utf8");
@@ -248,10 +261,13 @@ for (const testCase of cases) {
   let runActivity: RunActivity | null = null;
   let performance: AgentEvalPerformance = {
     durationMs: 0,
+    firstSafeEventMs: null,
+    firstProviderEventMs: null,
     firstOutputMs: null,
     modelRequests: null,
     toolCalls: 0,
     inputTokens: null,
+    cachedInputTokens: null,
   };
   try {
     if (isFrameworkCase) {
@@ -289,6 +305,8 @@ for (const testCase of cases) {
     });
     events = streamed.events;
     performance.durationMs = Math.round(performance.now() - startedAt);
+    performance.firstSafeEventMs = streamed.firstSafeEventMs;
+    performance.firstProviderEventMs = streamed.firstProviderEventMs;
     performance.firstOutputMs = streamed.firstOutputMs;
     runActivity = await request<RunActivity>(
       `/api/agent/threads/${created.thread.id}/activity?branchId=${created.branch.id}`,
@@ -319,6 +337,7 @@ for (const testCase of cases) {
   performance.toolCalls = toolNames.length;
   performance.modelRequests = runActivity?.run?.tokenUsage?.requests ?? null;
   performance.inputTokens = runActivity?.run?.tokenUsage?.inputTokens ?? null;
+  performance.cachedInputTokens = runActivity?.run?.tokenUsage?.cachedInputTokens ?? null;
   const proposalRevisionCodes = events
     .filter((event) => event.type === "tool.completed" && event.revisionCode)
     .map((event) => event.revisionCode as string);

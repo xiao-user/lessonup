@@ -1,6 +1,6 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
-import type { NativeDashiPptSkill } from "../../presentations/native-dashi-skill.js";
+import type { BrowserDashiSkill } from "../../presentations/browser-dashi-skill.js";
 import type { DashiThemeId } from "../../presentations/dashi-theme-catalog.js";
 
 const themeIds = [
@@ -8,8 +8,7 @@ const themeIds = [
   "theme07", "theme08", "theme09", "theme10", "theme11", "theme12",
 ] as const;
 
-const themeType = Type.Union(themeIds.map((theme) => Type.Literal(theme)));
-type PlanningCapability = Pick<NativeDashiPptSkill, "queryLayouts" | "inspectLayouts">;
+type PlanningCapability = Pick<BrowserDashiSkill, "queryLayouts" | "inspectLayouts">;
 
 const textResult = (value: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(value) }],
@@ -120,21 +119,16 @@ export function createPiDashiPlanningSession(
 ) {
   let activeTheme = options.theme;
   const layoutQueryCache = new Map<string, unknown>();
-  const queryShape = {
-    ...(options.theme ? {} : { theme: themeType }),
-    queries: Type.Array(Type.Object({
-      intent: Type.String({ minLength: 1, maxLength: 120 }),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
-    }, { additionalProperties: false }), { minItems: 1, maxItems: 16 }),
-  };
-
   const queryLayouts: AgentTool<any> = {
     name: "query_dashi_layouts",
     label: "查询 Dashi 版式",
-    description: options.theme
-      ? `已绑定 ${options.theme}。按课堂意图批量查询真实候选版式；只需描述每一类页面要承担的课堂功能。`
-      : "先选择一个主题，再按课堂意图批量查询真实候选版式。",
-    parameters: Type.Object(queryShape, { additionalProperties: false }),
+    description: "按课堂意图批量查询真实候选版式；主题由服务端绑定，只需描述每一类页面要承担的课堂功能。",
+    parameters: Type.Object({
+      queries: Type.Array(Type.Object({
+        intent: Type.String({ minLength: 1, maxLength: 120 }),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
+      }, { additionalProperties: false }), { minItems: 1, maxItems: 16 }),
+    }, { additionalProperties: false }),
     execute: async (_toolCallId, input, signal, onUpdate) => {
       const parameters = input as {
         theme?: DashiThemeId;

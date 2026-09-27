@@ -18,13 +18,21 @@ import { materializeLessonDesignBasisPatch } from "../../lesson-design-basis-pat
 import { materializeLessonDesignChange } from "../../lesson-design-change.js";
 import type { LessonRepository } from "../../repository.js";
 import { findKnownLessonContentIssues } from "../../agent/lesson-content-validation.js";
-import { validateObservedEvidence } from "../../agent/evidence-validation.js";
+import { evidenceRequiredToolError, validateObservedEvidence } from "../../agent/evidence-validation.js";
 import { assertDocumentWriteScope } from "../../agent/write-scope.js";
 import { validateLessonDesignProposalReferences } from "../../agent/design-basis-validation.js";
 import { typeBoxFromZod } from "./schema-adapter.js";
 import { dashiGoalSchema, type DashiGoal } from "../../presentations/dashi-goal.js";
 
 export type PiCapturedProposal = {
+  /**
+   * The tool call that produced this proposal. The approval created from it
+   * carries the same id, so the browser can attribute a confirmation item to
+   * the exact call instead of guessing from the tool name — a run that
+   * self-corrects after a rejected preflight must keep its earlier attempt
+   * visibly unsuccessful.
+   */
+  toolCallId: string;
   patch: ResourcePatch;
   resourceType: "lesson_file" | "semester_framework";
   patchKind: "document" | "semester_framework" | "lesson_design_basis" | "presentation_storyboard";
@@ -63,9 +71,9 @@ function dashiPreflightError(error: unknown) {
 function captureSlot() {
   let captured: PiCapturedProposal | null = null;
   return {
-    set(value: PiCapturedProposal) {
+    set(toolCallId: string, value: Omit<PiCapturedProposal, "toolCallId">) {
       if (captured) throw new Error("multiple_write_proposals_not_allowed");
-      captured = value;
+      captured = { ...value, toolCallId };
     },
     get: () => captured,
   };
@@ -84,7 +92,10 @@ export function createPiDocumentProposalTool(args: {
     description: "提交当前 A4 教案的语义字段修改供教师确认。每项 operation 提交完整字段 replacement，当前原文快照由服务端绑定；未经批准不会写入。",
     parameters,
     executionMode: "sequential",
-    execute: async (_toolCallId, raw) => {
+    execute: async (toolCallId, raw) => {
+      if (args.plan.writeMode === "consultative") {
+        throw new Error("document_write_not_requested");
+      }
       const proposal = documentFieldPatchToolSchema.parse(raw);
       assertDocumentWriteScope(proposal, args.plan.requestedDocumentFields);
       if (args.plan.minimalWriteRequested && proposal.operations.length > 1) {
@@ -108,9 +119,11 @@ export function createPiDocumentProposalTool(args: {
           plan: args.plan,
           evidence: await args.repository.listRunEvidence(args.context.userId, args.context.runId),
         });
-        if (validation.tripwireTriggered) throw new Error("evidence_required");
+        if (validation.tripwireTriggered) {
+          throw evidenceRequiredToolError(validation.outputInfo.missingKinds ?? []);
+        }
       }
-      slot.set({
+      slot.set(toolCallId, {
         patch,
         resourceType: "lesson_file",
         patchKind: "document",
@@ -142,7 +155,7 @@ export function createPiPresentationProposalTool(args: {
     description: "直接提交最终课堂演示的标题、目标和 slides；主题与教案版本已由服务端绑定，批准后原样渲染。",
     parameters,
     executionMode: "sequential",
-    execute: async (_toolCallId, raw) => {
+    execute: async (toolCallId, raw) => {
       const proposal = presentationGoalToolSchema.parse(raw);
       const file = await args.repository.getLessonFile(args.context.userId, args.context.lessonFileId);
       if (!file) throw new Error("lesson_file_not_found");
@@ -176,7 +189,7 @@ export function createPiPresentationProposalTool(args: {
         summary: proposal.summary,
         goal,
       };
-      slot.set({
+      slot.set(toolCallId, {
         patch,
         resourceType: "lesson_file",
         patchKind: "presentation_storyboard",
@@ -203,7 +216,7 @@ export function createPiSemesterProposalTool(args: {
     description: "提交当前学期框架、单元或课时蓝图修改供教师确认。",
     parameters,
     executionMode: "sequential",
-    execute: async (_toolCallId, raw) => {
+    execute: async (toolCallId, raw) => {
       const proposal = semesterFrameworkPatchToolSchema.parse(raw);
       if (args.plan.minimalWriteRequested && proposal.operations.length > 1) {
         throw new Error("too_many_framework_operations");
@@ -217,7 +230,7 @@ export function createPiSemesterProposalTool(args: {
         throw new Error("resource_context_stale");
       }
       const patch = materializeSemesterFrameworkPatch({ proposal, aggregate });
-      slot.set({
+      slot.set(toolCallId, {
         patch,
         resourceType: "semester_framework",
         patchKind: "semester_framework",
@@ -243,7 +256,7 @@ export function createPiLessonDesignChangeProposalTool(args: {
     description: "将结构化设计依据与 A4 教案修改作为一个原子确认项提交。",
     parameters,
     executionMode: "sequential",
-    execute: async (_toolCallId, raw) => {
+    execute: async (toolCallId, raw) => {
       const proposal = lessonDesignChangeToolSchema.parse(raw);
       assertDocumentWriteScope({ operations: proposal.documentOperations }, args.plan.requestedDocumentFields);
       const [file, aggregate, observedEvidence] = await Promise.all([
@@ -261,7 +274,7 @@ export function createPiLessonDesignChangeProposalTool(args: {
         proposal: { summary: proposal.summary, operations: proposal.designBasisOperations },
       });
       const patch = materializeLessonDesignChange({ proposal, aggregate, file, observedEvidence });
-      slot.set({
+      slot.set(toolCallId, {
         patch,
         resourceType: "lesson_file",
         patchKind: "document",
@@ -288,7 +301,7 @@ export function createPiDesignBasisProjectionProposalTool(args: {
     description: "将现有结构化设计依据投影为 A4 教案修改确认项。",
     parameters,
     executionMode: "sequential",
-    execute: async (_toolCallId, raw) => {
+    execute: async (toolCallId, raw) => {
       const proposal = designBasisProjectionToolSchema.parse(raw);
       assertDocumentWriteScope(proposal, args.plan.requestedDocumentFields);
       const [file, aggregate] = await Promise.all([
@@ -299,7 +312,7 @@ export function createPiDesignBasisProjectionProposalTool(args: {
       if (file.documentVersion !== args.context.documentVersion) throw new Error("document_context_stale");
       if (aggregate.basis.version !== args.context.designBasisVersion) throw new Error("design_basis_context_stale");
       const patch = materializeDesignBasisProjection({ proposal, aggregate, file });
-      slot.set({
+      slot.set(toolCallId, {
         patch,
         resourceType: "lesson_file",
         patchKind: "document",
@@ -325,7 +338,7 @@ export function createPiDesignBasisPatchProposalTool(args: {
     description: "仅在教师明确要求维护结构化设计依据时提交确认。",
     parameters,
     executionMode: "sequential",
-    execute: async (_toolCallId, raw) => {
+    execute: async (toolCallId, raw) => {
       const proposal = lessonDesignBasisPatchToolSchema.parse(raw);
       const [aggregate, observedEvidence] = await Promise.all([
         args.repository.getLessonDesignBasis(args.context.userId, args.context.lessonFileId),
@@ -335,7 +348,7 @@ export function createPiDesignBasisPatchProposalTool(args: {
       if (aggregate.basis.version !== args.context.designBasisVersion) throw new Error("design_basis_context_stale");
       await validateLessonDesignProposalReferences({ repository: args.repository, context: args.context, proposal });
       const patch = materializeLessonDesignBasisPatch({ proposal, aggregate, observedEvidence });
-      slot.set({
+      slot.set(toolCallId, {
         patch,
         resourceType: "lesson_file",
         patchKind: "lesson_design_basis",

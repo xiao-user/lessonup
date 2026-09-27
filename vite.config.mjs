@@ -10,7 +10,6 @@ export default defineConfig({
         manualChunks(id) {
           if (!id.includes("node_modules")) return undefined;
           if (id.includes("/gsap/") || id.includes("/@gsap/")) return "vendor-gsap";
-          if (id.includes("/@supabase/")) return "vendor-supabase";
           if (id.includes("/react/") || id.includes("/react-dom/") || id.includes("/scheduler/")) {
             return "vendor-react";
           }

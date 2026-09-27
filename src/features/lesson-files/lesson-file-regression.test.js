@@ -82,6 +82,12 @@ test("A4 uses isolated field rich editors without a mode switch", async () => {
   assert.doesNotMatch(editor, /lessonPlanFromTiptapDocument/);
 });
 
+test("the editor bridge flushes every mounted field before an agent command", async () => {
+  const source = await readFile(new URL("./lesson-plan-tiptap.jsx", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /flush\(\) \{\}/);
+  assert.match(source, /for \(const registration of editorsRef\.current\.values\(\)\) registration\.flush\(\)/);
+});
+
 test("presentation material is the final A4 row and starts the confirmation flow after flushing", async () => {
   const workspace = await readFile(new URL("./lesson-file-workspace.jsx", import.meta.url), "utf8");
   const editor = await readFile(new URL("./lesson-plan-tiptap.jsx", import.meta.url), "utf8");
@@ -233,6 +239,14 @@ test("double-equals highlight survives A4 parse, edit serialization, and reparse
   );
 });
 
+test("editing a list does not persist a second visible marker or the gap cursor", () => {
+  const editorDocument = parseLessonMarkdown("1. 原始目标");
+  editorDocument.content[0].content[0].content[0].content[0].text = "1. 更新后的目标";
+  editorDocument.content.push({ type: "paragraph" });
+
+  assert.equal(serializeLessonMarkdown(editorDocument), "1. 更新后的目标");
+});
+
 test("a Tiptap field edit cannot clear unrelated lesson-plan modules", () => {
   const plan = {
     ...createLessonPlanDraft({ subject: "语文" }, { title: "春" }),
@@ -320,6 +334,13 @@ test("measured table rows determine the final page boundary", () => {
   assert.ok(processEntries.length > 1);
   assert.ok(processEntries.some((entry) => entry.continued));
   assert.equal(processEntries.map((entry) => entry.value).join(""), "教学步骤".repeat(32));
+});
+
+test("pagination tracks content separately from structural layout", async () => {
+  const source = await readFile(new URL("./lesson-file-workspace.jsx", import.meta.url), "utf8");
+  assert.match(source, /pageContentSignatureRef/);
+  assert.match(source, /layoutChanged \|\| pageContentSignatureRef\.current !== measuredContentSignature/);
+  assert.match(source, /if \(layoutChanged\) setPageLayoutRevision/);
 });
 
 test("repagination greedily pulls later content back onto earlier pages", () => {

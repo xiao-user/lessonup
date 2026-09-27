@@ -83,4 +83,33 @@ describe("Dashi inspected layout copy contract", () => {
       statCount: 3,
     });
   });
+
+  it("binds template counts to authored array lengths so runtime defaults cannot leak", () => {
+    const contracts = new Map([["theme01_page027", {
+      layout: "theme01_page027",
+      copyKeys: ["items[].title"],
+      fillPlan: {
+        text: [],
+        arrays: [{ key: "items", countKey: "itemCount", visibleCount: 4 }],
+      },
+      mediaSlots: [],
+    }]]);
+    const normalized = keepOnlyDashiAuthoredContent({
+      title: "课堂演示",
+      goal: "分析表达效果",
+      themePack: "theme01",
+      slides: [{
+        layout: "theme01_page027",
+        props: {
+          items: [{ title: "为什么怀念" }, { title: "线索是什么" }],
+          itemCount: 4,
+        },
+      }],
+    }, contracts);
+
+    expect(normalized.slides[0]?.props).toEqual({
+      items: [{ title: "为什么怀念" }, { title: "线索是什么" }],
+      itemCount: 2,
+    });
+  });
 });

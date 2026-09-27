@@ -4,7 +4,7 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
-import { requireUser, type AppBindings } from "./auth.js";
+import { createRequireUser, getRuntimeAuthentication, type AppBindings } from "./auth.js";
 import { config, hasModelProvider, runtimeCapabilities } from "./config.js";
 import {
   curriculumSemanticRelationSchema,
@@ -18,15 +18,22 @@ import {
   updateLessonBlueprintSchema,
 } from "./domain.js";
 import { PiLessonAgentCoordinator } from "./agent-runtime/pi/coordinator.js";
+import {
+  DEFAULT_TEACHER_THINKING_LEVEL,
+  TEACHER_THINKING_LEVELS,
+} from "./agent-runtime/pi/thinking-level.js";
 import { publicAgentError } from "./agent/public-error.js";
+import { publicApproval } from "./conversation/public-approval.js";
 import { handleMcpRequest } from "./mcp/servers.js";
 import type { ImportedNotebook, LessonRepository } from "./repository.js";
 import { createRepository } from "./repositories/index.js";
 import { verifyMcpScopeToken } from "./security/mcp-token.js";
-import { TavilyWebSearchProvider } from "./providers/web-search.js";
+import type { WebSearchProvider } from "./providers/web-search.js";
+import { UnavailableWebSearchProvider } from "./providers/unavailable-web-search.js";
 import { KnowledgeUploadService } from "./knowledge/uploads.js";
 import { publicApiError } from "./public-api-error.js";
 import { shouldPersistRunEvent } from "./run-event-persistence.js";
+import { RunEventDispatcher } from "./run-event-dispatcher.js";
 import { generateThreadStarters } from "./agent/thread-starters.js";
 import { canonicalizeLessonContextProfile } from "./curriculum/context-profile.js";
 import {
@@ -35,7 +42,9 @@ import {
   needsContinuityWriteback,
 } from "./curriculum/continuity-adoption.js";
 import { classFeedbackProvenance } from "./class-feedback-provenance.js";
-import { PresentationService } from "./presentations/service.js";
+import type { PresentationService } from "./presentations/service.js";
+import { UnavailablePresentationService } from "./presentations/unavailable-service.js";
+import type { SessionAuthentication } from "./platform/session-authentication.js";
 
 const selectionSchema = z.object({
   field: z.enum(["unit", "period", "totalPeriods", "topic", "objectives", "knowledgePoints", "continuity", "focus", "preparation", "process", "assessment", "homework", "board", "reflection"]),
@@ -53,6 +62,10 @@ const runInputSchema = z.object({
   selection: selectionSchema.optional(),
   attachmentIds: z.array(z.string().uuid()).max(8).default([]),
   continuation: z.boolean().optional(),
+  generationIntentId: z.string().uuid().optional(),
+  frameworkWritebackIntentId: z.string().uuid().optional(),
+  clientCommandId: z.string().uuid().optional(),
+  thinkingLevel: z.enum(TEACHER_THINKING_LEVELS).optional().default(DEFAULT_TEACHER_THINKING_LEVEL),
 });
 
 const importedNotebookSchema = z.object({
@@ -84,16 +97,21 @@ export function createApp(
   options: {
     agent?: AgentCoordinatorRuntime | null;
     threadStarterGenerator?: typeof generateThreadStarters | null;
-    presentations?: Pick<PresentationService, "getGeneration" | "list" | "listForOwner" | "get" | "createAccess" | "remove" | "previewUrlFor" | "syncNativeEdits">;
+    presentations?: Pick<PresentationService, "getGeneration" | "list" | "listForOwner" | "get" | "createAccess" | "remove" | "previewUrlFor" | "syncNativeEdits" | "saveBrowserDeck" | "getBrowserDeck">;
+    authentication?: SessionAuthentication | null;
+    knowledgeUploads?: Pick<KnowledgeUploadService, "configured" | "storageConfigured" | "enqueue" | "list" | "get" | "retry" | "delete" | "deleteForLessonFile" | "deleteForNotebook">;
+    webProvider?: WebSearchProvider;
   } = {},
 ) {
   const app = new Hono<AppBindings>();
+  const authentication = options.authentication === undefined ? getRuntimeAuthentication() : options.authentication;
+  const requireAuthenticatedUser = createRequireUser(authentication);
   const agent = options.agent === undefined
     ? hasModelProvider ? new PiLessonAgentCoordinator(repository) : null
     : options.agent;
-  const webProvider = new TavilyWebSearchProvider();
-  const knowledgeUploads = new KnowledgeUploadService(repository);
-  const presentations = options.presentations ?? new PresentationService(repository);
+  const webProvider = options.webProvider ?? new UnavailableWebSearchProvider();
+  const knowledgeUploads = options.knowledgeUploads ?? new KnowledgeUploadService(repository);
+  const presentations = options.presentations ?? new UnavailablePresentationService(repository);
   const presentationTicketKey = config.MCP_TOKEN_SECRET ?? config.AGENT_STATE_ENCRYPTION_KEY ?? crypto.randomUUID();
   const previewTicket = (ownerId: string, presentationId: string) => {
     const payload = Buffer.from(JSON.stringify({ ownerId, presentationId, expiresAt: Date.now() + 60 * 60 * 1_000 })).toString("base64url");
@@ -178,6 +196,35 @@ export function createApp(
   app.get("/api/health", (c) => c.json({ ok: true }));
   app.get("/api/runtime", (c) => c.json(runtimeCapabilities));
 
+  app.post("/api/auth/sign-in", async (c) => {
+    if (!authentication) return c.json({ error: "authentication_not_configured" }, 503);
+    const input = z.object({
+      loginName: z.string().trim().min(1).max(160),
+      password: z.string().min(1).max(1_024),
+    }).parse(await c.req.json());
+    const session = await authentication.signIn(input.loginName, input.password);
+    return session
+      ? c.json(session)
+      : c.json({ error: "invalid_credentials" }, 401);
+  });
+
+  app.get("/api/auth/me", async (c) => {
+    if (!authentication) return c.json({ error: "authentication_not_configured" }, 503);
+    const accessToken = bearerToken(c.req.header("authorization"));
+    const account = accessToken ? await authentication.accountForAccessToken(accessToken) : null;
+    return account ? c.json(account) : c.json({ error: "authentication_required" }, 401);
+  });
+
+  app.post("/api/auth/sign-out", async (c) => {
+    if (!authentication) return c.body(null, 204);
+    const accessToken = bearerToken(c.req.header("authorization"));
+    if (!accessToken || !await authentication.accountForAccessToken(accessToken)) {
+      return c.json({ error: "authentication_required" }, 401);
+    }
+    await authentication.signOut(accessToken);
+    return c.body(null, 204);
+  });
+
   app.all("/mcp/:kind", async (c) => {
     const kind = c.req.param("kind");
     if (kind !== "knowledge" && kind !== "web") return c.json({ error: "mcp_not_found" }, 404);
@@ -193,7 +240,8 @@ export function createApp(
 
   app.use("/api/*", async (c, next) => {
     if (/^\/api\/presentations\/[^/]+\/preview(?:\/|$)/.test(c.req.path)) return next();
-    return requireUser(c, next);
+    if (c.req.path.startsWith("/api/auth/")) return next();
+    return requireAuthenticatedUser(c, next);
   });
 
   app.post("/api/bootstrap/import", async (c) => {
@@ -252,6 +300,7 @@ export function createApp(
       contextProfile: lessonContextProfileSchema.optional(),
       lessonBlueprintId: z.string().uuid().optional(),
       pageCount: z.number().int().positive().default(1),
+      initialAgentPrompt: z.string().trim().min(1).max(20_000).optional(),
     }).parse(await c.req.json());
     const notebook = await repository.getNotebook(c.get("userId"), input.notebookId);
     if (!notebook) throw new Error("notebook_not_found");
@@ -297,6 +346,26 @@ export function createApp(
       ...input,
       contextProfile,
     }));
+  });
+
+  app.get("/api/lesson-files/:id/generation-intent", async (c) => {
+    const intent = await repository.getPendingLessonGenerationIntent(
+      c.get("userId"),
+      c.req.param("id"),
+    );
+    return intent ? c.json(intent) : c.body(null, 204);
+  });
+
+  app.post("/api/lesson-files/:id/generation-intent", async (c) => {
+    const input = z.object({
+      prompt: z.string().trim().min(1).max(20_000),
+    }).parse(await c.req.json());
+    return c.json(await repository.enqueueLessonGenerationIntent({
+      ownerId: c.get("userId"),
+      lessonFileId: c.req.param("id"),
+      prompt: input.prompt,
+      idempotencyKey: c.req.header("idempotency-key") ?? crypto.randomUUID(),
+    }), 201);
   });
 
   app.get("/api/lesson-files/:id/design-basis", async (c) => {
@@ -814,7 +883,7 @@ export function createApp(
         informationLevel: provenance.level,
       },
     });
-    let writebackSeed: string | null = null;
+    let writebackIntentId: string | null = null;
     if (
       needsContinuityWriteback(record)
       && record.semesterFrameworkId
@@ -827,9 +896,17 @@ export function createApp(
         [record],
         aggregate?.blueprints ?? [],
       )[0];
-      if (hint) writebackSeed = buildContinuityWritebackSeed(hint);
+      if (hint) {
+        const intent = await repository.enqueueSemesterFrameworkWritebackIntent({
+          ownerId: c.get("userId"),
+          frameworkId: record.semesterFrameworkId,
+          feedbackId: record.id,
+          prompt: buildContinuityWritebackSeed(hint),
+        });
+        writebackIntentId = intent.id;
+      }
     }
-    return c.json({ ...record, writebackSeed }, 201);
+    return c.json({ ...record, writebackIntentId }, 201);
   });
 
   app.get("/api/semester-frameworks/:id/class-feedback", async (c) => {
@@ -841,6 +918,17 @@ export function createApp(
         semesterFrameworkId: frameworkId,
       }),
     });
+  });
+
+  app.get("/api/semester-frameworks/:id/writeback-intent", async (c) => {
+    const frameworkId = z.string().uuid().parse(c.req.param("id"));
+    const framework = await repository.getSemesterFramework(c.get("userId"), frameworkId);
+    if (!framework) return c.json({ error: "semester_framework_not_found" }, 404);
+    const intent = await repository.getPendingSemesterFrameworkWritebackIntent(
+      c.get("userId"),
+      frameworkId,
+    );
+    return intent ? c.json(intent) : c.body(null, 204);
   });
 
   app.get("/api/lesson-files/:id", async (c) => {
@@ -896,14 +984,31 @@ export function createApp(
       : c.json({ error: "presentation_not_found" }, 404);
   });
 
+  app.patch("/api/presentations/:id/deck", async (c) => {
+    const input = z.object({
+      expectedChecksum: z.string().min(1).max(128),
+      deck: z.unknown(),
+    }).strict().parse(await c.req.json());
+    try {
+      return c.json(await presentations.saveBrowserDeck(c.get("userId"), c.req.param("id"), input));
+    } catch (error) {
+      if (error instanceof Error && error.message === "presentation_edit_conflict") {
+        return c.json({ error: error.message }, 409);
+      }
+      throw error;
+    }
+  });
+
+  app.get("/api/presentations/:id/deck", async (c) => (
+    c.json(await presentations.getBrowserDeck(c.get("userId"), c.req.param("id")))
+  ));
+
   app.post("/api/presentations/:presentationId/access", async (c) => {
     const presentationId = c.req.param("presentationId");
     const access = await presentations.createAccess(c.get("userId"), presentationId);
     return c.json({
       ...access,
-      // Do not expose Dashi's loopback URL: browser requests pass through the
-      // signed proxy so native autosave can be durably synchronized.
-      url: `/api/presentations/${encodeURIComponent(presentationId)}/preview/?token=${encodeURIComponent(previewTicket(c.get("userId"), presentationId))}`,
+      url: `/classroom-presentations/${encodeURIComponent(presentationId)}`,
     });
   });
 
@@ -1026,6 +1131,19 @@ export function createApp(
     ));
   });
 
+  app.get("/api/agent/threads/:id/conversation-snapshot", async (c) => {
+    const userId = c.get("userId");
+    const threadId = c.req.param("id");
+    const branchId = z.string().min(1).parse(c.req.query("branchId"));
+    await repository.recoverExpiredRuns(userId, threadId);
+    const snapshot = await repository.getConversationSnapshot(userId, threadId, branchId);
+    if (!snapshot) return c.json({ error: "thread_scope_invalid" }, 403);
+    return c.json({
+      ...snapshot,
+      approvals: await Promise.all(snapshot.approvals.map((approval) => publicApproval(repository, approval))),
+    });
+  });
+
   app.get("/api/agent/threads/:id/branches", async (c) => (
     c.json(await repository.listBranches(c.get("userId"), c.req.param("id")))
   ));
@@ -1033,20 +1151,7 @@ export function createApp(
   app.get("/api/agent/threads/:id/approvals", async (c) => {
     const branchId = z.string().min(1).parse(c.req.query("branchId"));
     const approvals = await repository.listApprovals(c.get("userId"), c.req.param("id"), branchId);
-    return c.json(approvals.map((approval) => ({
-      id: approval.id,
-      runId: approval.runId,
-      assistantMessageId: approval.assistantMessageId,
-      state: approval.state,
-      continuationStatus: approval.continuationStatus,
-      continuationError: approval.continuationError
-        ? publicAgentError(approval.continuationError, "approval_resume_failed")
-        : undefined,
-      continuationMessageId: approval.continuationMessageId,
-      patch: approval.patch,
-      expiresAt: approval.expiresAt,
-      createdAt: approval.createdAt,
-    })));
+    return c.json(await Promise.all(approvals.map((approval) => publicApproval(repository, approval))));
   });
 
   app.get("/api/agent/threads/:id/activity", async (c) => {
@@ -1086,11 +1191,23 @@ export function createApp(
     const input = runInputSchema.parse(await c.req.json());
     const userId = c.get("userId");
     return streamSSE(c, async (stream) => {
-      const emit = async (event: Parameters<Parameters<typeof agent.start>[1]>[0]) => {
-        if (event.runId !== "unknown" && shouldPersistRunEvent(event)) {
-          await repository.appendRunEvent(userId, event.runId, event.type, event);
-        }
-        await stream.writeSSE({ event: event.type, data: JSON.stringify(event) }).catch(() => undefined);
+      const dispatcher = new RunEventDispatcher(
+        (event: Parameters<Parameters<typeof agent.start>[1]>[0]) => stream.writeSSE({
+          event: event.type,
+          data: JSON.stringify(event),
+        }),
+        async (event: Parameters<Parameters<typeof agent.start>[1]>[0]) => {
+          if (event.runId !== "unknown" && shouldPersistRunEvent(event)) {
+            await repository.appendRunEvent(userId, event.runId, event.type, event);
+          }
+        },
+        (event) => event.runId !== "unknown" && shouldPersistRunEvent(event),
+      );
+      const emit = (
+        event: Parameters<Parameters<typeof agent.start>[1]>[0],
+        delivery?: { persist?: boolean },
+      ) => {
+        return dispatcher.dispatch(event, delivery);
       };
       try {
         await agent.start({ userId, threadId: c.req.param("id"), ...input }, emit);
@@ -1099,6 +1216,9 @@ export function createApp(
           type: "run.failed", runId: "unknown",
           error: publicAgentError(error),
         });
+      } finally {
+        const failures = await dispatcher.flush();
+        if (failures.length) console.error("Agent event delivery failed", failures.length);
       }
     });
   });
@@ -1153,11 +1273,20 @@ export function createApp(
     const userId = c.get("userId");
     const idempotencyKey = c.req.header("idempotency-key") ?? crypto.randomUUID();
     return streamSSE(c, async (stream) => {
-      const emit = async (event: Parameters<Parameters<typeof agent.resumeApproval>[0]["emit"]>[0]) => {
-        if (shouldPersistRunEvent(event)) {
-          await repository.appendRunEvent(userId, event.runId, event.type, event);
-        }
-        await stream.writeSSE({ event: event.type, data: JSON.stringify(event) }).catch(() => undefined);
+      const dispatcher = new RunEventDispatcher(
+        (event: Parameters<Parameters<typeof agent.resumeApproval>[0]["emit"]>[0]) => stream.writeSSE({
+          event: event.type,
+          data: JSON.stringify(event),
+        }),
+        async (event: Parameters<Parameters<typeof agent.resumeApproval>[0]["emit"]>[0]) => {
+          if (shouldPersistRunEvent(event)) {
+            await repository.appendRunEvent(userId, event.runId, event.type, event);
+          }
+        },
+        shouldPersistRunEvent,
+      );
+      const emit = (event: Parameters<Parameters<typeof agent.resumeApproval>[0]["emit"]>[0]) => {
+        return dispatcher.dispatch(event);
       };
       try {
         await agent.resumeApproval({
@@ -1176,6 +1305,9 @@ export function createApp(
           type: "run.failed", runId: c.req.param("runId"),
           error: publicAgentError(error, "approval_resume_failed"),
         });
+      } finally {
+        const failures = await dispatcher.flush();
+        if (failures.length) console.error("Agent approval event delivery failed", failures.length);
       }
     });
   });
@@ -1189,4 +1321,8 @@ export function createApp(
   });
 
   return app;
+}
+
+function bearerToken(authorization: string | undefined) {
+  return authorization?.startsWith("Bearer ") ? authorization.slice(7) : null;
 }

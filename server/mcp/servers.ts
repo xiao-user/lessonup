@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { LessonRepository } from "../repository.js";
 import type { McpScope } from "../security/mcp-token.js";
 import type { WebSearchProvider } from "../providers/web-search.js";
-import { BgeM3EmbeddingProvider } from "../providers/embeddings.js";
+import { ConfiguredEmbeddingProvider } from "../providers/embeddings.js";
 import type { SourceRef } from "../domain.js";
 
 const text = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }] });
@@ -93,7 +93,7 @@ export async function searchScopedCurriculumStandards(args: {
 
 function createKnowledgeServer(repository: LessonRepository, scope: McpScope) {
   const server = new McpServer({ name: "lessonup-knowledge", version: "1.0.0" });
-  const embeddings = new BgeM3EmbeddingProvider();
+  const embeddings = new ConfiguredEmbeddingProvider();
   server.registerTool("search_knowledge", {
     title: "检索备课资料",
     description: "在当前运行允许的公共或私有资料范围内进行混合检索",

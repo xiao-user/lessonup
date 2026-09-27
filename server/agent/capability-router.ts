@@ -29,6 +29,7 @@ export const capabilityPlanSchema = z.object({
   continuityRequested: z.boolean().default(false),
   continuityWritebackFeedbackId: z.string().uuid().optional(),
   lightweightConversation: z.boolean().default(false),
+  executionLane: z.enum(["fast", "agent"]).default("agent"),
   curriculumRequested: z.boolean().default(false),
   presentationRequested: z.boolean().default(false),
   presentationThemeConfirmationRequired: z.boolean().default(false),
@@ -67,6 +68,19 @@ const designBasisWritePattern = /(?:保存|记录)(?:为|到|进|至)?(?:本课|
 const minimalWritePattern = /(?:只|仅).{0,12}(?:一处|一个栏目|最关键).{0,16}(?:修改|调整|建议)|(?:最小|最少).{0,8}(?:修改|调整|建议)|只生成一处/;
 const fullRewritePattern = /重新(?:整理|编写|改写|重写|重编)|(?:整份|完整|全面).{0,10}(?:整理|重写|重编|改写|编写)|(?:整理|重编)(?:当前)?教案|把.{0,12}模板教案.{0,12}(?:转化|整理|重编|改写)/;
 const classroomActionPattern = /可执行|直接实施|课堂调整|具体课时活动|学生产出|达成证据|落实到.{0,8}(?:课堂|活动)|教师动作|学生任务|可观察(?:产出|证据|表现)/;
+// 教师征求判断时使用的疑问与审议标记，以及 A4 写入意图的动词词表。
+// 咨询豁免、写入判定和疑问句兜底共用同一份词表：过去三处各自维护
+// 动词范围，「你认为需要重新整理当前教案吗？」这类问句因为豁免只认
+// “优化/调整/修改/改进”而被读成写入指令，最终以缺少提案失败。
+const deliberationMarkerPattern = /哪些|什么|为什么|为何|是否|有没有|要不要|需不需要|该不该|值不值得|你认为|你觉得|如何|怎么|判断|检查|审查|评估/;
+// One canonical write vocabulary is shared by intent routing and field
+// targeting. A narrower second list previously classified common commands
+// such as “按这个方案调整一下” as analysis_only.
+const documentWriteIntentVerbPattern = /修改|更改|改成|改为|改写|重写|重编|编写|整理|修订|补充|写入|写成|替换|优化|调整|改进|完善|落实/;
+const documentConsultationPattern = new RegExp(
+  `(?:${deliberationMarkerPattern.source}).{0,16}(?:需要|可以|值得|应该)?.{0,8}(?:${documentWriteIntentVerbPattern.source})`,
+);
+const adviceOnlyPattern = /(?:给出?|提供|说说|列出|整理).{0,10}(?:修改|调整|优化|完善|改进)?(?:建议|方案|思路)|(?:修改|调整|优化|完善|改进)(?:建议|方案|思路)/;
 const designBasisDeniedPattern = /(?:不要|不用|无需|不必|禁止).{0,16}(?:结构化)?设计依据|(?:结构化)?设计依据.{0,16}(?:不要|不用|无需|不必|禁止|不建立|不修改)/;
 const semesterPlanningContinuityPattern = /整学期|整体教学框架|学期规划|单元规划|课时蓝图|规划.{0,12}(?:单元|课时)|生成.{0,12}蓝图|完善.{0,12}框架/;
 const classroomPresentationPattern = /(?:(?:生成|创建|制作|设计|做|产出|渲染|调用).{0,16}(?:课堂)?(?:演示文稿|演示|PPT|幻灯片|Dashi))|(?:(?:课堂)?(?:演示文稿|演示|PPT|幻灯片|Dashi).{0,16}(?:生成|创建|制作|设计|做|产出|渲染|调用|Skill))|(?:直接渲染|交给\s*Dashi|调用\s*Dashi(?:\s*Skill)?)/i;
@@ -88,7 +102,6 @@ const documentFieldAliases: Array<[LessonField, RegExp]> = [
   ["board", /板书设计|课堂板书/g],
   ["reflection", /教学反思|课后反思/g],
 ];
-const documentWriteVerbPattern = /修改|更改|改写|重写|重编|编写|修订|补充|优化|完善|调整|替换|写入|写成|改成|改为|落实/;
 const deicticDocumentTargetPattern = /这一处|这处|这里|当前栏目|这个栏目|选中(?:内容|文字|部分)?|这段|这句/;
 
 /**
@@ -118,7 +131,7 @@ export function requestedDocumentFieldsFor(
         && !/(?:把|将)[^，。；;]{0,8}$/.test(beforeClause);
       if (introducedAsEvidence) continue;
       const verbImmediatelyAfter = /^(?:栏(?:目)?|中|里|内容|部分)?(?:进行)?(?:修改|更改|改写|重写|重编|编写|修订|补充|优化|完善|调整|替换|写入|写成|改成|改为|落实)/.test(after);
-      if (documentWriteVerbPattern.test(beforeClause) || verbImmediatelyAfter) {
+      if (documentWriteIntentVerbPattern.test(beforeClause) || verbImmediatelyAfter) {
         targets.push(field);
         break;
       }
@@ -154,6 +167,7 @@ export const deterministicCapabilityPlan = (
   const designBasisDenied = designBasisDeniedPattern.test(message);
   const writebackFeedbackId = parseContinuityWritebackFeedbackId(message);
   const lightweightConversation = !writebackFeedbackId && isConversationalControlMessage(message);
+  const fastFollowUp = !writebackFeedbackId && !lightweightConversation && isFastFollowUpMessage(message);
   const presentationRequested = classroomPresentationPattern.test(message);
   const plan: CapabilityPlan = {
     skillIds: [],
@@ -163,7 +177,7 @@ export const deterministicCapabilityPlan = (
     evidenceRequired: false,
     writeMode: writebackFeedbackId
       ? "explicit"
-      : lightweightConversation ? "consultative" : documentWriteMode(message),
+      : lightweightConversation || fastFollowUp ? "consultative" : documentWriteMode(message),
     designBasisRequested: !designBasisDenied && (
       /设计依据|上游备课上下文/.test(message)
       || (fullRewriteRequested && options.hasUpstreamPlanningContext === true)
@@ -177,6 +191,7 @@ export const deterministicCapabilityPlan = (
       || semesterPlanningContinuityPattern.test(message),
     continuityWritebackFeedbackId: writebackFeedbackId ?? undefined,
     lightweightConversation,
+    executionLane: lightweightConversation || fastFollowUp ? "fast" : "agent",
     curriculumRequested: Boolean(writebackFeedbackId)
       || /教材|章节|目录|知识点|学习要点|课时蓝图|复习|铺垫|连续性|前后衔接|课堂反馈|衔接效果/.test(message),
     presentationRequested,
@@ -185,9 +200,10 @@ export const deterministicCapabilityPlan = (
       ? undefined
       : requestedDocumentFieldsFor(message, options),
   };
-  if (lightweightConversation) {
+  if (lightweightConversation || fastFollowUp) {
     return capabilityPlanSchema.parse({
       ...plan,
+      executionLane: "fast",
       toolGroups: [],
       mcpServers: [],
       specialistAgents: [],
@@ -270,7 +286,13 @@ export const deterministicCapabilityPlan = (
   }
   // 整份重编是一个直接生产 A4 教案的任务。不要仅因正文出现“目标、
   // 评价、知识点”等业务词就把它扩张成多 Agent 审查链。
-  if (fullRewriteRequested) {
+  //
+  // 写入技能与强制课标证据都预设本轮会产出教案，因此必须与写入授权
+  // 同源。教师只是在征求“要不要重写”时，本轮没有 propose 工具，挂上
+  // lesson-full-authoring 会直接抛 pi_skill_required_tool_missing；即便
+  // 补上工具，强制课标检索也会让一次如实作答以 evidence_required 结束。
+  const lessonAuthoringRun = fullRewriteRequested && plan.writeMode !== "consultative";
+  if (lessonAuthoringRun) {
     plan.specialistAgents = [];
     plan.skillIds = ["lesson-full-authoring"];
     const explicitlyNeedsExternalEvidence = attachmentReferencePattern.test(message)
@@ -310,9 +332,10 @@ export function requiresDocumentWrite(message: string) {
   if (designBasisWritePattern.test(message)) return true;
   if (explicitApprovalPattern.test(message)) return true;
   if (explicitConsultationPattern.test(message)) return false;
-  const consultative = /(?:哪些|什么|是否|有没有|你认为|如何|怎么).{0,16}(?:需要|可以|值得|应该)?.{0,8}(?:优化|调整|修改|改进)/;
-  if (consultative.test(message)) return false;
-  return /(?:修改|更改|改成|改写|重写|重编|编写|修订|补充|写入|替换|直接优化|优化一下|请优化|帮我优化|(?:重新)?整理(?:当前|整份|完整)?教案)|提交.{0,10}(?:修改|调整|建议|确认项)|(?:生成|创建).{0,10}(?:修改|调整|确认项)/.test(message);
+  if (documentConsultationPattern.test(message)) return false;
+  if (adviceOnlyPattern.test(message)) return false;
+  return documentWriteIntentVerbPattern.test(message)
+    || /提交.{0,10}(?:修改|调整|建议|确认项)|(?:生成|创建).{0,10}(?:修改|调整|确认项)/.test(message);
 }
 
 export function documentWriteMode(message: string): "consultative" | "open" | "explicit" {
@@ -320,9 +343,7 @@ export function documentWriteMode(message: string): "consultative" | "open" | "e
   if (explicitApprovalPattern.test(message)) return "explicit";
   if (explicitConsultationPattern.test(message)) return "consultative";
   if (requiresDocumentWrite(message)) return "explicit";
-  if (/(?:哪些|什么|是否|有没有|你认为|如何|怎么|判断|检查|审查|评估)/.test(message)) {
-    return "consultative";
-  }
+  if (deliberationMarkerPattern.test(message)) return "consultative";
   return "open";
 }
 
@@ -337,6 +358,37 @@ export function isConversationalControlMessage(message: string) {
       phrase,
     )
   ));
+}
+
+const FAST_FOLLOW_UP_LIMIT = 72;
+const fastFollowUpPattern = /[?？]|什么意思|为什么|为啥|(?:再|请)?(?:简单)?(?:解释|说明)(?:一下)?|举个?例/;
+
+/**
+ * Short clarifying chat that can be answered from recent dialogue. Lesson
+ * fields, writes, evidence, and presentations stay on the Agent lane.
+ */
+export function isFastFollowUpMessage(message: string) {
+  if (isConversationalControlMessage(message)) return false;
+  const trimmed = message.trim();
+  if (!trimmed || trimmed.length > FAST_FOLLOW_UP_LIMIT) return false;
+  if (requiresDocumentWrite(trimmed)) return false;
+  if (classroomPresentationPattern.test(trimmed)) return false;
+  if (fullRewritePattern.test(trimmed)) return false;
+  if (designBasisWritePattern.test(trimmed)) return false;
+  if (curriculumStandardPattern.test(trimmed)) return false;
+  if (attachmentReferencePattern.test(trimmed)) return false;
+  if (/联网|搜索|网页|新闻|当前政策/.test(trimmed)) return false;
+  if (semesterPlanningContinuityPattern.test(trimmed)) return false;
+  for (const [, pattern] of documentFieldAliases) {
+    pattern.lastIndex = 0;
+    if (pattern.test(trimmed)) return false;
+  }
+  return fastFollowUpPattern.test(trimmed);
+}
+
+export function isFastChatTurn(message: string) {
+  if (parseContinuityWritebackFeedbackId(message)) return false;
+  return isConversationalControlMessage(message) || isFastFollowUpMessage(message);
 }
 
 export function enforceRequiredCapabilities(message: string, plan: CapabilityPlan): CapabilityPlan {

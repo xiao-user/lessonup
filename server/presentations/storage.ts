@@ -1,39 +1,8 @@
 import { createHash } from "node:crypto";
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { config, hasSupabase } from "../config.js";
-import type { NativeDashiBundle } from "./native-dashi-skill.js";
+import type { NativeDashiBundle } from "./dashi-skill-port.js";
+import type { ObjectStorage } from "../platform/object-storage.js";
 
-const bucket = "presentation-private";
 const manifestName = "manifest.json";
-const runtimeRoot = "dashi-runtime";
-
-/**
- * Storage rejects a literal `Content-Type: undefined` header.  Dashi bundles
- * contain more than HTML (its first file can be a JSON state file), so every
- * persisted artifact needs a concrete type instead of delegating an undefined
- * value through the client.
- */
-function contentTypeFor(path: string) {
-  const extension = path.split(".").pop()?.toLowerCase();
-  switch (extension) {
-    case "html": case "htm": return "text/html; charset=utf-8";
-    case "json": return "application/json; charset=utf-8";
-    case "js": case "mjs": return "text/javascript; charset=utf-8";
-    case "css": return "text/css; charset=utf-8";
-    case "svg": return "image/svg+xml";
-    case "png": return "image/png";
-    case "jpg": case "jpeg": return "image/jpeg";
-    case "gif": return "image/gif";
-    case "webp": return "image/webp";
-    case "woff": return "font/woff";
-    case "woff2": return "font/woff2";
-    case "ttf": return "font/ttf";
-    case "otf": return "font/otf";
-    case "mp3": return "audio/mpeg";
-    case "mp4": return "video/mp4";
-    default: return "application/octet-stream";
-  }
-}
 
 type StoredManifestFile = {
   path: string;
@@ -51,11 +20,6 @@ type StoredManifest = {
   byteSize: number;
 };
 
-type RuntimeManifest = {
-  version: 1;
-  files: StoredManifestFile[];
-};
-
 function assertRelativePath(value: string) {
   if (!value || value.startsWith("/") || value.split("/").some((part) => !part || part === "." || part === "..")) {
     throw new Error("presentation_bundle_path_invalid");
@@ -67,96 +31,64 @@ function storageRoot(ownerId: string, presentationId: string) {
   return `${ownerId}/presentations/${presentationId}`;
 }
 
-function manifestEntries(files: NativeDashiBundle["files"]): StoredManifestFile[] {
-  return files.map((file) => ({
-    path: assertRelativePath(file.path),
-    bytes: file.body.byteLength,
-    sha256: createHash("sha256").update(file.body).digest("hex"),
-  }));
-}
-
-function manifestFor(bundle: NativeDashiBundle, runtimeFiles: NativeDashiBundle["files"], runtimeKey?: string): StoredManifest {
-  const runtimePaths = new Set(runtimeFiles.map((file) => file.path));
-  return {
-    version: 2,
-    runtimeKey,
-    byteSize: bundle.byteSize,
-    files: manifestEntries(bundle.files).map((entry) => ({
-      ...entry,
-      scope: runtimePaths.has(entry.path) ? "runtime" : "deck",
-    })),
-  };
+function htmlStorageKey(ownerId: string, presentationId: string) {
+  return `${storageRoot(ownerId, presentationId)}/index.html`;
 }
 
 /**
- * Dashi writes its reusable editor/export runtime alongside every deck.
- * Everything else is specific to the teacher's deck and must remain private
- * to that deck, especially staged user media and editor state.
- */
-function isDeckSpecific(path: string) {
-  return path === "index.html"
-    || path === ".image-slots.state.json"
-    || path.startsWith("assets/user-media/")
-    || path.startsWith("images/")
-    || path.startsWith("uploads/")
-    || path.startsWith("screens/")
-    || path.startsWith("screenshots/");
-}
-
-function runtimeKeyFor(files: NativeDashiBundle["files"]) {
-  const fingerprint = manifestEntries(files)
-    .sort((left, right) => left.path.localeCompare(right.path))
-    .map(({ path, sha256 }) => `${path}:${sha256}`)
-    .join("\n");
-  return `${runtimeRoot}/${createHash("sha256").update(fingerprint).digest("hex")}`;
-}
-
-/**
- * Private object storage for the exact directory Dashi renders and edits.
- * The manifest is uploaded last, so readers only see a complete bundle.
+ * New presentations persist one content artifact only. Dashi's editor shell,
+ * theme runtimes and controls are immutable application assets mounted when
+ * the HTML is opened; they are not copied into every teacher-owned artifact.
+ * Version-1/2 bundle reads remain solely for already stored presentations.
  */
 export class PresentationArtifactStorage {
-  private readonly client: SupabaseClient | null = hasSupabase
-    ? createClient(config.SUPABASE_URL!, config.SUPABASE_SERVICE_ROLE_KEY!, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    })
-    : null;
+  constructor(private readonly storage: ObjectStorage | null) {}
 
   get configured() {
-    return Boolean(this.client);
+    return Boolean(this.storage);
   }
 
   keyFor(ownerId: string, presentationId: string) {
-    return storageRoot(ownerId, presentationId);
+    return htmlStorageKey(ownerId, presentationId);
   }
 
   async save(ownerId: string, presentationId: string, bundle: NativeDashiBundle) {
-    if (!this.client) throw new Error("presentation_storage_not_configured");
+    if (!this.storage) throw new Error("presentation_storage_not_configured");
     const root = storageRoot(ownerId, presentationId);
-    const runtimeFiles = bundle.files.filter((file) => !isDeckSpecific(file.path));
-    const deckFiles = bundle.files.filter((file) => isDeckSpecific(file.path));
-    const runtimeKey = await this.ensureRuntime(runtimeFiles);
-    const manifest = manifestFor(bundle, runtimeFiles, runtimeKey ?? undefined);
-    await this.uploadFiles(root, deckFiles);
-    await this.uploadJson(`${root}/${manifestName}`, manifest);
-    // A deck saved by the previous format has a full runtime under its own
-    // root.  Prune it only after the version-2 manifest is committed, so an
-    // interrupted migration remains readable through the old manifest.
-    await this.pruneDeckFiles(root, deckFiles).catch(() => undefined);
-    return {
-      storageKey: root,
-      // The full manifest remains available to restore Dashi, but this is the
-      // actual private Storage footprint shown in the teacher's file list.
-      byteSize: deckFiles.reduce((total, file) => total + file.body.byteLength, 0)
-        + new TextEncoder().encode(JSON.stringify(manifest)).byteLength,
-    };
+    const html = bundle.files.find((file) => file.path === "index.html");
+    if (!html) throw new Error("presentation_storage_html_missing");
+    const storageKey = htmlStorageKey(ownerId, presentationId);
+    await this.storage.put(storageKey, html.body, { contentType: "text/html; charset=utf-8" });
+    // Remove old per-deck manifests, JSON and copied runtimes only after the
+    // single HTML object is committed successfully.
+    const obsolete = (await this.objectPaths(root)).filter((path) => path !== storageKey);
+    if (obsolete.length) await this.storage.remove(obsolete);
+    return { storageKey, byteSize: html.body.byteLength };
+  }
+
+  /** Stage a unique immutable revision; never touch the currently published object. */
+  async saveRevision(ownerId: string, presentationId: string, bundle: NativeDashiBundle) {
+    if (!this.storage) throw new Error("presentation_storage_not_configured");
+    const html = bundle.files.find((file) => file.path === "index.html");
+    if (!html) throw new Error("presentation_storage_html_missing");
+    const storageKey = `${storageRoot(ownerId, presentationId)}/revisions/${crypto.randomUUID()}.html`;
+    await this.storage.put(storageKey, html.body, { contentType: "text/html; charset=utf-8" });
+    return { storageKey, byteSize: html.body.byteLength };
   }
 
   async load(ownerId: string, presentationId: string, storageKey = storageRoot(ownerId, presentationId)): Promise<NativeDashiBundle> {
-    if (!this.client) throw new Error("presentation_storage_not_configured");
-    const manifestFile = await this.client.storage.from(bucket).download(`${storageKey}/${manifestName}`);
-    if (manifestFile.error) throw new Error("presentation_storage_bundle_missing");
-    const manifest = JSON.parse(await manifestFile.data.text()) as StoredManifest;
+    if (!this.storage) throw new Error("presentation_storage_not_configured");
+    if (storageKey.endsWith(".html")) {
+      const html = await this.storage.get(storageKey);
+      if (!html) throw new Error("presentation_storage_bundle_missing");
+      return {
+        files: [{ path: "index.html", body: html.body }],
+        byteSize: html.body.byteLength,
+      };
+    }
+    const manifestFile = await this.storage.get(`${storageKey}/${manifestName}`);
+    if (!manifestFile) throw new Error("presentation_storage_bundle_missing");
+    const manifest = JSON.parse(new TextDecoder().decode(manifestFile.body)) as StoredManifest;
     if ((manifest.version !== 1 && manifest.version !== 2) || !Array.isArray(manifest.files)) {
       throw new Error("presentation_storage_manifest_invalid");
     }
@@ -166,9 +98,9 @@ export class PresentationArtifactStorage {
         ? manifest.runtimeKey ? `${manifest.runtimeKey}/${relative}` : null
         : `${storageKey}/${relative}`;
       if (!objectKey) throw new Error("presentation_storage_manifest_invalid");
-      const result = await this.client!.storage.from(bucket).download(objectKey);
-      if (result.error) throw new Error("presentation_storage_bundle_incomplete");
-      const body = new Uint8Array(await result.data.arrayBuffer());
+      const result = await this.storage!.get(objectKey);
+      if (!result) throw new Error("presentation_storage_bundle_incomplete");
+      const body = result.body;
       if (body.byteLength !== entry.bytes || createHash("sha256").update(body).digest("hex") !== entry.sha256) {
         throw new Error("presentation_storage_bundle_corrupt");
       }
@@ -179,70 +111,17 @@ export class PresentationArtifactStorage {
   }
 
   async remove(ownerId: string, presentationId: string, storageKey = storageRoot(ownerId, presentationId)) {
-    if (!this.client) return;
+    if (!this.storage) return;
+    if (storageKey.endsWith(".html")) {
+      await this.storage.remove([storageKey]);
+      return;
+    }
     const paths = await this.objectPaths(storageKey);
     if (!paths.length) return;
-    const removed = await this.client.storage.from(bucket).remove(paths);
-    if (removed.error) throw new Error(`presentation_storage_delete_failed:${removed.error.message}`);
-  }
-
-  private async ensureRuntime(files: NativeDashiBundle["files"]) {
-    if (!files.length) return null;
-    const runtimeKey = runtimeKeyFor(files);
-    const marker = await this.client!.storage.from(bucket).download(`${runtimeKey}/${manifestName}`);
-    if (!marker.error) return runtimeKey;
-    if (marker.error.statusCode && marker.error.statusCode !== "404") {
-      throw new Error(`presentation_storage_runtime_lookup_failed:${marker.error.message}`);
-    }
-    await this.uploadFiles(runtimeKey, files);
-    const runtimeManifest: RuntimeManifest = { version: 1, files: manifestEntries(files) };
-    await this.uploadJson(`${runtimeKey}/${manifestName}`, runtimeManifest);
-    return runtimeKey;
-  }
-
-  private async uploadFiles(root: string, files: NativeDashiBundle["files"]) {
-    for (const file of files) {
-      const result = await this.client!.storage.from(bucket).upload(
-        `${root}/${assertRelativePath(file.path)}`,
-        file.body,
-        { upsert: true, contentType: contentTypeFor(file.path) },
-      );
-      if (result.error) throw new Error(`presentation_storage_upload_failed:${result.error.message}`);
-    }
-  }
-
-  private async uploadJson(objectKey: string, value: unknown) {
-    const result = await this.client!.storage.from(bucket).upload(
-      objectKey,
-      new Blob([JSON.stringify(value)]),
-      { upsert: true, contentType: "application/json" },
-    );
-    if (result.error) throw new Error(`presentation_storage_upload_failed:${result.error.message}`);
-  }
-
-  private async pruneDeckFiles(root: string, files: NativeDashiBundle["files"]) {
-    const keep = new Set([`${root}/${manifestName}`, ...files.map((file) => `${root}/${assertRelativePath(file.path)}`)]);
-    const obsolete = (await this.objectPaths(root)).filter((path) => !keep.has(path));
-    if (!obsolete.length) return;
-    const removed = await this.client!.storage.from(bucket).remove(obsolete);
-    if (removed.error) throw new Error(`presentation_storage_delete_failed:${removed.error.message}`);
+    await this.storage.remove(paths);
   }
 
   private async objectPaths(root: string): Promise<string[]> {
-    const listed = await this.client!.storage.from(bucket).list(root, { limit: 1_000 });
-    if (listed.error) throw new Error(`presentation_storage_list_failed:${listed.error.message}`);
-    const paths: string[] = [];
-    const visit = async (prefix: string, entries: typeof listed.data) => {
-      for (const entry of entries) {
-        const child = `${prefix}/${entry.name}`;
-        if (entry.id === null) {
-          const nested = await this.client!.storage.from(bucket).list(child, { limit: 1_000 });
-          if (nested.error) throw new Error(`presentation_storage_list_failed:${nested.error.message}`);
-          await visit(child, nested.data);
-        } else paths.push(child);
-      }
-    };
-    await visit(root, listed.data);
-    return paths;
+    return (await this.storage!.list(root)).map((object) => object.key);
   }
 }

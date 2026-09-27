@@ -11,7 +11,9 @@ export async function requestPiText(args: {
     apiKey: config.MODEL_API_KEY ?? "",
     baseUrl: config.MODEL_BASE_URL ?? "",
     modelId: config.MODEL_ID ?? "",
-    api: config.MODEL_API,
+    api: config.MODEL_API!,
+    contextWindow: config.MODEL_CONTEXT_WINDOW!,
+    maxTokens: config.MODEL_MAX_TOKENS!,
   });
   const agent = new Agent({
     initialState: {

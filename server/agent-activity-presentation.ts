@@ -3,7 +3,34 @@ import {
   toolActivityStateForOutcome,
   toolCompletionOutcomeOf,
 } from "./agent/tool-completion-outcome.js";
-import { safeToolCompletionDetail, safeToolDetail } from "./agent/tool-presentation.js";
+import { isAgentLoopNarration, safeToolCompletionDetail, safeToolDetail } from "./agent/tool-presentation.js";
+
+/**
+ * Tool calls a durable confirmation item proves were materialized.
+ *
+ * Mirror of `approvalBackedToolCallIds` in
+ * `src/features/assistant/agent-run-control.js`: the same run must read
+ * identically while it streams and after it is rehydrated from the journal.
+ */
+function approvalBackedToolCalls(
+  events: NormalizedAgentEvent[],
+  activities: AgentActivityRecord[],
+) {
+  let approvalSeen = false;
+  const attributed = new Set<string>();
+  for (const event of events) {
+    if (event.type === "approval.required") {
+      approvalSeen = true;
+      if (event.toolCallId) attributed.add(event.toolCallId);
+    }
+    if (event.type === "approval.decided") approvalSeen = true;
+  }
+  if (attributed.size || !approvalSeen) return attributed;
+  const fallback = [...activities]
+    .reverse()
+    .find((activity) => activity.name?.startsWith("propose_"));
+  return new Set(fallback ? [fallback.id] : []);
+}
 
 export function persistedActivitiesFromEvents(
   events: NormalizedAgentEvent[],
@@ -16,7 +43,9 @@ export function persistedActivitiesFromEvents(
         id: event.toolCallId,
         name: event.name,
         label: event.label,
-        detail: event.detail ?? safeToolDetail(event.name),
+        detail: event.detail && !isAgentLoopNarration(event.detail)
+          ? event.detail
+          : safeToolDetail(event.name),
         groupKey: event.groupKey,
         state: "running",
         turn: event.turn,
@@ -46,7 +75,9 @@ export function persistedActivitiesFromEvents(
       activities[index] = {
         ...activities[index]!,
         label: event.label,
-        detail: event.detail ?? safeToolCompletionDetail(event.name, event.label, !event.ok),
+        detail: event.detail && !isAgentLoopNarration(event.detail)
+          ? event.detail
+          : safeToolCompletionDetail(event.name, event.label, !event.ok, activities[index]!.detail),
         groupKey: event.groupKey ?? activities[index]!.groupKey,
         state: toolActivityStateForOutcome(outcome),
         outcome,
@@ -55,7 +86,13 @@ export function persistedActivitiesFromEvents(
       };
     }
   }
+  const approvalBacked = approvalBackedToolCalls(events, activities);
   return activities.map((activity) => {
+    // The confirmation item proves this call passed preflight, even when the
+    // provider later acknowledged it as stale against the applied version.
+    if (approvalBacked.has(activity.id)) {
+      return { ...activity, state: "completed", outcome: "completed" };
+    }
     if (activity.state !== "running") return activity;
     if (runStatus === "cancelled") {
       return { ...activity, state: "cancelled", outcome: "cancelled" };
@@ -99,4 +136,13 @@ export function persistedTurnPhaseFromEvents(
     if (event.type === "assistant.message.ended" || event.type === "turn.ended") currentTurn = event.turn;
   }
   return { phase, currentTurn };
+}
+
+export function persistedTurnTextsFromEvents(events: NormalizedAgentEvent[]) {
+  const texts: Record<number, string> = {};
+  for (const event of events) {
+    if (event.type !== "message.turn_text" || !event.text) continue;
+    texts[event.turn] = event.text;
+  }
+  return texts;
 }

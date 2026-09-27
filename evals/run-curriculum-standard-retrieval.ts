@@ -3,8 +3,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createClient } from "@supabase/supabase-js";
 import { z } from "zod";
-import { config } from "../server/config.js";
-import { BgeM3EmbeddingProvider } from "../server/providers/embeddings.js";
+import { config, hasEmbeddingProvider } from "../server/config.js";
+import { ConfiguredEmbeddingProvider } from "../server/providers/embeddings.js";
 
 const caseSchema = z.object({
   id: z.string().min(1),
@@ -27,12 +27,12 @@ const cases = (await readFile(new URL("./curriculum-standard-cases.jsonl", impor
 if (!config.SUPABASE_URL || !config.SUPABASE_SERVICE_ROLE_KEY) {
   throw new Error("missing_required_environment:SUPABASE_URL_or_SUPABASE_SERVICE_ROLE_KEY");
 }
-if (!config.BGE_M3_BASE_URL) throw new Error("missing_required_environment:BGE_M3_BASE_URL");
+if (!hasEmbeddingProvider) throw new Error("missing_required_environment:embedding_configuration");
 
 const client = createClient(config.SUPABASE_URL, config.SUPABASE_SERVICE_ROLE_KEY, {
   auth: { autoRefreshToken: false, persistSession: false },
 });
-const embeddings = new BgeM3EmbeddingProvider();
+const embeddings = new ConfiguredEmbeddingProvider();
 const vectors = await embeddings.embed(cases.map((testCase) => testCase.query));
 const results = [];
 
@@ -96,7 +96,7 @@ const meanReciprocalRank = results.reduce((sum, result) => (
 ), 0) / results.length;
 const report = {
   generatedAt: new Date().toISOString(),
-  indexModel: config.BGE_M3_MODEL,
+  indexModel: config.EMBEDDING_MODEL,
   caseCount: results.length,
   passed: results.filter((result) => result.passed).length,
   metrics: { hitAt1, hitAt3, meanReciprocalRank },

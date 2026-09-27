@@ -12,6 +12,7 @@ type Props = {
   onCopy?: () => void;
   onRetry?: () => void;
   onBranch?: () => void;
+  actions?: boolean;
 };
 
 function ActionIcon({ children }: { children: React.ReactNode }) {
@@ -19,7 +20,7 @@ function ActionIcon({ children }: { children: React.ReactNode }) {
 }
 
 /** Renders the text already streamed by Pi. It never invents tokens or timing. */
-function StreamingText({ content, streaming = false, sources = [], onCopy, onRetry, onBranch }: Props) {
+function StreamingText({ content, streaming = false, sources = [], onCopy, onRetry, onBranch, actions = true }: Props) {
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const settled = !streaming;
   return (
@@ -32,10 +33,9 @@ function StreamingText({ content, streaming = false, sources = [], onCopy, onRet
             table: ({ children }) => <div className="beautiful-markdown-table"><table>{children}</table></div>,
           }}
         >{content}</ReactMarkdown>
-        {streaming ? <span className="stream-caret is-streaming" aria-label="正在输出" /> : null}
       </div>
 
-      {settled && content ? (
+      {settled && content && actions ? (
         <div className="mt-2 flex items-center gap-0.5" style={{ animation: "fade-in 180ms ease-out both" }}>
           {onCopy ? <button type="button" aria-label="复制回复" onClick={onCopy} className="flex size-6 items-center justify-center rounded-[6px] text-ink-3 transition-colors duration-100 hover:bg-hover-2 hover:text-ink-2"><ActionIcon><rect x="9" y="9" width="12" height="12" rx="2.5" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></ActionIcon></button> : null}
           {onRetry ? <button type="button" aria-label="重试" onClick={onRetry} className="flex size-6 items-center justify-center rounded-[6px] text-ink-3 transition-colors duration-100 hover:bg-hover-2 hover:text-ink-2"><ActionIcon><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" /></ActionIcon></button> : null}

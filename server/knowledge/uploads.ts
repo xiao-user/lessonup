@@ -1,6 +1,7 @@
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { config, hasSupabase } from "../config.js";
+import { config, hasEmbeddingProvider } from "../config.js";
 import type { LessonRepository } from "../repository.js";
+import type { ObjectStorage } from "../platform/object-storage.js";
+import { D1KnowledgeSourceStore, type KnowledgeSourceStore } from "./source-store.js";
 
 const allowedMediaTypes = new Set([
   "application/pdf",
@@ -61,22 +62,24 @@ async function hasExpectedSignature(file: File, mediaType: string) {
 }
 
 export class KnowledgeUploadService {
-  private readonly client: SupabaseClient | null;
+  private readonly storage: ObjectStorage | null;
+  private readonly sourceStore: KnowledgeSourceStore | null;
 
-  constructor(private readonly repository: LessonRepository) {
-    this.client = hasSupabase
-      ? createClient(config.SUPABASE_URL!, config.SUPABASE_SERVICE_ROLE_KEY!, {
-          auth: { autoRefreshToken: false, persistSession: false },
-        })
-      : null;
+  constructor(
+    private readonly repository: LessonRepository,
+    objectStorage?: ObjectStorage | null,
+    sourceStore?: KnowledgeSourceStore | null,
+  ) {
+    this.sourceStore = sourceStore ?? null;
+    this.storage = objectStorage ?? null;
   }
 
   get configured() {
-    return Boolean(this.client && config.BGE_M3_BASE_URL);
+    return Boolean(this.sourceStore && this.storage && hasEmbeddingProvider);
   }
 
   get storageConfigured() {
-    return Boolean(this.client);
+    return Boolean(this.sourceStore && this.storage);
   }
 
   async enqueue(ownerId: string, input: {
@@ -86,7 +89,7 @@ export class KnowledgeUploadService {
     title?: string;
     idempotencyKey: string;
   }) {
-    if (!this.client || !config.BGE_M3_BASE_URL) throw new Error("knowledge_indexing_not_configured");
+    if (!this.sourceStore || !this.storage || !hasEmbeddingProvider) throw new Error("knowledge_indexing_not_configured");
     const mediaType = resolveKnowledgeMediaType(input.file);
     if (!mediaType) throw new Error("unsupported_knowledge_file");
     if (input.file.size > maxUploadBytes) throw new Error("knowledge_file_too_large");
@@ -95,12 +98,8 @@ export class KnowledgeUploadService {
 
     await this.deleteExpiredDrafts(ownerId);
 
-    const existing = await this.client.from("knowledge_sources").select("*")
-      .eq("owner_id", ownerId)
-      .eq("upload_idempotency_key", input.idempotencyKey)
-      .maybeSingle();
-    if (existing.error) throw new Error(existing.error.message);
-    if (existing.data) return existing.data;
+    const existing = await this.sourceStore.findByUploadIdempotency(ownerId, input.idempotencyKey);
+    if (existing) return existing;
 
     let scope: "user" | "notebook" | "file" = "user";
     if (input.lessonFileId) {
@@ -117,27 +116,26 @@ export class KnowledgeUploadService {
 
     const sourceId = crypto.randomUUID();
     const storageKey = `${ownerId}/${sourceId}/${safeKnowledgeStorageFilename(input.file.name || "source")}`;
-    const upload = await this.client.storage.from("knowledge-private")
-      .upload(storageKey, input.file, { contentType: mediaType, upsert: false });
-    if (upload.error) throw new Error(upload.error.message);
-
-    const source = await this.client.rpc("enqueue_knowledge_source", {
-      p_owner_id: ownerId,
-      p_source_id: sourceId,
-      p_notebook_id: input.notebookId ?? null,
-      p_lesson_file_id: input.lessonFileId ?? null,
-      p_scope: scope,
-      p_title: input.title?.trim() || input.file.name,
-      p_media_type: mediaType,
-      p_storage_key: storageKey,
-      p_metadata: { bytes: input.file.size, originalFilename: input.file.name },
-      p_idempotency_key: input.idempotencyKey,
+    await this.storage.put(storageKey, input.file, {
+      contentType: mediaType,
+      customMetadata: { originalFilename: input.file.name },
     });
-    if (source.error) {
-      await this.client.storage.from("knowledge-private").remove([storageKey]);
-      throw new Error(source.error.message);
+
+    try {
+      const now = new Date().toISOString();
+      return await this.sourceStore.enqueue({
+        id: sourceId, owner_id: ownerId, notebook_id: input.notebookId ?? null,
+        lesson_file_id: input.lessonFileId ?? null, scope, title: input.title?.trim() || input.file.name,
+        media_type: mediaType, storage_key: storageKey, source_version: 1, status: "queued",
+        index_version: null, metadata: { bytes: input.file.size, originalFilename: input.file.name },
+        upload_idempotency_key: input.idempotencyKey, attached_message_id: null, attempt_count: 0,
+        max_attempts: 3, available_at: now, lease_expires_at: null, worker_id: null, last_error: null,
+        created_at: now, updated_at: now,
+      });
+    } catch (error) {
+      await this.storage.remove([storageKey]);
+      throw error;
     }
-    return source.data;
   }
 
   async list(ownerId: string, scope: {
@@ -145,116 +143,52 @@ export class KnowledgeUploadService {
     lessonFileId?: string;
     includeAttached?: boolean;
   }) {
-    if (!this.client) throw new Error("knowledge_storage_not_configured");
-    let query = this.client.from("knowledge_sources")
-      .select("id,title,scope,status,media_type,notebook_id,lesson_file_id,index_version,metadata,attempt_count,max_attempts,last_error,created_at,updated_at")
-      .eq("owner_id", ownerId)
-      .neq("status", "deleted")
-      .order("updated_at", { ascending: false });
-    if (!scope.includeAttached) query = query.is("attached_message_id", null);
-    if (scope.lessonFileId) query = query.eq("lesson_file_id", scope.lessonFileId);
-    else if (scope.notebookId) query = query.eq("notebook_id", scope.notebookId);
-    const result = await query;
-    if (result.error) throw new Error(result.error.message);
-    return result.data ?? [];
+    if (!this.sourceStore) throw new Error("knowledge_storage_not_configured");
+    return this.sourceStore.list(ownerId, scope);
   }
 
   async get(ownerId: string, sourceId: string) {
-    if (!this.client) throw new Error("knowledge_storage_not_configured");
-    const source = await this.client.from("knowledge_sources")
-      .select("id,title,scope,status,media_type,notebook_id,lesson_file_id,index_version,metadata,attempt_count,max_attempts,last_error,created_at,updated_at")
-      .eq("owner_id", ownerId).eq("id", sourceId).maybeSingle();
-    if (source.error) throw new Error(source.error.message);
-    if (!source.data) throw new Error("knowledge_source_not_found");
-    return source.data;
+    if (!this.sourceStore) throw new Error("knowledge_storage_not_configured");
+    const source = await this.sourceStore.get(ownerId, sourceId);
+    if (!source) throw new Error("knowledge_source_not_found");
+    return source;
   }
 
   async retry(ownerId: string, sourceId: string) {
-    if (!this.client || !config.BGE_M3_BASE_URL) throw new Error("knowledge_indexing_not_configured");
-    const source = await this.client.from("knowledge_sources").update({
-      status: "queued",
-      attempt_count: 0,
-      available_at: new Date().toISOString(),
-      worker_id: null,
-      lease_expires_at: null,
-      last_error: null,
-      updated_at: new Date().toISOString(),
-    }).eq("owner_id", ownerId).eq("id", sourceId).eq("status", "failed")
-      .select("*").maybeSingle();
-    if (source.error) throw new Error(source.error.message);
-    if (!source.data) throw new Error("knowledge_source_not_retryable");
+    if (!this.sourceStore || !hasEmbeddingProvider) throw new Error("knowledge_indexing_not_configured");
+    const source = await this.sourceStore.retry(ownerId, sourceId, new Date().toISOString());
+    if (!source) throw new Error("knowledge_source_not_retryable");
     await this.audit(ownerId, sourceId, "index.retry_requested", {});
-    return source.data;
+    return source;
   }
 
   async delete(ownerId: string, sourceId: string) {
-    if (!this.client) throw new Error("knowledge_storage_not_configured");
-    const source = await this.client.from("knowledge_sources")
-      .select("id,storage_key").eq("owner_id", ownerId).eq("id", sourceId).maybeSingle();
-    if (source.error) throw new Error(source.error.message);
-    if (!source.data) throw new Error("knowledge_source_not_found");
-
-    const marked = await this.client.from("knowledge_sources").update({
-      status: "deleted",
-      worker_id: null,
-      lease_expires_at: null,
-      updated_at: new Date().toISOString(),
-    }).eq("owner_id", ownerId).eq("id", sourceId);
-    if (marked.error) throw new Error(marked.error.message);
+    if (!this.sourceStore) throw new Error("knowledge_storage_not_configured");
+    const source = await this.sourceStore.get(ownerId, sourceId);
+    if (!source) throw new Error("knowledge_source_not_found");
     await this.audit(ownerId, sourceId, "source.deleted", {});
-
-    if (source.data.storage_key) {
-      const removed = await this.client.storage.from("knowledge-private").remove([source.data.storage_key]);
-      if (removed.error) throw new Error("knowledge_storage_delete_failed");
-    }
-    const deleted = await this.client.from("knowledge_sources").delete()
-      .eq("owner_id", ownerId).eq("id", sourceId);
-    if (deleted.error) throw new Error(deleted.error.message);
+    if (source.storage_key) await this.storage?.remove([source.storage_key]);
+    await this.sourceStore.delete(ownerId, sourceId);
   }
 
   async deleteForLessonFile(ownerId: string, lessonFileId: string) {
-    if (!this.client) return;
-    const sources = await this.client.from("knowledge_sources")
-      .select("id")
-      .eq("owner_id", ownerId)
-      .eq("lesson_file_id", lessonFileId);
-    if (sources.error) throw new Error(sources.error.message);
-    for (const source of sources.data ?? []) {
-      await this.delete(ownerId, source.id);
-    }
+    if (!this.sourceStore) return;
+    for (const sourceId of await this.sourceStore.listIds(ownerId, "lessonFile", lessonFileId)) await this.delete(ownerId, sourceId);
   }
 
   async deleteForNotebook(ownerId: string, notebookId: string) {
-    if (!this.client) return;
-    const sources = await this.client.from("knowledge_sources")
-      .select("id")
-      .eq("owner_id", ownerId)
-      .eq("notebook_id", notebookId);
-    if (sources.error) throw new Error(sources.error.message);
-    for (const source of sources.data ?? []) {
-      await this.delete(ownerId, source.id);
-    }
+    if (!this.sourceStore) return;
+    for (const sourceId of await this.sourceStore.listIds(ownerId, "notebook", notebookId)) await this.delete(ownerId, sourceId);
   }
 
   private async audit(ownerId: string, sourceId: string, action: string, details: unknown) {
-    if (!this.client) return;
-    const result = await this.client.from("knowledge_audit_events").insert({
-      owner_id: ownerId, source_id: sourceId, action, details,
-    });
-    if (result.error) throw new Error(result.error.message);
+    await this.sourceStore?.audit(ownerId, sourceId, action, details, new Date().toISOString());
   }
 
   private async deleteExpiredDrafts(ownerId: string) {
-    if (!this.client) return;
+    if (!this.sourceStore) return;
     const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString();
-    const stale = await this.client.from("knowledge_sources")
-      .select("id")
-      .eq("owner_id", ownerId)
-      .is("attached_message_id", null)
-      .neq("status", "deleted")
-      .lt("updated_at", cutoff)
-      .limit(32);
-    if (stale.error) throw new Error(stale.error.message);
-    await Promise.allSettled((stale.data ?? []).map((source) => this.delete(ownerId, source.id)));
+    await Promise.allSettled((await this.sourceStore.listExpiredDraftIds(ownerId, cutoff, 32))
+      .map((sourceId) => this.delete(ownerId, sourceId)));
   }
 }

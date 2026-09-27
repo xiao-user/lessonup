@@ -4,9 +4,7 @@ import { parseConfig } from "./config.js";
 
 const productionEnv = {
   NODE_ENV: "production",
-  SUPABASE_URL: "https://example.supabase.co",
-  SUPABASE_ANON_KEY: "anon-key",
-  SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+  LESSONUP_PERSISTENCE: "d1",
   LESSONUP_DEV_AUTH: "0",
 } satisfies NodeJS.ProcessEnv;
 
@@ -32,6 +30,9 @@ describe("server runtime configuration", () => {
       MODEL_API_KEY: "model-key",
       MODEL_BASE_URL: "https://gateway.example/v1",
       MODEL_ID: "model-a",
+      MODEL_API: "openai-responses",
+      MODEL_CONTEXT_WINDOW: "100000",
+      MODEL_MAX_TOKENS: "8000",
     });
     expect(parsed).toMatchObject({
       MODEL_BASE_URL: "https://gateway.example/v1",

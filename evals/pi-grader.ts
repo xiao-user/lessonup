@@ -2,7 +2,13 @@ import { Agent } from "@earendil-works/pi-agent-core";
 import { createPiModelRuntime } from "../server/agent-runtime/pi/model-provider.js";
 import type { BusinessGraderClient } from "./grading.js";
 
-export function createPiGraderClient(args: { apiKey: string; baseURL: string }): BusinessGraderClient {
+export function createPiGraderClient(args: {
+  apiKey: string;
+  baseURL: string;
+  api: "openai-responses" | "openai-completions";
+  contextWindow: number;
+  maxTokens: number;
+}): BusinessGraderClient {
   return {
     chat: {
       completions: {
@@ -11,6 +17,9 @@ export function createPiGraderClient(args: { apiKey: string; baseURL: string }):
             apiKey: args.apiKey,
             baseUrl: args.baseURL,
             modelId: request.model,
+            api: args.api,
+            contextWindow: args.contextWindow,
+            maxTokens: args.maxTokens,
           });
           const system = request.messages.find((message) => message.role === "system")?.content ?? "";
           const input = request.messages.filter((message) => message.role === "user")

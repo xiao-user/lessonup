@@ -1,18 +1,34 @@
+import { approvalPhase } from "./approval-state.js";
+
 export async function stopAgentRun({ runId, cancelRun, controller, reloadMessages }) {
   if (runId) await cancelRun(runId).catch(() => null);
   controller?.abort();
   await reloadMessages();
 }
 
-export function isApprovalBackedProposeActivity(activityName, {
-  approvalCreated = false,
-  approvalDecided = false,
-} = {}) {
-  return Boolean(
-    typeof activityName === "string"
-    && activityName.startsWith("propose_")
-    && (approvalCreated || approvalDecided),
-  );
+const isProposeActivityName = (name) => typeof name === "string" && name.startsWith("propose_");
+
+const lastProposalToolCallId = (activities) => [...(activities ?? [])]
+  .reverse()
+  .find((activity) => isProposeActivityName(activity?.name))?.id;
+
+/**
+ * Tool calls that a durable confirmation item proves passed preflight and were
+ * materialized. Attribution comes from the proposing call the server recorded,
+ * so a run that self-corrected after a rejected preflight keeps that earlier
+ * attempt visibly unsuccessful. Approvals persisted before that id existed fall
+ * back to the run's last proposal call, the only one that could have produced
+ * the card.
+ */
+export function approvalBackedToolCallIds(activities, approvals) {
+  const records = (approvals ?? []).filter(Boolean);
+  if (!records.length) return new Set();
+  const attributed = records
+    .map((approval) => approval.toolCallId)
+    .filter((toolCallId) => typeof toolCallId === "string" && toolCallId.length > 0);
+  if (attributed.length) return new Set(attributed);
+  const fallback = lastProposalToolCallId(activities);
+  return new Set(fallback ? [fallback] : []);
 }
 
 /** Mirror of server/agent/tool-completion-outcome.ts for browser event projection. */
@@ -24,11 +40,8 @@ export function toolCompletionOutcomeOf(event) {
   return "failed";
 }
 
-export function activityStateForToolCompletion(event, {
-  approvalCreated = false,
-  approvalDecided = false,
-} = {}) {
-  if (isApprovalBackedProposeActivity(event?.name, { approvalCreated, approvalDecided })) {
+export function activityStateForToolCompletion(event, { approvalBackedToolCalls } = {}) {
+  if (event?.toolCallId && approvalBackedToolCalls?.has(event.toolCallId)) {
     return "completed";
   }
   const outcome = toolCompletionOutcomeOf(event);
@@ -43,8 +56,10 @@ export function activitiesFromEvents(events, runStatus = null) {
   let failed = runStatus === "failed";
   let cancelled = runStatus === "cancelled";
   let settled = runStatus === "completed" || runStatus === "awaiting_approval";
-  let approvalCreated = false;
-  let approvalDecided = false;
+  // A proposal's completion event precedes the approval it creates, so
+  // attribution is resolved after the whole journal has been read.
+  let approvalSeen = false;
+  const attributedToolCalls = new Set();
   for (const event of events) {
     if (event.type === "tool.started") {
       activities.push({
@@ -75,7 +90,7 @@ export function activitiesFromEvents(events, runStatus = null) {
         const outcome = toolCompletionOutcomeOf(event);
         activities[index] = {
           ...activities[index],
-          state: activityStateForToolCompletion(event, { approvalCreated, approvalDecided }),
+          state: activityStateForToolCompletion(event),
           label: event.label,
           detail: event.detail ?? activities[index].detail,
           groupKey: event.groupKey ?? activities[index].groupKey,
@@ -85,17 +100,26 @@ export function activitiesFromEvents(events, runStatus = null) {
         };
       }
     }
-    if (event.type === "approval.required") approvalCreated = true;
-    if (event.type === "approval.decided") approvalDecided = true;
+    if (event.type === "approval.required") {
+      approvalSeen = true;
+      if (event.toolCallId) attributedToolCalls.add(event.toolCallId);
+    }
+    if (event.type === "approval.decided") approvalSeen = true;
     if (event.type === "run.failed") failed = true;
     if (event.type === "run.cancelled") cancelled = true;
     if (event.type === "run.completed") settled = true;
   }
+  const fallbackToolCallId = approvalSeen && !attributedToolCalls.size
+    ? lastProposalToolCallId(activities)
+    : undefined;
+  const approvalBackedToolCalls = fallbackToolCallId
+    ? new Set([fallbackToolCallId])
+    : attributedToolCalls;
   return activities.map((activity) => {
-    // A confirmation item proves that the proposal was successfully
-    // materialized and passed preflight. Older runs could later emit a false
-    // stale failure when the SDK acknowledged that same call after approval.
-    if (isApprovalBackedProposeActivity(activity.name, { approvalCreated, approvalDecided })) {
+    // A confirmation item proves that this proposal call was materialized and
+    // passed preflight. Older runs could later emit a false stale failure when
+    // the SDK acknowledged that same call after approval.
+    if (approvalBackedToolCalls.has(activity.id)) {
       return { ...activity, state: "completed", outcome: "completed" };
     }
     if (activity.state !== "running") return activity;
@@ -247,6 +271,10 @@ export function presentAgentError(error) {
       message: "同一分支的 Pi 会话已被另一项操作推进，本轮没有覆盖较新的会话状态。",
       retryLabel: "刷新后继续",
     },
+    agent_context_window_exceeded: {
+      message: "当前会话历史在压缩后仍超过模型上下文窗口，本轮没有向模型发送不完整内容。",
+      retryLabel: "新建会话继续",
+    },
     agent_timeout: {
       message: "本轮处理超时，未确认的修改不会写入。",
       retryLabel: "编辑后重新发送",
@@ -266,6 +294,29 @@ export function branchDisplayLabel(branch, index) {
   return branch?.label === "分支" ? `分支 ${index + 1}` : branch?.label ?? "消息分支";
 }
 
+/**
+ * A presentation continuation stored before Dashi goals became durable can no
+ * longer be resumed, so it must not hold the conversation open.
+ */
+const isObsoleteLegacyContinuation = (approval) => Boolean(
+  approval?.continuationStatus === "ready"
+  && approval.patch?.kind === "presentation_storyboard"
+  && !approval.patch.goal,
+);
+
+/**
+ * True only while the Turn has stopped and owes the teacher a decision. Once
+ * decided, the continuation run owns the Turn again.
+ */
+export const isAwaitingTeacherDecision = (approval) => approvalPhase(approval) === "pending";
+
+/** The single definition of which approval still owns the conversation. */
+export function activeApprovalFrom(approvals) {
+  return [...(approvals ?? [])].reverse().find((item) => (
+    approvalPhase(item) !== "settled"
+  )) ?? null;
+}
+
 export function deriveBranchRuntimeState({
   runtimeAvailable,
   approvals = [],
@@ -274,43 +325,32 @@ export function deriveBranchRuntimeState({
   hasLocalStream = false,
 }) {
   const obsoleteLegacyContinuation = approvals.some((item) => (
-    item.state === "continuation"
-    && item.patch?.kind === "presentation_storyboard"
-    && !item.patch.goal
-    && item.runId === persistedRun?.id
+    isObsoleteLegacyContinuation(item) && item.runId === persistedRun?.id
   ));
-  const activeApproval = [...approvals].reverse().find((item) => (
-    (item.state === "pending"
-      || item.state === "responding"
-      || item.state === "continuation")
-    && !(item.state === "continuation"
-      && item.patch?.kind === "presentation_storyboard"
-      && !item.patch.goal)
-  ));
+  const activeApproval = activeApprovalFrom(approvals);
   if (activeApproval) {
+    const phase = approvalPhase(activeApproval);
     return {
-      status: activeApproval.state === "responding" ? "streaming" : "awaiting_approval",
+      status: phase === "syncing" ? "syncing" : phase === "executing" ? "streaming" : "awaiting_approval",
       runId: activeApproval.runId ?? persistedRun?.id ?? null,
       error: null,
     };
   }
   const persistedRunning = persistedRun?.status === "running" || persistedRun?.status === "queued";
-  if (localRunId || persistedRunning || hasLocalStream) {
+  const localAlreadySettled = persistedRun?.id === localRunId
+    && ["completed", "cancelled", "failed"].includes(persistedRun?.status);
+  if (persistedRunning || (!localAlreadySettled && (localRunId || hasLocalStream))) {
     return {
       status: "streaming",
       runId: localRunId ?? persistedRun?.id ?? null,
       error: null,
     };
   }
-  if (persistedRun?.status === "failed") {
-    if (obsoleteLegacyContinuation) {
-      return { status: "ready", runId: null, error: null };
-    }
-    return {
-      status: "error",
-      runId: null,
-      error: persistedRun.error ?? "agent_run_failed",
-    };
+  // A terminal failure is rendered by its durable assistant message. It does
+  // not lock the conversation: a teacher's next send is an intentional new
+  // run, while the failed run remains available for retry or inspection.
+  if (persistedRun?.status === "failed" || obsoleteLegacyContinuation) {
+    return { status: runtimeAvailable ? "ready" : "unconfigured", runId: null, error: null };
   }
   return {
     status: runtimeAvailable ? "ready" : "unconfigured",
@@ -326,6 +366,11 @@ export function resetAgentConversationState({ runtime, setApproval, setError, se
   setStatus(runtime?.agent ? "ready" : "unconfigured");
 }
 
+/**
+ * A historical failed turn remains inspectable, but it must not become the
+ * default conversation on every page load: an old provider outage would then
+ * prevent the teacher from starting a fresh, healthy conversation.
+ */
 export async function synchronizeCompletedAgentTurn({ threadId, branchId, loadMessages, listThreads }) {
   await loadMessages(threadId, branchId);
   return listThreads();
@@ -343,12 +388,4 @@ export async function resolveBranchSourceMessage(message, listMessages) {
 
 export function lastRetryableUserMessage(messages) {
   return [...messages].reverse().find((message) => message.role === "user" && message.status !== "streaming") ?? null;
-}
-
-export function canRetryApprovalDecision(error) {
-  return !new Set([
-    "approval_expired",
-    "stale_document",
-    "stale_design_basis",
-  ]).has(error);
 }

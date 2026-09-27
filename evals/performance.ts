@@ -1,10 +1,30 @@
 export type AgentEvalPerformance = {
   durationMs: number;
+  /** First browser-safe lifecycle event, including tool and approval activity. */
+  firstSafeEventMs: number | null;
+  /** First native assistant-stream event, before public text may arrive. */
+  firstProviderEventMs: number | null;
+  /** Legacy budget name: time to first public text delta. */
   firstOutputMs: number | null;
   modelRequests: number | null;
   toolCalls: number;
   inputTokens: number | null;
+  cachedInputTokens: number | null;
 };
+
+/** Events the browser can render without exposing private provider internals. */
+export function isSafePublicEvent(type: string) {
+  return [
+    "agent.started",
+    "turn.started",
+    "assistant.message.started",
+    "message.delta",
+    "tool.started",
+    "tool.completed",
+    "approval.required",
+    "source.added",
+  ].includes(type);
+}
 
 export type AgentEvalPerformanceBudget = {
   maxDurationMs: number;

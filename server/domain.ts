@@ -715,6 +715,34 @@ export type LessonFileSummary = Omit<LessonFileRecord, "document" | "contextProf
   preview: string[];
 };
 
+/**
+ * A teacher-initiated generation request. It remains durable until the Pi
+ * coordinator claims it for exactly one run, so a page refresh cannot erase it.
+ */
+export type LessonGenerationIntentRecord = {
+  id: string;
+  ownerId: string;
+  lessonFileId: string;
+  prompt: string;
+  state: "pending" | "claimed";
+  runId?: string;
+  createdAt: string;
+  claimedAt?: string;
+};
+
+/** A durable, approval-gated framework writeback requested by classroom feedback. */
+export type SemesterFrameworkWritebackIntentRecord = {
+  id: string;
+  ownerId: string;
+  frameworkId: string;
+  feedbackId: string;
+  prompt: string;
+  state: "pending" | "claimed";
+  runId?: string;
+  createdAt: string;
+  claimedAt?: string;
+};
+
 export type NotebookGraphRecord = NotebookRecord & {
   files: LessonFileSummary[];
 };
@@ -724,7 +752,9 @@ type AgentThreadCommon = {
   ownerId: string;
   notebookId: string;
   title: string;
-  status: "idle" | "running" | "awaiting_approval" | "failed";
+  // A thread describes whether the conversation currently accepts a new turn.
+  // Terminal outcomes belong to the immutable run and assistant-message records.
+  status: "idle" | "running" | "awaiting_approval";
   starterSuggestions?: string[];
   starterSuggestionsDocumentVersion?: number;
   starterSuggestionsResourceVersion?: number;
@@ -770,6 +800,7 @@ export type AgentMessageRecord = {
   error?: string;
   sources?: SourceRef[];
   activities?: AgentActivityRecord[];
+  turnTexts?: Record<number, string>;
   turn?: AgentTurnPresentation;
   sessionCursor?: number;
   createdAt: string;
@@ -819,6 +850,13 @@ export type AgentRunRecord = {
   leaseExpiresAt?: string;
   heartbeatAt?: string;
   cancelRequestedAt?: string;
+  /** Unique durable command that initiated this run, when applicable. */
+  generationIntentId?: string;
+  /** Browser-owned identity used to make ordinary send retries idempotent. */
+  clientCommandId?: string;
+  /** Canonical request fingerprint guarding command-id reuse. */
+  commandFingerprint?: string;
+  userMessageId?: string;
   assistantMessageId?: string;
   startedAt: string;
   completedAt?: string;
@@ -831,6 +869,8 @@ export type AgentApprovalRecord = {
   threadId: string;
   branchId: string;
   assistantMessageId?: string;
+  /** The proposing tool call, so the browser can attribute this card to it. */
+  toolCallId?: string;
   state: "pending" | "approved" | "rejected" | "expired";
   patch: ResourcePatch;
   encryptedRunState: string;
@@ -866,6 +906,12 @@ export type CapabilityPlan = {
   continuityRequested?: boolean;
   continuityWritebackFeedbackId?: string;
   lightweightConversation?: boolean;
+  /**
+   * Fast chat is the same configured model with a compact conversation view
+   * and no tools. Agent keeps the stable Skill/tool prefix. Acknowledgements
+   * like 谢谢/好的 are Fast model replies, not canned text.
+   */
+  executionLane?: "fast" | "agent";
   curriculumRequested?: boolean;
   presentationRequested?: boolean;
   presentationThemeConfirmationRequired?: boolean;
@@ -1393,7 +1439,8 @@ export type NormalizedAgentEvent =
   | { type: "document.updated"; runId: string; file: LessonFileRecord }
   | { type: "design_basis.updated"; runId: string; basis: LessonDesignBasisAggregate }
   | { type: "resource.updated"; runId: string; resourceType: "semester_framework"; framework: SemesterFrameworkAggregate }
-  | { type: "message.delta"; runId: string; delta: string }
+  | { type: "message.delta"; runId: string; delta: string; turn?: number }
+  | { type: "message.turn_text"; runId: string; turn: number; text: string }
   | {
     type: "agent.input.queued";
     runId: string;
@@ -1433,9 +1480,28 @@ export type NormalizedAgentEvent =
     outcome?: "completed" | "no_change" | "needs_revision" | "failed";
   }
   | { type: "source.added"; runId: string; source: SourceRef }
-  | { type: "approval.required"; runId: string; approvalId: string; assistantMessageId?: string; patch: ResourcePatch }
+  | {
+    type: "approval.required";
+    runId: string;
+    approvalId: string;
+    assistantMessageId?: string;
+    toolCallId?: string;
+    patch: ResourcePatch;
+    /**
+     * This event, not `run.completed`, ends the Agent's work for a proposing
+     * run, so it carries that segment's transport timing. Without it the one
+     * path whose latency the teacher actually waits on stays unmeasured.
+     */
+    transportTiming?: import("./agent-runtime/pi/transport-timing.js").PiTransportTiming;
+  }
   | { type: "approval.decided"; runId: string; approvalId: string; decision: "approved" | "rejected" }
+  | { type: "approval.delivered"; runId: string; approvalId: string; presentationId: string }
   | { type: "message.completed"; runId: string; message: AgentMessageRecord }
-  | { type: "run.completed"; runId: string }
+  | {
+    type: "run.completed";
+    runId: string;
+    /** Safe aggregate timing emitted by the native Pi transport hooks. */
+    transportTiming?: import("./agent-runtime/pi/transport-timing.js").PiTransportTiming;
+  }
   | { type: "run.cancelled"; runId: string }
   | { type: "run.failed"; runId: string; error: string; message?: AgentMessageRecord };

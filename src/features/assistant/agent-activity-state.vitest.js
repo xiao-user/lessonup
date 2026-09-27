@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   presentActivitiesForMessage,
+  presentAssistantTimeline,
   presentCurrentFocus,
+  presentProcessTraceActive,
+  presentThinkingVisible,
+  presentTurnPhaseLabel,
   presentTurnState,
 } from "./agent-activity-state.js";
 
@@ -32,13 +36,38 @@ describe("public Pi Turn phase", () => {
     })).toBe("running");
   });
 
-  it("treats an approval interruption as part of the running turn", () => {
+  it("separates waiting for the teacher's decision from Agent work", () => {
     expect(presentTurnState({
       messageStatus: "streaming",
       chatStatus: "awaiting_approval",
       turnStatus: "awaiting_approval",
       hasActiveApproval: true,
+      awaitingTeacherDecision: true,
+    })).toBe("awaiting_approval");
+  });
+
+  it("keeps a decided approval's continuation run presented as work in progress", () => {
+    expect(presentTurnState({
+      messageStatus: "streaming",
+      chatStatus: "awaiting_approval",
+      turnStatus: "awaiting_approval",
+      hasActiveApproval: true,
+      awaitingTeacherDecision: false,
     })).toBe("running");
+  });
+
+  it("shows no current focus while the teacher decides", () => {
+    expect(presentCurrentFocus(
+      [{ id: "tool-1", detail: "读取当前教案", state: "running" }],
+      "awaiting_approval",
+    )).toBeUndefined();
+  });
+
+  it("freezes process chrome after the teacher decides unless a new tool is running", () => {
+    expect(presentProcessTraceActive("running", { decided: true })).toBe(false);
+    expect(presentProcessTraceActive("running", { decided: true, hasRunningActivity: true })).toBe(true);
+    expect(presentProcessTraceActive("running", { decided: false })).toBe(true);
+    expect(presentProcessTraceActive("awaiting_approval", { decided: false })).toBe(false);
   });
 
   it("lets terminal and error signals clear stale running state", () => {
@@ -82,5 +111,69 @@ describe("public Pi current focus", () => {
   it("clears focus as soon as the turn becomes terminal", () => {
     expect(presentCurrentFocus(active, "failed")).toBeUndefined();
     expect(presentCurrentFocus(active, "completed")).toBeUndefined();
+  });
+});
+
+describe("public Pi turn phase label", () => {
+  it("names the generation phase while the model has produced nothing visible yet", () => {
+    // The long private stretch before the first tool call or character: the run
+    // is genuinely working, and saying so exposes no reasoning content.
+    expect(presentTurnPhaseLabel("responding", false)).toBe("正在思考");
+  });
+
+  it("names the generation phase even after public text has started", () => {
+    expect(presentTurnPhaseLabel("responding", true)).toBe("正在思考");
+  });
+
+  it("reports the pre-model phases as preparation", () => {
+    expect(presentTurnPhaseLabel("starting")).toBe("正在准备");
+    expect(presentTurnPhaseLabel("preparing")).toBe("正在准备");
+  });
+
+  it("yields to the running tool as the more specific focus", () => {
+    expect(presentTurnPhaseLabel("using_tools")).toBeUndefined();
+  });
+
+  it("invents no label when Pi has published no phase", () => {
+    expect(presentTurnPhaseLabel(undefined)).toBeUndefined();
+  });
+});
+
+describe("presentThinkingVisible", () => {
+  it("keeps thinking up for the rest of the run even after public text arrives", () => {
+    expect(presentThinkingVisible({ processActive: true, toolsRunning: false })).toBe(true);
+    expect(presentThinkingVisible({ processActive: true, toolsRunning: true })).toBe(false);
+    expect(presentThinkingVisible({ processActive: false, toolsRunning: false })).toBe(false);
+  });
+});
+
+describe("presentAssistantTimeline", () => {
+  it("places each turn's process text before that turn's tools", () => {
+    expect(presentAssistantTimeline(
+      [
+        { id: "read", label: "读取整份教案", state: "completed", turn: 1 },
+        { id: "patch", label: "准备修改建议", state: "needs_revision", turn: 2 },
+      ],
+      {
+        2: "已读取教案与上游知识点依据。现在提交确认。",
+        3: "刚才的提交缺少依据引用，我补上教材出处后重新提交。",
+      },
+    )).toEqual([
+      { type: "tools", turn: 1, activities: [expect.objectContaining({ id: "read" })] },
+      { type: "text", turn: 2, content: "已读取教案与上游知识点依据。现在提交确认。" },
+      { type: "tools", turn: 2, activities: [expect.objectContaining({ id: "patch" })] },
+      { type: "text", turn: 3, content: "刚才的提交缺少依据引用，我补上教材出处后重新提交。" },
+    ]);
+  });
+
+  it("falls back to tools then body when no per-turn text was recorded", () => {
+    expect(presentAssistantTimeline(
+      [{ id: "read", label: "读取整份教案", state: "completed", turn: 1 }],
+      {},
+      "已读取教案。",
+    )).toEqual([
+      { type: "tools", activities: [expect.objectContaining({ id: "read" })] },
+      { type: "text", content: "已读取教案。" },
+    ]);
   });
 });

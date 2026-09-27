@@ -150,4 +150,18 @@ describe("Pi Dashi planning session", () => {
     expect(nativeCalls.map((call) => call.length)).toEqual([12, 8]);
     expect(outputOf(output).layouts).toHaveLength(20);
   });
+
+  it("keeps the query tool schema identical whether or not a theme is already bound", () => {
+    const dashi = {
+      queryLayouts: async () => ({ layouts: [] }),
+      inspectLayouts: async () => ({ layouts: [] }),
+    };
+    const bound = createPiDashiPlanningSession(dashi as never, { theme: "theme09" });
+    const unbound = createPiDashiPlanningSession(dashi as never);
+    const toolJson = (session: ReturnType<typeof createPiDashiPlanningSession>) => JSON.stringify(
+      session.tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters })),
+    );
+    expect(toolJson(bound)).toBe(toolJson(unbound));
+    expect(toolJson(bound)).not.toContain("theme09");
+  });
 });

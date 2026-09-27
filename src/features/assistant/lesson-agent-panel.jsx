@@ -43,9 +43,10 @@ export function LessonAgentPanel({
   onCanonicalDocument,
   onBeforeRun,
   onNavigateToSection,
-  initialPrompt = null,
-  onInitialPromptConsumed,
 }) {
+  const [generationIntent, setGenerationIntent] = useState(null);
+  const [generationIntentLoaded, setGenerationIntentLoaded] = useState(false);
+  const generationIntentDispatchRef = useRef(null);
   const chat = useAgentChat({
     notebookId: notebook.id,
     lessonFileId: file.id,
@@ -54,7 +55,9 @@ export function LessonAgentPanel({
     selection,
     onCanonicalDocument,
     onBeforeRun,
-    starterSuggestionsEnabled: !initialPrompt,
+    // Do not spend a separate model request on starter suggestions before we
+    // know whether this lesson already owns a server-side generation command.
+    starterSuggestionsEnabled: generationIntentLoaded && !generationIntent,
   });
   const activeThread = chat.threads.find((thread) => thread.id === chat.activeThreadId);
   const starterSuggestions = activeThread?.starterSuggestions ?? [];
@@ -74,7 +77,6 @@ export function LessonAgentPanel({
   const [contextLessonNodes, setContextLessonNodes] = useState([]);
   const [loadingContextCatalog, setLoadingContextCatalog] = useState(false);
   const attachmentInputRef = useRef(null);
-  const initialPromptSentRef = useRef(false);
 
   useEffect(() => {
     const requestDashiPresentation = (event) => {
@@ -92,25 +94,42 @@ export function LessonAgentPanel({
   }, [chat.send, chat.status]);
 
   useEffect(() => {
+    let cancelled = false;
+    generationIntentDispatchRef.current = null;
+    setGenerationIntent(null);
+    setGenerationIntentLoaded(false);
+    void agentApi.getPendingLessonGenerationIntent(file.id)
+      .then((intent) => {
+        if (!cancelled) setGenerationIntent(intent);
+      })
+      .catch(() => {
+        // The regular conversation can still load; surface a real run error
+        // only if the durable request is actually dispatched.
+      })
+      .finally(() => {
+        if (!cancelled) setGenerationIntentLoaded(true);
+      });
+    return () => { cancelled = true; };
+  }, [file.id]);
+
+  useEffect(() => {
     if (
-      !initialPrompt
-      || initialPromptSentRef.current
+      !generationIntent
+      || generationIntentDispatchRef.current === generationIntent.id
       || chat.status !== "ready"
-      || chat.messages.length > 0
       || !chat.activeThreadId
       || !chat.activeBranchId
     ) return;
-    initialPromptSentRef.current = true;
-    onInitialPromptConsumed?.();
-    void chat.send(initialPrompt);
+    generationIntentDispatchRef.current = generationIntent.id;
+    void chat.send(generationIntent.prompt, {
+      generationIntentId: generationIntent.id,
+    });
   }, [
     chat.activeBranchId,
     chat.activeThreadId,
-    chat.messages.length,
     chat.send,
     chat.status,
-    initialPrompt,
-    onInitialPromptConsumed,
+    generationIntent,
   ]);
 
   useEffect(() => {

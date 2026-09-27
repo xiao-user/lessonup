@@ -369,7 +369,7 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
   const [sidecarView, setSidecarView] = useState("assistant");
   const [mobilePanel, setMobilePanel] = useState(null);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
-  const [pendingWritebackPrompt, setPendingWritebackPrompt] = useState(null);
+  const [writebackIntentRefreshKey, setWritebackIntentRefreshKey] = useState(0);
   const selectedFeedbackCandidate = useMemo(() => (
     (feedbackTarget?.candidates ?? []).find((candidate) => (
       candidate.fingerprint === feedbackFingerprint
@@ -739,8 +739,7 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
       unitTitleById={unitTitleById}
       onCanonicalFramework={handleCanonicalFramework}
       onNavigateToUnit={navigateToUnit}
-      initialPrompt={pendingWritebackPrompt}
-      onInitialPromptConsumed={() => setPendingWritebackPrompt(null)}
+      writebackIntentRefreshKey={writebackIntentRefreshKey}
       railMode={sidecarView}
       onRailModeChange={setSidecarView}
       continuitySlot={continuityPanel}
@@ -1225,8 +1224,8 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
                       informationLevel: classFeedbackProvenance[feedbackKind].label,
                     },
                   });
-                  if (created.writebackSeed) {
-                    setPendingWritebackPrompt(created.writebackSeed);
+                  if (created.writebackIntentId) {
+                    setWritebackIntentRefreshKey((value) => value + 1);
                     setSidecarView("assistant");
                     openMobileSidecar("assistant");
                     toast.success("衔接效果已记录，助手正在准备下一课时调整确认");

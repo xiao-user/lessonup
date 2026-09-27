@@ -30,6 +30,7 @@ function presentationPlan(plan: CapabilityPlan, theme?: DashiThemeId): Capabilit
     specialistAgents: [],
     writeMode: "consultative",
     lightweightConversation: false,
+    executionLane: "agent",
     requestedDocumentFields: undefined,
   };
 }
@@ -46,6 +47,7 @@ function dismissedPlan(plan: CapabilityPlan): CapabilityPlan {
     mcpServers: [],
     specialistAgents: [],
     lightweightConversation: true,
+    executionLane: "fast",
   };
 }
 
@@ -157,6 +159,7 @@ export function resolvePresentationTurn(input: {
       mcpServers: [],
       specialistAgents: [],
       writeMode: "consultative",
+      executionLane: "agent",
     },
     presentationRequest: input.message,
     pendingInteraction: pending(

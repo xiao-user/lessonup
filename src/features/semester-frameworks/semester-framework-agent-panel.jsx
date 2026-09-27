@@ -33,6 +33,7 @@ import {
 import { canSendAgentMessage } from "@/features/assistant/attachment-state";
 import { presentConversationMessages } from "@/features/assistant/conversation-messages";
 import { useAgentChat } from "@/features/assistant/use-agent-chat";
+import { agentApi } from "@/lib/agent-api";
 
 const statusText = {
   loading: "正在连接学期框架",
@@ -50,12 +51,14 @@ export function SemesterFrameworkAgentPanel({
   unitTitleById,
   onCanonicalFramework,
   onNavigateToUnit,
-  initialPrompt = null,
-  onInitialPromptConsumed,
+  writebackIntentRefreshKey = 0,
   railMode = "assistant",
   onRailModeChange,
   continuitySlot = null,
 }) {
+  const [writebackIntent, setWritebackIntent] = useState(null);
+  const [writebackIntentLoaded, setWritebackIntentLoaded] = useState(false);
+  const writebackIntentDispatchRef = useRef(null);
   const chat = useAgentChat({
     notebookId: notebook.id,
     semesterFrameworkId: aggregate.framework.id,
@@ -63,9 +66,9 @@ export function SemesterFrameworkAgentPanel({
     activeSectionId: "semester-framework",
     activeUnitId,
     onCanonicalFramework,
+    starterSuggestionsEnabled: writebackIntentLoaded && !writebackIntent,
   });
   const [actionsOpen, setActionsOpen] = useState(false);
-  const initialPromptSentRef = useRef(null);
   const activeThread = chat.threads.find((thread) => thread.id === chat.activeThreadId);
   const starterSuggestions = activeThread?.starterSuggestions ?? [];
   const presentedMessages = useMemo(() => (
@@ -81,23 +84,42 @@ export function SemesterFrameworkAgentPanel({
   ])), [aggregate.blueprints]);
 
   useEffect(() => {
-    if (!initialPrompt) return;
-    if (initialPromptSentRef.current === initialPrompt) return;
-    if (!chat.runtime?.agent || !chat.activeThreadId || !chat.activeBranchId) return;
-    if (chat.status === "loading" || chat.status === "streaming" || chat.status === "awaiting_approval") {
-      return;
-    }
-    initialPromptSentRef.current = initialPrompt;
-    onInitialPromptConsumed?.();
-    void chat.send(initialPrompt);
+    let cancelled = false;
+    writebackIntentDispatchRef.current = null;
+    setWritebackIntent(null);
+    setWritebackIntentLoaded(false);
+    void agentApi.getPendingSemesterFrameworkWritebackIntent(aggregate.framework.id)
+      .then((intent) => {
+        if (!cancelled) setWritebackIntent(intent);
+      })
+      .catch(() => {
+        // Normal framework chat remains available; command dispatch failures
+        // surface through the durable Pi run once a command is accepted.
+      })
+      .finally(() => {
+        if (!cancelled) setWritebackIntentLoaded(true);
+      });
+    return () => { cancelled = true; };
+  }, [aggregate.framework.id, writebackIntentRefreshKey]);
+
+  useEffect(() => {
+    if (
+      !writebackIntent
+      || writebackIntentDispatchRef.current === writebackIntent.id
+      || chat.status !== "ready"
+      || !chat.activeThreadId
+      || !chat.activeBranchId
+    ) return;
+    writebackIntentDispatchRef.current = writebackIntent.id;
+    void chat.send(writebackIntent.prompt, {
+      frameworkWritebackIntentId: writebackIntent.id,
+    });
   }, [
     chat.activeBranchId,
     chat.activeThreadId,
-    chat.runtime?.agent,
     chat.send,
     chat.status,
-    initialPrompt,
-    onInitialPromptConsumed,
+    writebackIntent,
   ]);
   const createThread = async () => {
     try {

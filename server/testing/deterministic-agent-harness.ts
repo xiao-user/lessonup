@@ -76,7 +76,7 @@ export class DeterministicAgentHarness {
     });
     await this.repository.updateThread(input.userId, thread.id, {
       status: "running",
-      title: thread.title === "新会话" ? input.message.slice(0, 14) : undefined,
+      ...(thread.title === "新会话" ? { title: input.message.slice(0, 14) } : {}),
     });
     const userMessage = await this.repository.appendMessage({
       ownerId: input.userId, threadId: thread.id, branchId: branch.id,
@@ -372,7 +372,7 @@ export class DeterministicAgentHarness {
         await this.repository.updateRun(args.userId, approval.runId, {
           status: "failed", completedAt: new Date().toISOString(),
         });
-        await this.repository.updateThread(args.userId, approval.threadId, { status: "failed" });
+        await this.repository.updateThread(args.userId, approval.threadId, { status: "idle" });
       }
       throw error;
     }
@@ -519,7 +519,7 @@ export class DeterministicAgentHarness {
     await this.repository.updateRun(userId, runId, {
       status: "failed", error, completedAt: new Date().toISOString(),
     });
-    await this.repository.updateThread(userId, threadId, { status: "failed" });
+    await this.repository.updateThread(userId, threadId, { status: "idle" });
     const message = await this.repository.updateMessage(userId, assistantId, {
       content,
       status: "failed",

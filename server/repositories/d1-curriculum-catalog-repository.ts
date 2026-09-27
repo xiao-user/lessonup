@@ -1,0 +1,30 @@
+import type { CurriculumCatalogReleaseRecord, CurriculumNodeMatch, CurriculumNodeRecord, CurriculumTextbookRecord } from "../domain.js";
+import { buildCurriculumFacets, buildCurriculumOutline, filterCurriculumTextbooks, searchCurriculumNodeRecords, type CurriculumFacets, type CurriculumTextbookFilter } from "../curriculum/catalog.js";
+import type { LessonRepository } from "../repository.js";
+import type { SqlDatabase } from "../platform/sql-database.js";
+
+type BookRow = Record<string, unknown>;
+type NodeRow = Record<string, unknown>;
+
+export type D1CurriculumCatalogStore = Pick<LessonRepository,
+  "getCurrentCurriculumCatalogRelease" | "getCurriculumCatalogRelease" | "listCurriculumFacets" |
+  "searchCurriculumTextbooks" | "getCurriculumTextbook" | "listCurriculumNodes" | "searchCurriculumNodes">;
+
+export class D1CurriculumCatalogRepository implements D1CurriculumCatalogStore {
+  constructor(private readonly database: SqlDatabase) {}
+  async getCurrentCurriculumCatalogRelease() { const result = await this.database.query<Record<string, unknown>>({ sql: `${releaseSelect} JOIN curriculum_catalog_current c ON c.catalog_release_id = r.id WHERE c.singleton = 1` }); return result.rows[0] ? release(result.rows[0]) : null; }
+  async getCurriculumCatalogRelease(releaseId: string) { const result = await this.database.query<Record<string, unknown>>({ sql: `${releaseSelect} WHERE r.id = ?`, params: [releaseId] }); return result.rows[0] ? release(result.rows[0]) : null; }
+  async listCurriculumFacets(): Promise<CurriculumFacets> { return buildCurriculumFacets(await this.books()); }
+  async searchCurriculumTextbooks(filter: CurriculumTextbookFilter = {}) { return filterCurriculumTextbooks(await this.books(), filter); }
+  async getCurriculumTextbook(textbookId: string, catalogReleaseId?: string) { const current = catalogReleaseId ?? (await this.getCurrentCurriculumCatalogRelease())?.id; if (!current) return null; const result = await this.database.query<BookRow>({ sql: `${bookSelect} WHERE catalog_release_id = ? AND id = ?`, params: [current, textbookId] }); return result.rows[0] ? book(result.rows[0]) : null; }
+  async listCurriculumNodes(args: { textbookId: string; catalogReleaseId?: string; parentId?: string | null; maxLevel?: number }) { const releaseId = args.catalogReleaseId ?? (await this.getCurrentCurriculumCatalogRelease())?.id; if (!releaseId) return []; const maxLevel = Math.min(Math.max(args.maxLevel ?? 3, 1), 8); const result = await this.database.query<NodeRow>({ sql: `${nodeSelect} WHERE catalog_release_id = ? AND textbook_id = ? AND level <= ? ORDER BY level, sort_no, node_id`, params: [releaseId, args.textbookId, maxLevel] }); return buildCurriculumOutline(result.rows.map(node), { parentId: args.parentId, maxLevel }); }
+  async searchCurriculumNodes(args: Parameters<LessonRepository["searchCurriculumNodes"]>[0]): Promise<CurriculumNodeMatch[]> { const releaseId = (await this.getCurrentCurriculumCatalogRelease())?.id; if (!releaseId || !args.query.trim()) return []; const books = await this.books(releaseId); const result = await this.database.query<NodeRow>({ sql: `${nodeSelect} WHERE catalog_release_id = ? ORDER BY textbook_id, level, sort_no, node_id`, params: [releaseId] }); return searchCurriculumNodeRecords({ textbooks: books, nodes: result.rows.map(node), ...args, limit: Math.min(Math.max(args.limit ?? 20, 1), 100) }); }
+  private async books(releaseId?: string) { const id = releaseId ?? (await this.getCurrentCurriculumCatalogRelease())?.id; if (!id) return []; const result = await this.database.query<BookRow>({ sql: `${bookSelect} WHERE catalog_release_id = ? ORDER BY title, id`, params: [id] }); return result.rows.map(book); }
+}
+const releaseSelect = "SELECT r.id, r.generation_id, r.status, r.snapshot_complete, r.manifest_json, r.textbook_count, r.node_count, r.created_at, r.published_at, r.retired_at FROM curriculum_catalog_releases r";
+const bookSelect = "SELECT id, catalog_release_id, title, stage, subject, edition, grade, volume, publisher_id, ebook_id, detail_url, tree_url, source_pdf_url, source_list_url, node_count, source_updated_at FROM curriculum_textbooks";
+const nodeSelect = "SELECT textbook_id, node_id, parent_id, level, sort_no, title, page_number FROM curriculum_nodes";
+const parse = <T>(value: unknown, fallback: T) => { try { return value ? JSON.parse(String(value)) as T : fallback; } catch { return fallback; } };
+const release = (row: Record<string, unknown>): CurriculumCatalogReleaseRecord => ({ id: String(row.id), generationId: String(row.generation_id), status: row.status as CurriculumCatalogReleaseRecord["status"], snapshotComplete: Boolean(row.snapshot_complete), manifest: parse(row.manifest_json, {}), textbookCount: Number(row.textbook_count), nodeCount: Number(row.node_count), createdAt: String(row.created_at), publishedAt: row.published_at ? String(row.published_at) : null, retiredAt: row.retired_at ? String(row.retired_at) : null });
+const book = (row: BookRow): CurriculumTextbookRecord => ({ id: String(row.id), title: String(row.title), stage: String(row.stage), subject: String(row.subject), edition: String(row.edition), grade: String(row.grade), volume: String(row.volume ?? ""), publisherId: String(row.publisher_id ?? ""), ebookId: row.ebook_id ? String(row.ebook_id) : null, detailUrl: row.detail_url ? String(row.detail_url) : null, treeUrl: row.tree_url ? String(row.tree_url) : null, sourcePdfUrl: row.source_pdf_url ? String(row.source_pdf_url) : null, sourceListUrl: row.source_list_url ? String(row.source_list_url) : null, nodeCount: Number(row.node_count ?? 0), sourceUpdatedAt: row.source_updated_at ? String(row.source_updated_at) : null });
+const node = (row: NodeRow): CurriculumNodeRecord => ({ textbookId: String(row.textbook_id), nodeId: String(row.node_id), parentId: row.parent_id ? String(row.parent_id) : null, level: Number(row.level), sortNo: Number(row.sort_no), title: String(row.title), pageNumber: row.page_number == null ? null : Number(row.page_number) });

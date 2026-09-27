@@ -51,6 +51,7 @@ const unavailable = new Set([
   "agent_not_configured",
   "knowledge_storage_not_configured",
   "knowledge_indexing_not_configured",
+  "presentation_renderer_unavailable",
 ]);
 
 const badRequest = new Set([

@@ -2,6 +2,12 @@ node_modules/
 server/agent/skills/dashi-ppt/project/node_modules/
 server/agent/skills/dashi-ppt/project/output/
 dist/
+server-dist/
+workflow-telemetry.json
+# These are shipped upstream export-engine files, not LessonUp build output.
+!server/agent/skills/dashi-ppt/project/packages/html-deck-to-pptx/dist/
+!server/agent/skills/dashi-ppt/project/packages/html-deck-to-pptx/dist/**
+.wrangler/
 .npm-cache/
 .playwright-cli/
 output/
@@ -12,6 +18,11 @@ supabase/.temp/
 .env
 .env.*
 !.env.example
+.dev.vars
+
+# Generated Dashi browser runtimes, theme media, and planning catalogs.
+public/dashi/**
+!public/dashi/README.txt
 
 # Local curriculum-standard source/OCR artifacts stay outside Git and Supabase Storage.
 data/curriculum/standards/inbox/*.pdf

@@ -4,18 +4,21 @@ import {
   type ClassroomPresentationGeneration,
   type DirectClassroomPresentationRecord,
 } from "./domain.js";
-import { NativeDashiPptSkill, type NativeDashiDeck } from "./native-dashi-skill.js";
 import { PresentationArtifactStorage } from "./storage.js";
-import type { DashiGoal } from "./dashi-goal.js";
+import { createHash } from "node:crypto";
+import { dashiGoalSchema, type DashiGoal } from "./dashi-goal.js";
+import type { DashiDeckWorkspace, NativeDashiDeck } from "./dashi-skill-port.js";
+import type { ObjectStorage } from "../platform/object-storage.js";
+import { browserDeckToGoal, goalToBrowserDeck, type BrowserDeck } from "../../src/lib/dashi-browser/goal-to-deck.js";
 
 export class PresentationService {
   private readonly artifacts: PresentationArtifactStorage;
   private readonly previewUrls = new Map<string, string>();
   constructor(
     private readonly repository: LessonRepository,
-    private readonly nativeDashi: Pick<NativeDashiPptSkill, "open" | "remove" | "hasDeck" | "exportBundle" | "importBundle"> = new NativeDashiPptSkill(),
-    artifacts = new PresentationArtifactStorage(),
-  ) { this.artifacts = artifacts; }
+    private readonly nativeDashi: DashiDeckWorkspace,
+    storage: ObjectStorage | null = null,
+  ) { this.artifacts = new PresentationArtifactStorage(storage); }
 
   /**
    * Persist the approved, preflighted Dashi goal before deterministic rendering.
@@ -31,11 +34,16 @@ export class PresentationService {
     | { generation: ClassroomPresentationGeneration; presentationId: string }
   > {
     const input = approvedPresentationGoalRequestSchema.parse(rawInput);
+    // An idempotent retry acknowledges the artifact already committed by the
+    // original approval. It must not be invalidated by later document edits.
+    const existing = await this.repository.findClassroomPresentationByRequest(ownerId, idempotencyKey);
+    if (existing) {
+      if (existing.lessonFileId !== lessonFileId) throw new Error("presentation_source_scope_invalid");
+      return { presentation: existing };
+    }
     const file = await this.repository.getLessonFile(ownerId, lessonFileId);
     if (!file) throw new Error("lesson_file_not_found");
     if (file.documentVersion !== input.expectedDocumentVersion) throw new Error("stale_document");
-    const existing = await this.repository.findClassroomPresentationByRequest(ownerId, idempotencyKey);
-    if (existing) return { presentation: existing };
     const notebook = await this.repository.getNotebook(ownerId, file.notebookId);
     if (!notebook) throw new Error("presentation_source_scope_invalid");
     const started = await this.repository.beginClassroomPresentationGeneration(
@@ -80,21 +88,16 @@ export class PresentationService {
       updatedAt: timestamp,
     };
     const saved = await this.repository.saveClassroomPresentation(presentation)
-      .catch((error) => { throw stagedPresentationError("presentation_metadata_save_failed", error); });
-    const previous = await this.repository.listClassroomPresentations(
-      generation.ownerId,
-      generation.lessonFileId,
-    );
-    await Promise.all(previous
-      .filter((item) => item.id !== saved.id)
-      .map(async (item) => {
+      .catch(async (error) => {
         if (this.artifacts.configured) {
-          await this.artifacts.remove(generation.ownerId, item.id, item.storageKey).catch(() => undefined);
+          await this.artifacts.remove(generation.ownerId, presentationId, stored.storageKey).catch(() => undefined);
         }
-        await this.repository.deleteClassroomPresentation(generation.ownerId, item.id).catch(() => undefined);
-        this.previewUrls.delete(item.id);
-        await this.nativeDashi.remove(item.id).catch(() => undefined);
-      }));
+        await this.nativeDashi.remove(presentationId).catch(() => undefined);
+        throw stagedPresentationError("presentation_metadata_save_failed", error);
+      });
+    // Saving the artifact and settling its generation are the delivery path.
+    // Pruning superseded decks is housekeeping and must not turn a successful
+    // library commit into a teacher-visible failure.
     await this.repository.completeClassroomPresentationGeneration({
       ownerId: generation.ownerId,
       generationId: generation.id,
@@ -102,7 +105,22 @@ export class PresentationService {
       completedAt: timestamp,
       durationMs: this.generationDuration(generation.startedAt, timestamp),
     });
+    await this.pruneSupersededPresentations(saved).catch(() => undefined);
     return saved;
+  }
+
+  private async pruneSupersededPresentations(saved: DirectClassroomPresentationRecord) {
+    const previous = await this.repository.listClassroomPresentations(saved.ownerId, saved.lessonFileId);
+    await Promise.all(previous
+      .filter((item) => item.id !== saved.id)
+      .map(async (item) => {
+        if (this.artifacts.configured) {
+          await this.artifacts.remove(saved.ownerId, item.id, item.storageKey).catch(() => undefined);
+        }
+        await this.repository.deleteClassroomPresentation(saved.ownerId, item.id).catch(() => undefined);
+        this.previewUrls.delete(item.id);
+        await this.nativeDashi.remove(item.id).catch(() => undefined);
+      }));
   }
 
   async failApprovedGoalGeneration(
@@ -208,17 +226,80 @@ export class PresentationService {
     };
   }
 
+  /**
+   * Persist browser edits back into the D1-canonical Dashi goal. The checksum is
+   * an optimistic concurrency boundary: two tabs can never silently overwrite
+   * one another, and the browser is not allowed to change the approved theme,
+   * layout sequence, or slide count through this state endpoint.
+   */
+  async saveBrowserDeck(
+    ownerId: string,
+    presentationId: string,
+    input: { expectedChecksum: string; deck: unknown },
+  ) {
+    const current = await this.repository.getClassroomPresentation(ownerId, presentationId);
+    if (!current?.dashiGoal || current.delivery !== "native-dashi") {
+      throw new Error(current ? "presentation_native_deck_missing" : "presentation_not_found");
+    }
+    if (current.checksum !== input.expectedChecksum) throw new Error("presentation_edit_conflict");
+    await this.ensureNativeWorkspace(current);
+    const goal = dashiGoalSchema.parse(browserDeckToGoal(
+      input.deck as Parameters<typeof browserDeckToGoal>[0],
+      current.dashiGoal,
+    ));
+    const checksum = createHash("sha256").update(JSON.stringify({ goal, deck: input.deck })).digest("hex");
+    if (checksum === current.checksum) return current;
+    let stored: { storageKey: string; byteSize: number } | null = null;
+    if (this.artifacts.configured) {
+      stored = await this.artifacts.saveRevision(
+        ownerId,
+        presentationId,
+        await this.nativeDashi.exportBundle(presentationId, { goal, deck: input.deck as BrowserDeck }),
+      );
+    }
+    const saved = await this.repository.updateClassroomPresentationGoal({
+      ownerId,
+      presentationId,
+      expectedChecksum: input.expectedChecksum,
+      goal,
+      checksum,
+      updatedAt: new Date().toISOString(),
+      artifact: stored ?? undefined,
+    });
+    // Do not delete staged objects on an uncertain database response: the CAS
+    // may already have committed. Unreferenced revisions can be collected later.
+    return saved;
+  }
+
+  async getBrowserDeck(ownerId: string, presentationId: string) {
+    const presentation = await this.repository.getClassroomPresentation(ownerId, presentationId);
+    if (!presentation?.dashiGoal || presentation.delivery !== "native-dashi") {
+      throw new Error(presentation ? "presentation_native_deck_missing" : "presentation_not_found");
+    }
+    await this.ensureNativeWorkspace(presentation, true);
+    const deck = await this.nativeDashi.getBrowserDeck?.(presentationId);
+    return deck ?? goalToBrowserDeck(presentation.dashiGoal, { id: presentationId, title: presentation.title });
+  }
+
+  private async ensureNativeWorkspace(presentation: DirectClassroomPresentationRecord, refresh = false) {
+    if ((!refresh || !this.artifacts.configured) && await this.nativeDashi.hasDeck(presentation.id)) return;
+    if (!this.artifacts.configured) throw new Error("presentation_native_deck_missing");
+    await this.nativeDashi.importBundle(
+      presentation.id,
+      await this.artifacts.load(presentation.ownerId, presentation.id, presentation.storageKey),
+    );
+  }
+
   async createAccess(ownerId: string, presentationId: string) {
     const presentation = await this.repository.getClassroomPresentation(ownerId, presentationId);
     if (!presentation) throw new Error("presentation_not_found");
     if (presentation.delivery !== "native-dashi" || !presentation.dashiGoal) {
       throw new Error("presentation_native_deck_missing");
     }
-    const url = await this.previewUrlFor(presentation);
     return {
-      url,
+      url: `/classroom-presentations/${presentation.id}`,
       expiresInSeconds: 0,
-      mediaType: presentation.mediaType,
+      mediaType: "text/html; charset=utf-8",
       filename: "index.html",
     };
   }
@@ -239,13 +320,7 @@ export class PresentationService {
   async previewUrlFor(presentation: DirectClassroomPresentationRecord) {
     const active = this.previewUrls.get(presentation.id);
     if (active) return active;
-    if (!await this.nativeDashi.hasDeck(presentation.id)) {
-      if (!this.artifacts.configured) throw new Error("presentation_native_deck_missing");
-      await this.nativeDashi.importBundle(
-        presentation.id,
-        await this.artifacts.load(presentation.ownerId, presentation.id, presentation.storageKey),
-      );
-    }
+    await this.ensureNativeWorkspace(presentation);
     const url = await this.nativeDashi.open(presentation.id);
     this.previewUrls.set(presentation.id, url);
     return url;

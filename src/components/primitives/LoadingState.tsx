@@ -1,7 +1,5 @@
 "use client";
 
-import { useEffect, useState } from "react";
-
 const dotDelays = Array.from({ length: 9 }, (_, index) => {
   const row = Math.floor(index / 3);
   const column = index % 3;
@@ -22,20 +20,12 @@ function LoaderGrid() {
   );
 }
 
-function useElapsed() {
-  const [deciseconds, setDeciseconds] = useState(0);
-  useEffect(() => {
-    const timer = setInterval(() => setDeciseconds((value) => value + 1), 100);
-    return () => clearInterval(timer);
-  }, []);
-
-  const total = deciseconds / 10;
-  return total < 60 ? `${total.toFixed(1)}s` : `${Math.floor(total / 60)}m ${(total % 60).toFixed(1)}s`;
-}
-
-/** Native Beautiful UI loading treatment used before Pi emits its first public event. */
-export default function LoadingState({ label = "Churning" }: { label?: string }) {
-  const elapsed = useElapsed();
+/** Live thinking / responding phase. Duration belongs on ThinkingTrace. */
+export default function LoadingState({
+  label = "正在处理请求",
+}: {
+  label?: string;
+}) {
   return (
     <div role="status" className="flex w-fit items-center gap-2.5">
       <LoaderGrid />
@@ -49,7 +39,6 @@ export default function LoadingState({ label = "Churning" }: { label?: string })
       >
         {label}
       </span>
-      <span className="font-mono text-[12px] text-ink-3 tabular-nums">{elapsed}</span>
     </div>
   );
 }

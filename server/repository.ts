@@ -39,6 +39,8 @@ import type {
   LessonClassFeedbackRecord,
   LessonDesignBasisAggregate,
   LessonDesignBasisPatch,
+  LessonGenerationIntentRecord,
+  SemesterFrameworkWritebackIntentRecord,
   LessonFileRecord,
   LessonContextProfile,
   LessonPlan,
@@ -58,6 +60,7 @@ import type {
   ClassroomPresentationGeneration,
   DirectClassroomPresentationRecord,
 } from "./presentations/domain.js";
+import type { DashiGoal } from "./presentations/dashi-goal.js";
 
 export type ImportedNotebook = Omit<
   NotebookRecord,
@@ -78,6 +81,24 @@ export type ImportedNotebook = Omit<
   }>;
 };
 
+export type ConversationSnapshot = {
+  schemaVersion: 1;
+  capturedAt: string;
+  aggregateVersion: string;
+  thread: AgentThreadRecord;
+  branch: AgentBranchRecord;
+  branches: AgentBranchRecord[];
+  messages: AgentMessageRecord[];
+  latestRun: AgentRunRecord | null;
+  events: NormalizedAgentEvent[];
+  throughSequence: number;
+  approvals: AgentApprovalRecord[];
+};
+
+export type LessonFileContextRecord = Pick<LessonFileRecord,
+  "id" | "ownerId" | "notebookId" | "documentVersion" | "contextProfile"
+>;
+
 export type CreateThreadInput = { notebookId: string; title?: string } & (
   | { resourceType?: "lesson_file"; lessonFileId: string; semesterFrameworkId?: never }
   | { resourceType: "semester_framework"; lessonFileId?: never; semesterFrameworkId: string }
@@ -87,6 +108,8 @@ export type CreateThreadInput = { notebookId: string; title?: string } & (
  * Provider-neutral storage boundary for runtimes that own their full protocol
  * transcript. Pi snapshots use their own canonical store instead of the
  * legacy provider-session table because the protocols are not wire compatible.
+ * D1 stores the protocol as append-only sequence rows; the session header
+ * holds only the CAS revision. Callers still submit the desired prefix.
  */
 export type AgentRuntimeName = "pi";
 
@@ -128,6 +151,8 @@ export interface LessonRepository {
     contextProfile?: LessonContextProfile;
     lessonBlueprintId?: string;
     pageCount: number;
+    /** Persisted with the new lesson aggregate; never held only in React. */
+    initialAgentPrompt?: string;
   }, idempotencyKey?: string): Promise<LessonFileRecord>;
   updateLessonFile(ownerId: string, fileId: string, patch: Partial<Pick<
     LessonFileRecord,
@@ -135,6 +160,23 @@ export interface LessonRepository {
   >>): Promise<LessonFileRecord>;
   deleteLessonFile(ownerId: string, fileId: string): Promise<void>;
   getLessonFile(ownerId: string, fileId: string): Promise<LessonFileRecord | null>;
+  getLessonFileContext(ownerId: string, fileId: string): Promise<LessonFileContextRecord | null>;
+  getPendingLessonGenerationIntent(
+    ownerId: string,
+    lessonFileId: string,
+  ): Promise<LessonGenerationIntentRecord | null>;
+  enqueueLessonGenerationIntent(input: {
+    ownerId: string;
+    lessonFileId: string;
+    prompt: string;
+    idempotencyKey: string;
+  }): Promise<LessonGenerationIntentRecord>;
+  claimLessonGenerationIntent(input: {
+    ownerId: string;
+    lessonFileId: string;
+    intentId: string;
+    runId: string;
+  }): Promise<LessonGenerationIntentRecord>;
   saveLessonDocument(args: {
     ownerId: string;
     fileId: string;
@@ -200,6 +242,15 @@ export interface LessonRepository {
     byteSize: number;
     updatedAt: string;
   }): Promise<DirectClassroomPresentationRecord>;
+  updateClassroomPresentationGoal(args: {
+    ownerId: string;
+    presentationId: string;
+    expectedChecksum: string;
+    goal: DashiGoal;
+    checksum: string;
+    updatedAt: string;
+    artifact?: { storageKey: string; byteSize: number };
+  }): Promise<DirectClassroomPresentationRecord>;
   deleteClassroomPresentation(ownerId: string, presentationId: string): Promise<void>;
   beginClassroomPresentationGeneration(
     generation: ClassroomPresentationGeneration,
@@ -236,6 +287,7 @@ export interface LessonRepository {
   ): Promise<AgentThreadRecord[]>;
   createThread(ownerId: string, input: CreateThreadInput, idempotencyKey?: string): Promise<{ thread: AgentThreadRecord; branch: AgentBranchRecord }>;
   getThread(ownerId: string, threadId: string): Promise<AgentThreadRecord | null>;
+  getConversationSnapshot(ownerId: string, threadId: string, branchId: string): Promise<ConversationSnapshot | null>;
   updateThread(ownerId: string, threadId: string, patch: Partial<Pick<
     AgentThreadRecord,
     "title" | "archivedAt" | "deletedAt" | "status" | "starterSuggestions"
@@ -257,7 +309,17 @@ export interface LessonRepository {
   >>): Promise<AgentMessageRecord>;
 
   createRun(input: Omit<AgentRunRecord, "startedAt"> & { startedAt?: string }): Promise<AgentRunRecord>;
+  createRunWithInitialMessages(input: {
+    run: AgentRunRecord;
+    userMessage?: AgentMessageRecord;
+    assistantMessage: AgentMessageRecord;
+  }): Promise<{
+    run: AgentRunRecord;
+    userMessage?: AgentMessageRecord;
+    assistantMessage: AgentMessageRecord;
+  }>;
   getRun(ownerId: string, runId: string): Promise<AgentRunRecord | null>;
+  getRunByClientCommand(ownerId: string, threadId: string, clientCommandId: string): Promise<AgentRunRecord | null>;
   getLatestRun(ownerId: string, threadId: string, branchId: string): Promise<AgentRunRecord | null>;
   getLatestCompletedRun(ownerId: string, threadId: string, branchId: string): Promise<AgentRunRecord | null>;
   updateRun(ownerId: string, runId: string, patch: Partial<AgentRunRecord>): Promise<AgentRunRecord>;
@@ -366,6 +428,7 @@ export interface LessonRepository {
     runtime: AgentRuntimeName;
     expectedRevision: number;
     messages: unknown[];
+    rewriteFrom?: number;
   }): Promise<AgentRuntimeSessionSnapshot>;
   getThreadMemory(ownerId: string, threadId: string, branchId: string): Promise<{ summary: string; cursor: number } | null>;
   saveThreadMemory(ownerId: string, threadId: string, branchId: string, summary: string, cursor: number): Promise<void>;
@@ -472,6 +535,22 @@ export interface LessonRepository {
       semesterFrameworkId?: string;
     },
   ): Promise<LessonClassFeedbackRecord[]>;
+  getPendingSemesterFrameworkWritebackIntent(
+    ownerId: string,
+    frameworkId: string,
+  ): Promise<SemesterFrameworkWritebackIntentRecord | null>;
+  enqueueSemesterFrameworkWritebackIntent(input: {
+    ownerId: string;
+    frameworkId: string;
+    feedbackId: string;
+    prompt: string;
+  }): Promise<SemesterFrameworkWritebackIntentRecord>;
+  claimSemesterFrameworkWritebackIntent(input: {
+    ownerId: string;
+    frameworkId: string;
+    intentId: string;
+    runId: string;
+  }): Promise<SemesterFrameworkWritebackIntentRecord>;
 
   getCurrentCurriculumCatalogRelease(): Promise<CurriculumCatalogReleaseRecord | null>;
   getCurriculumCatalogRelease(releaseId: string): Promise<CurriculumCatalogReleaseRecord | null>;

@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { OfficeConverter, type OfficeChunk, type SupportedFileType } from "officeparser";
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { config, hasSupabase } from "../config.js";
-import { BgeM3EmbeddingProvider } from "../providers/embeddings.js";
+import { config } from "../config.js";
+import { ConfiguredEmbeddingProvider } from "../providers/embeddings.js";
+import type { ObjectStorage } from "../platform/object-storage.js";
+import { D1KnowledgeSourceStore, type KnowledgeIndexQueue } from "./source-store.js";
 
 type KnowledgeSourceRow = {
   id: string;
@@ -15,7 +16,7 @@ type KnowledgeSourceRow = {
   storage_key: string | null;
   source_version: number;
   metadata: Record<string, unknown> | null;
-  worker_id: string;
+  worker_id: string | null;
 };
 
 type IndexedChunk = {
@@ -127,26 +128,27 @@ export async function withAbortTimeout<T>(
 }
 
 export class KnowledgeIndexWorker {
-  private readonly client: SupabaseClient | null;
-  private readonly embeddings = new BgeM3EmbeddingProvider();
+  private readonly storage: ObjectStorage | null;
+  private readonly queue: KnowledgeIndexQueue | null;
+  private readonly embeddings = new ConfiguredEmbeddingProvider();
   private readonly workerId = crypto.randomUUID();
   private active = false;
   private stopped = false;
 
-  constructor() {
-    this.client = hasSupabase && config.BGE_M3_BASE_URL
-      ? createClient(config.SUPABASE_URL!, config.SUPABASE_SERVICE_ROLE_KEY!, {
-          auth: { autoRefreshToken: false, persistSession: false },
-        })
-      : null;
+  constructor(
+    objectStorage?: ObjectStorage | null,
+    queue?: KnowledgeIndexQueue | null,
+  ) {
+    this.queue = queue ?? null;
+    this.storage = objectStorage ?? null;
   }
 
   get configured() {
-    return Boolean(this.client);
+    return Boolean(this.queue && this.storage);
   }
 
   start() {
-    if (!this.client) return () => undefined;
+    if (!this.queue || !this.storage) return () => undefined;
     this.stopped = false;
     const tick = async () => {
       if (this.stopped || this.active) return;
@@ -168,12 +170,8 @@ export class KnowledgeIndexWorker {
   }
 
   async processNext() {
-    if (!this.client) return false;
-    const claimed = await this.client.rpc("claim_knowledge_source", {
-      p_worker_id: this.workerId,
-    });
-    if (claimed.error) throw new Error(claimed.error.message);
-    const source = (Array.isArray(claimed.data) ? claimed.data[0] : claimed.data) as KnowledgeSourceRow | undefined;
+    if (!this.queue || !this.storage) return false;
+    const source = await this.queue.claim(this.workerId, new Date().toISOString(), leaseExpiresAt());
     if (!source?.id) return false;
     try {
       await this.index(source);
@@ -185,10 +183,12 @@ export class KnowledgeIndexWorker {
   }
 
   private async index(source: KnowledgeSourceRow) {
-    if (!this.client || !source.storage_key) throw new Error("knowledge_source_file_missing");
-    const download = await this.client.storage.from("knowledge-private").download(source.storage_key);
-    if (download.error) throw new Error(`knowledge_download_failed:${download.error.message}`);
-    const bytes = await download.data.arrayBuffer();
+    if (!this.storage || !source.storage_key) throw new Error("knowledge_source_file_missing");
+    const download = await this.storage.get(source.storage_key);
+    if (!download) throw new Error("knowledge_source_file_missing");
+    // Copy into an ArrayBuffer so Node's office parser and the Workers-safe
+    // storage port do not leak SharedArrayBuffer assumptions across runtimes.
+    const bytes = new Uint8Array(download.body).slice().buffer as ArrayBuffer;
     const parsed = await withAbortTimeout(
       (signal) => parseKnowledgeBytes(source.media_type, bytes, signal),
       parseTimeoutMs,
@@ -196,7 +196,7 @@ export class KnowledgeIndexWorker {
     if (parsed.chunks.length === 0) throw new Error("knowledge_source_empty");
     if (parsed.chunks.length > maxChunksPerSource) throw new Error("knowledge_source_too_many_chunks");
 
-    const indexVersion = `bge-m3:${config.BGE_M3_MODEL}:v1:${parserVersion}:source-${source.source_version}`;
+    const indexVersion = `embedding:${config.EMBEDDING_MODEL}:v1:${parserVersion}:source-${source.source_version}`;
     for (let index = 0; index < parsed.chunks.length; index += 16) {
       await this.heartbeat(source.id);
       const batch = parsed.chunks.slice(index, index + 16);
@@ -213,39 +213,25 @@ export class KnowledgeIndexWorker {
           embedding: vectors[batchIndex],
         };
       });
-      const staged = await this.client.rpc("stage_knowledge_chunk_batch", {
-        p_source_id: source.id,
-        p_worker_id: this.workerId,
-        p_index_version: indexVersion,
-        p_chunks: rows,
-      });
-      if (staged.error) throw new Error(staged.error.message);
+      await this.queue!.stage(source.id, this.workerId, indexVersion, rows.map((row) => ({
+        stableChunkId: row.stable_chunk_id, section: row.section, page: row.page,
+        passage: row.passage, adjacentBefore: row.adjacent_before,
+        adjacentAfter: row.adjacent_after, embedding: row.embedding,
+      })), new Date().toISOString());
     }
 
     await this.heartbeat(source.id);
-    const published = await this.client.rpc("publish_staged_knowledge_index", {
-      p_source_id: source.id,
-      p_worker_id: this.workerId,
-      p_index_version: indexVersion,
-      p_expected_count: parsed.chunks.length,
-      p_metadata: {
-        ...(source.metadata ?? {}),
-        chunkCount: parsed.chunks.length,
-        parserVersion,
-        parserWarnings: parsed.warnings,
-        indexedAt: new Date().toISOString(),
-      },
-    });
-    if (published.error) throw new Error(published.error.message);
+    const metadata = {
+      ...(source.metadata ?? {}), chunkCount: parsed.chunks.length, parserVersion,
+      parserWarnings: parsed.warnings, indexedAt: new Date().toISOString(),
+    };
+    await this.queue!.publish(source.id, this.workerId, indexVersion, parsed.chunks.length, metadata, new Date().toISOString());
   }
 
   private async heartbeat(sourceId: string) {
-    if (!this.client) return;
-    const result = await this.client.rpc("heartbeat_knowledge_source", {
-      p_source_id: sourceId,
-      p_worker_id: this.workerId,
-    });
-    if (result.error) throw new Error(result.error.message);
+    if (!this.queue) return;
+    const now = new Date().toISOString();
+    await this.queue.heartbeat(sourceId, this.workerId, now, leaseExpiresAt(now));
   }
 
   private async embedWithRetry(passages: string[]) {
@@ -270,13 +256,10 @@ export class KnowledgeIndexWorker {
   }
 
   private async fail(source: KnowledgeSourceRow, error: string) {
-    if (!this.client) return;
-    const message = error.slice(0, 500);
-    const result = await this.client.rpc("fail_knowledge_source", {
-      p_source_id: source.id,
-      p_worker_id: this.workerId,
-      p_error: message,
-    });
-    if (result.error) throw new Error(result.error.message);
+    await this.queue?.fail(source.id, this.workerId, error, new Date().toISOString());
   }
+}
+
+function leaseExpiresAt(now = new Date().toISOString()) {
+  return new Date(Date.parse(now) + 15 * 60 * 1_000).toISOString();
 }

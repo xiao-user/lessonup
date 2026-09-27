@@ -10,8 +10,8 @@
    `<PDF文件名>_by_PaddleOCR-VL-1.6.json`。
 3. 执行 `npm run curriculum:standards:normalize`，按标题层级、条款、段落和表格生成稳定切片。
 4. 执行 `npm run curriculum:standards:validate`，校验所有规范化文档、页码范围、哈希和切片。
-5. 确认 `.env` 中的 `BGE_M3_BASE_URL` 是获准处理课标正文的服务后，执行
-   `npm run curriculum:standards:import` 生成 BGE-M3 向量并写入 Supabase 草稿版本。
+5. 确认 `.env` 中的 `EMBEDDING_BASE_URL` 是获准处理课标正文的服务后，执行
+   `npm run curriculum:standards:import` 生成配置的嵌入向量并写入 Supabase 草稿版本。
 6. 执行 `npm run curriculum:standards:status`；所有 17 份文档均为 `ready` 后，执行
    `npm run curriculum:standards:publish` 原子发布整个版本。
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { gradePerformance, resolvePerformanceBudget } from "./performance.js";
+import { gradePerformance, isSafePublicEvent, resolvePerformanceBudget } from "./performance.js";
 
 const environment = {
   LESSONUP_EVAL_ENFORCE_PERFORMANCE_BUDGET: "1",
@@ -25,10 +25,13 @@ describe("agent eval performance budget", () => {
     const budget = resolvePerformanceBudget(environment)!;
     expect(gradePerformance({
       durationMs: 30001,
+      firstSafeEventMs: null,
+      firstProviderEventMs: null,
       firstOutputMs: null,
       modelRequests: 5,
       toolCalls: 7,
       inputTokens: null,
+      cachedInputTokens: null,
     }, budget)).toEqual([
       "performance_duration_exceeded",
       "performance_first_output_exceeded",
@@ -42,10 +45,20 @@ describe("agent eval performance budget", () => {
     const budget = resolvePerformanceBudget(environment)!;
     expect(gradePerformance({
       durationMs: 30000,
+      firstSafeEventMs: 500,
+      firstProviderEventMs: 700,
       firstOutputMs: 8000,
       modelRequests: 4,
       toolCalls: 6,
       inputTokens: 24000,
+      cachedInputTokens: 12000,
     }, budget)).toEqual([]);
+  });
+
+  it("recognizes browser-safe milestones without mistaking internal events for progress", () => {
+    expect(isSafePublicEvent("agent.started")).toBe(true);
+    expect(isSafePublicEvent("tool.started")).toBe(true);
+    expect(isSafePublicEvent("message.delta")).toBe(true);
+    expect(isSafePublicEvent("agent.private_reasoning")).toBe(false);
   });
 });

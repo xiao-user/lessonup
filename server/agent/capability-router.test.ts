@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 
+import { createNodeSkillRegistry } from "./skill-registry-node.js";
 import {
   deterministicCapabilityPlan,
   documentWriteMode,
   enforceRequiredCapabilities,
   hasDeterministicRoutingSignal,
   isConversationalControlMessage,
+  isFastChatTurn,
+  isFastFollowUpMessage,
   requiresDocumentWrite,
   requestedDocumentFieldsFor,
   routeCapabilities,
@@ -16,6 +19,7 @@ describe("enforceRequiredCapabilities", () => {
     for (const message of ["好", "好的", "没问题", "收到", "OK", "Thanks", "Thank you", "Got it"]) {
       expect(deterministicCapabilityPlan(message), message).toMatchObject({
         lightweightConversation: true,
+        executionLane: "fast",
         presentationRequested: false,
         skillIds: [],
         toolGroups: [],
@@ -116,6 +120,11 @@ describe("enforceRequiredCapabilities", () => {
     expect(requiresDocumentWrite("先判断当前教案是否需要调整，不要写入")).toBe(false);
     expect(requiresDocumentWrite("重新编写教案")).toBe(true);
     expect(requiresDocumentWrite("重新整理当前教案")).toBe(true);
+    expect(requiresDocumentWrite("好的，请按上面的方案调整教案")).toBe(true);
+    expect(requiresDocumentWrite("就按刚才的建议完善一下")).toBe(true);
+    expect(requiresDocumentWrite("把这些建议落实到教学过程")).toBe(true);
+    expect(requiresDocumentWrite("给我列出三条优化建议")).toBe(false);
+    expect(requiresDocumentWrite("为什么要修改教学过程？")).toBe(false);
   });
 
   it("separates broad read context from the teacher's narrow write targets", () => {
@@ -149,6 +158,7 @@ describe("enforceRequiredCapabilities", () => {
     expect(documentWriteMode("提交最小修改建议，等待我确认后再写入")).toBe("explicit");
     expect(documentWriteMode("请把模板教案转化为具体设计，生成一次确认项")).toBe("explicit");
     expect(documentWriteMode("未经我批准不要写入，最后只生成一次完整备课调整确认项")).toBe("explicit");
+    expect(documentWriteMode("好的，请按上面的方案调整教案")).toBe("explicit");
     expect(documentWriteMode("继续")).toBe("open");
   });
 
@@ -194,6 +204,78 @@ describe("enforceRequiredCapabilities", () => {
       evidenceRequired: true,
       requiredEvidenceKinds: ["curriculum_standard_search"],
     });
+    for (const message of ["重新编写教案", "请把当前模板教案重编为具体教案"]) {
+      expect(deterministicCapabilityPlan(message), message).toMatchObject({
+        writeMode: "explicit",
+        fullRewriteRequested: true,
+        skillIds: ["lesson-full-authoring"],
+      });
+    }
+  });
+
+  it("answers a rewrite deliberation instead of routing it to the authoring path", () => {
+    for (const message of [
+      "先判断这份教案是否需要重新编写",
+      "不要写入，只分析整份教案要不要重编",
+      "请先只做分析：整份教案重写是否值得",
+      "你认为需要重新整理当前教案吗？",
+      "要不要重新编写整份教案？",
+    ]) {
+      expect(deterministicCapabilityPlan(message), message).toMatchObject({
+        writeMode: "consultative",
+        fullRewriteRequested: true,
+        // The authoring skill requires propose_document_patch, which a
+        // consultative turn never creates. Selecting it here used to fail the
+        // run before the model was called.
+        skillIds: [],
+        evidenceRequired: false,
+      });
+    }
+  });
+
+  it("reads one deliberation vocabulary across write detection and write mode", () => {
+    // “整理/重编/编写/改写” are write verbs for detection, so they must also be
+    // recognized as deliberation when a teacher only asks whether to apply them.
+    for (const message of [
+      "你认为需要重新整理当前教案吗？",
+      "要不要重新编写整份教案？",
+      "这份教案该不该整理一遍？",
+      "你觉得教学过程值得改写吗？",
+    ]) {
+      expect(requiresDocumentWrite(message), message).toBe(false);
+      expect(documentWriteMode(message), message).toBe("consultative");
+    }
+    for (const message of [
+      "请优化教学目标并提交修改",
+      "按照这些内容重新更改教学重点难点",
+      "重新编写教案",
+      "重新整理当前教案",
+    ]) {
+      expect(requiresDocumentWrite(message), message).toBe(true);
+      expect(documentWriteMode(message), message).toBe("explicit");
+    }
+  });
+
+  it("never pairs a skill's required write tool with a turn that forbids it", async () => {
+    const registry = await createNodeSkillRegistry().load();
+    for (const message of [
+      "先判断这份教案是否需要重新编写",
+      "你认为需要重新整理当前教案吗？",
+      "要不要重新编写整份教案？",
+      "重新整理当前教案",
+      "请优化教学目标并提交修改",
+      "你认为现在还有哪些需要调整和优化？",
+      "请检查教学目标与重点",
+      "本课与课程标准中的哪些内容要求相关？不要修改教案。",
+    ]) {
+      const plan = deterministicCapabilityPlan(message);
+      const requiredTools = registry.resolve(plan.skillIds).flatMap((skill) => skill.requiredTools);
+      // Mirrors the single authority decision in PiLessonAgentCoordinator:
+      // the document proposal tool exists only outside a consultative turn.
+      if (plan.writeMode === "consultative") {
+        expect(requiredTools, message).not.toContain("propose_document_patch");
+      }
+    }
   });
 
   it("uses a bound blueprint as upstream context without relying on prompt keywords", () => {
@@ -209,6 +291,7 @@ describe("enforceRequiredCapabilities", () => {
   it("routes dismissal and thanks to the lightweight no-tool conversation path", () => {
     expect(deterministicCapabilityPlan("暂时不需要")).toMatchObject({
       lightweightConversation: true,
+      executionLane: "fast",
       writeMode: "consultative",
       toolGroups: [],
       specialistAgents: [],
@@ -216,7 +299,23 @@ describe("enforceRequiredCapabilities", () => {
     });
     expect(deterministicCapabilityPlan("可以")).toMatchObject({
       lightweightConversation: false,
+      executionLane: "agent",
     });
+  });
+
+  it("sends short clarifying follow-ups through Fast chat, not the Agent prefix", () => {
+    expect(deterministicCapabilityPlan("刚才那句是什么意思？")).toMatchObject({
+      executionLane: "fast",
+      lightweightConversation: false,
+      writeMode: "consultative",
+      toolGroups: [],
+      skillIds: [],
+    });
+    expect(isFastFollowUpMessage("为什么？")).toBe(true);
+    expect(isFastChatTurn("好的 谢谢")).toBe(true);
+    expect(isFastFollowUpMessage("教学过程写得怎么样？")).toBe(false);
+    expect(deterministicCapabilityPlan("教学过程写得怎么样？").executionLane).toBe("agent");
+    expect(deterministicCapabilityPlan("请修改教学过程").executionLane).toBe("agent");
   });
 
   it("does not send the curriculum catalog tool surface on unrelated turns", () => {

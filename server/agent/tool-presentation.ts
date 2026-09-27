@@ -215,31 +215,38 @@ export function safeToolDetail(name: string, rawArguments?: unknown): string {
     return "读取学期框架与相关课堂信息，核对课时安排和学习连续性。";
   }
   if (/source|knowledge|passage|search_web|open_web/.test(name)) {
-    return "读取与当前任务相关的资料，并将可用证据返回给 Pi。";
+    return "读取与当前任务相关的资料，作为后续分析依据。";
   }
-  return "使用已授权的备课能力处理当前任务，并将结果返回给 Pi。";
+  return "使用已授权的备课能力处理当前任务。";
 }
 
-/** A completion summary derived only from the public tool identity and terminal state. */
+/**
+ * Completion copy for the teacher-visible chip.
+ *
+ * Pi's own contract is `label` plus optional structured `details` — it does
+ * not prescribe a post-tool narration. Claude / Cursor / Beautiful UI ToolChips
+ * likewise keep the factual start description and let the status badge speak.
+ * Do not invent “the agent will continue” sentences or name the runtime.
+ */
 export function safeToolCompletionDetail(
   name: string,
   label: string,
   isError = false,
+  startedDetail?: string,
 ): string {
   if (isError) {
     if (name.startsWith("propose_")) {
-      return "修改建议未通过预检，Pi 可根据返回的问题在本轮继续调整。";
+      return "修改建议未通过预检，可在本轮根据问题继续调整。";
     }
-    return `${label}未完成，错误状态已返回 Pi 处理。`;
-  }
-  if (/^read_|^search_|^lookup_|^get_|^open_|^trace_/.test(name)) {
-    return `${label}已完成，Pi 将基于读取到的当前信息继续处理。`;
+    return `${label}未完成。`;
   }
   if (name.startsWith("propose_")) {
     return "修改建议已通过预检，并生成了等待教师确认的可见变更。";
   }
-  if (name === "curriculum_analysis" || name === "learning_design" || name === "assessment" || name === "critic") {
-    return `${label}已完成，结果已返回可见 Agent 继续组织本轮回复。`;
-  }
-  return `${label}已完成，结果已返回 Pi 继续处理。`;
+  return startedDetail ?? safeToolDetail(name);
+}
+
+/** Older journals stored agent-loop narration; treat those as missing copy. */
+export function isAgentLoopNarration(detail?: string) {
+  return Boolean(detail && /(?:返回给 Pi|返回 Pi|Pi 将)/.test(detail));
 }

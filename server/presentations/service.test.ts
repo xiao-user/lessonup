@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { DashiGoal } from "./dashi-goal.js";
 import { MemoryLessonRepository } from "../repositories/memory-repository.js";
 import { PresentationService } from "./service.js";
+import { MemoryObjectStorage, type ObjectStorage } from "../platform/object-storage.js";
+import { goalToBrowserDeck } from "../../src/lib/dashi-browser/goal-to-deck.js";
 
 const ownerId = "presentation-owner";
 const lessonFileId = "11111111-1111-4111-8111-111111111111";
@@ -21,7 +23,7 @@ const goal: DashiGoal = {
   ],
 };
 
-async function fixture() {
+async function fixture(storage: ObjectStorage | null = null) {
   const repository = new MemoryLessonRepository();
   await repository.importNotebookGraph(ownerId, [{
     id: "presentation-notebook",
@@ -41,8 +43,8 @@ async function fixture() {
       byteSize: 13,
     }),
     importBundle: async () => {},
-  });
-  return { service, removed };
+  }, storage);
+  return { service, repository, removed };
 }
 
 async function render(service: PresentationService, idempotencyKey: string, checksum = "checksum") {
@@ -68,6 +70,43 @@ async function render(service: PresentationService, idempotencyKey: string, chec
 }
 
 describe("PresentationService", () => {
+  it("publishes one concurrent edit atomically without overwriting the winning artifact", async () => {
+    const storage = new MemoryObjectStorage();
+    const { service: initial, repository } = await fixture(storage);
+    const created = await render(initial, "concurrent-edits");
+    const editService = () => new PresentationService(repository, {
+      hasDeck: async () => true,
+      exportBundle: async (_id, revision) => {
+        const body = new TextEncoder().encode(JSON.stringify(revision));
+        return { files: [{ path: "index.html", body }], byteSize: body.byteLength };
+      },
+      open: async () => "", remove: async () => {}, importBundle: async () => {},
+    }, storage);
+    const a = goalToBrowserDeck(goal, { id: created.id });
+    const b = structuredClone(a);
+    a.slides[0]!.content.title = "edit A";
+    b.slides[0]!.content.title = "edit B";
+    const results = await Promise.allSettled([a, b].map(deck => editService().saveBrowserDeck(ownerId, created.id, { expectedChecksum: created.checksum, deck })));
+    expect(results.filter(r => r.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(r => r.status === "rejected")).toHaveLength(1);
+    const current = (await repository.getClassroomPresentation(ownerId, created.id))!;
+    expect(current.storageKey).toContain("/revisions/");
+    const persisted = JSON.parse(new TextDecoder().decode((await storage.get(current.storageKey))!.body));
+    expect(persisted.goal).toEqual(current.dashiGoal);
+    expect(persisted.deck.slides[0].content.title).toBe(current.dashiGoal!.slides[0]!.props.title);
+    expect(await storage.get(created.storageKey)).not.toBeNull();
+  });
+
+  it("keeps the published object when the metadata CAS fails", async () => {
+    const storage = new MemoryObjectStorage();
+    const { service, repository } = await fixture(storage);
+    const created = await render(service, "cas-failure");
+    const original = await storage.get(created.storageKey);
+    vi.spyOn(repository, "updateClassroomPresentationGoal").mockRejectedValueOnce(new Error("presentation_edit_conflict"));
+    await expect(service.saveBrowserDeck(ownerId, created.id, { expectedChecksum: created.checksum, deck: goalToBrowserDeck(goal, { id: created.id }) })).rejects.toThrow("presentation_edit_conflict");
+    expect(await storage.get(created.storageKey)).toEqual(original);
+    expect(await repository.getClassroomPresentation(ownerId, created.id)).toEqual(created);
+  });
   it("persists only the previously approved immutable Dashi goal", async () => {
     const { service } = await fixture();
     const created = await render(service, "approved-request");
@@ -87,8 +126,10 @@ describe("PresentationService", () => {
   });
 
   it("is idempotent and replaces an older deck only after the new deck is saved", async () => {
-    const { service, removed } = await fixture();
+    const { service, repository, removed } = await fixture();
     const first = await render(service, "first");
+    const sourceRead = vi.spyOn(repository, "getLessonFile")
+      .mockRejectedValueOnce(new Error("should_not_reload_source"));
     const repeated = await service.beginApprovedGoalGeneration(
       ownerId,
       lessonFileId,
@@ -96,6 +137,8 @@ describe("PresentationService", () => {
       "first",
     );
     expect(repeated).toEqual({ presentation: first });
+    expect(sourceRead).not.toHaveBeenCalled();
+    sourceRead.mockRestore();
     const second = await render(service, "second", "checksum-2");
     await expect(service.list(ownerId, lessonFileId)).resolves.toEqual([second]);
     expect(removed).toContain(first.id);
@@ -115,5 +158,68 @@ describe("PresentationService", () => {
       status: "failed",
       errorCode: "presentation_generation_failed",
     });
+  });
+
+  it("persists editable browser content and rejects a stale editor checksum", async () => {
+    const { service } = await fixture();
+    const created = await render(service, "editable-presentation");
+    const deck: any = goalToBrowserDeck(goal, { id: created.id });
+    const firstSlide = deck.slides[0]!;
+    const firstVariant = firstSlide.variants[0]!;
+    const stateId = `${firstSlide.id}::${firstVariant.id}`;
+    firstVariant.stateId = stateId;
+    firstSlide.selectedVariant = firstVariant.id;
+    firstSlide.content.title = "《秋天的怀念》· 课堂导入";
+    Object.assign(deck, {
+      state: {
+        slideOrder: deck.slides.map((slide: { id: string }) => slide.id),
+        props: { [stateId]: { accentColor: "#ef4444" } },
+        text: {}, media: {},
+        variantSelection: { [firstSlide.id]: stateId },
+      },
+    });
+
+    const saved = await service.saveBrowserDeck(ownerId, created.id, {
+      expectedChecksum: created.checksum,
+      deck,
+    });
+
+    expect(saved.dashiGoal?.slides[0]?.props).toMatchObject({
+      title: "《秋天的怀念》· 课堂导入",
+      accentColor: "#ef4444",
+    });
+    await expect(service.saveBrowserDeck(ownerId, created.id, {
+      expectedChecksum: created.checksum,
+      deck,
+    })).rejects.toThrow("presentation_edit_conflict");
+  });
+
+  it("rolls back saved artifacts and the rendered workspace when metadata persistence fails", async () => {
+    const storage = new MemoryObjectStorage();
+    const { service, repository, removed } = await fixture(storage);
+    const started = await service.beginApprovedGoalGeneration(
+      ownerId,
+      lessonFileId,
+      { expectedDocumentVersion: 0, goal },
+      "metadata-failure",
+    );
+    if ("presentation" in started) throw new Error("unexpected_existing_presentation");
+    vi.spyOn(repository, "saveClassroomPresentation").mockRejectedValueOnce(new Error("d1_unavailable"));
+
+    await expect(service.completeApprovedGoalGeneration({
+      generation: started.generation,
+      presentationId: started.presentationId,
+      idempotencyKey: "metadata-failure",
+      goal,
+      deck: {
+        deckKey: started.presentationId,
+        previewUrl: "http://127.0.0.1:5200/",
+        checksum: "checksum",
+        pageCount: goal.slides.length,
+      },
+    })).rejects.toThrow("presentation_metadata_save_failed");
+
+    await expect(storage.list(`${ownerId}/presentations/${started.presentationId}`)).resolves.toEqual([]);
+    expect(removed).toContain(started.presentationId);
   });
 });

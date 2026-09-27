@@ -1,17 +1,26 @@
 import { expect, test as base, type Page } from "@playwright/test";
-import { lessonFileId, resetE2EState } from "./test-data.js";
+import { initialNotebookGraph, lessonFileId } from "./test-data.js";
 
 type AgentFixtures = { collectionPage: Page; lessonPage: Page };
 
 export const test = base.extend<AgentFixtures>({
   collectionPage: async ({ context, page }, use) => {
-    const userId = process.env.LESSONUP_E2E_USER_ID;
-    if (!userId) throw new Error("LESSONUP_E2E_USER_ID_missing");
-    await resetE2EState(userId);
-    await context.setExtraHTTPHeaders({ "x-lessonup-user": userId });
+    const userId = crypto.randomUUID();
+    await context.setExtraHTTPHeaders({ authorization: `Bearer ${userId}` });
+    const imported = await page.request.post("/api/bootstrap/import", {
+      data: { notebooks: initialNotebookGraph },
+    });
+    if (!imported.ok()) throw new Error(`agent_e2e_seed_failed:${imported.status()}`);
     await page.addInitScript(() => {
       localStorage.clear();
       localStorage.setItem("lessonup:server-imported:v1", new Date().toISOString());
+    });
+    await page.addInitScript((session) => {
+      localStorage.setItem("lessonup.session.v1", JSON.stringify(session));
+    }, {
+      accessToken: userId,
+      expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      account: { id: userId, loginName: "e2e", createdAt: new Date().toISOString() },
     });
     await page.goto("/");
     await expect(page.getByRole("button", { name: "新增备课本", exact: true })).toBeVisible();

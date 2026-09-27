@@ -46,11 +46,9 @@ function createPiLessonTools(
     name: "read_document",
     label: "读取当前教案",
     description: "一次读取当前教案的全部栏目或指定栏目。只能读取服务端绑定的当前教案。",
-    parameters: options.requireCompleteDocument
-      ? Type.Object({}, { additionalProperties: false })
-      : Type.Object({
-          fields: Type.Optional(Type.Array(lessonFieldType, { minItems: 1, maxItems: 14 })),
-        }, { additionalProperties: false }),
+    parameters: Type.Object({
+      fields: Type.Optional(Type.Array(lessonFieldType, { minItems: 1, maxItems: 14 })),
+    }, { additionalProperties: false }),
     execute: async (_toolCallId, input) => {
       const parameters = input as { fields?: LessonField[] };
       const [file, notebook] = await Promise.all([
@@ -242,8 +240,6 @@ export function createPiLessonReadTools(
   ].includes(tool.name));
 }
 
-/** Knowledge tools are opt-in because their schemas and retrieval choices are
- * irrelevant to ordinary or lightweight lesson turns. */
 export function createPiLessonKnowledgeTools(
   repository: LessonRepository,
   scope: PiLessonToolScope,

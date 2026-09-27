@@ -5,8 +5,8 @@ import path from "node:path";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { deterministicUuid } from "../server/curriculum/knowledge-sample.js";
-import { BgeM3EmbeddingProvider } from "../server/providers/embeddings.js";
-import { config } from "../server/config.js";
+import { ConfiguredEmbeddingProvider } from "../server/providers/embeddings.js";
+import { config, hasEmbeddingProvider } from "../server/config.js";
 
 const chunkSchema = z.object({
   stableChunkId: z.string().min(1),
@@ -138,7 +138,7 @@ function serviceClient() {
   });
 }
 
-async function embedWithRetry(provider: BgeM3EmbeddingProvider, texts: string[]) {
+async function embedWithRetry(provider: ConfiguredEmbeddingProvider, texts: string[]) {
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
@@ -153,7 +153,7 @@ async function embedWithRetry(provider: BgeM3EmbeddingProvider, texts: string[])
 
 async function indexDocument(
   client: SupabaseClient,
-  provider: BgeM3EmbeddingProvider,
+  provider: ConfiguredEmbeddingProvider,
   release: ReturnType<typeof releaseFor>,
   normalized: NormalizedDocument,
   position: number,
@@ -162,7 +162,7 @@ async function indexDocument(
   const scope = documentScope(normalized);
   const sourceId = deterministicUuid(release.id, `${normalized.document.sourceFilename}:${normalized.document.parsedSha256}`);
   const workerId = crypto.randomUUID();
-  const indexVersion = `bge-m3:${config.BGE_M3_MODEL}:${normalizerVersion}:${normalized.document.parsedSha256.slice(0, 16)}`;
+  const indexVersion = `embedding:${config.EMBEDDING_MODEL}:${normalizerVersion}:${normalized.document.parsedSha256.slice(0, 16)}`;
   const document = {
     filename: normalized.document.sourceFilename,
     title: normalized.document.title,
@@ -299,12 +299,12 @@ if (action === "validate") {
   } else if (action === "publish") {
     await publish(client, release);
   } else {
-    if (!config.BGE_M3_BASE_URL) throw new Error("embedding_not_configured");
+    if (!hasEmbeddingProvider) throw new Error("embedding_not_configured");
     const selected = only
       ? allDocuments.filter((document) => document.document.subject === only || document.document.kind === only)
       : allDocuments;
     if (!selected.length) throw new Error(`curriculum_standard_only_not_found:${only}`);
-    const provider = new BgeM3EmbeddingProvider();
+    const provider = new ConfiguredEmbeddingProvider();
     for (const [index, document] of selected.entries()) {
       await indexDocument(client, provider, release, document, index + 1, selected.length);
     }
@@ -312,4 +312,3 @@ if (action === "validate") {
     else console.log("索引已写入草稿版本；全部文档就绪后运行 curriculum:standards:publish 原子发布。");
   }
 }
-

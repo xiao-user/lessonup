@@ -145,6 +145,7 @@ export const NotebookCollection = forwardRef(function NotebookCollection({
           <Button
             className="collection-create-file-action"
             type="button"
+            aria-label="新增备课文件"
             onClick={() => onCreateFile(focusedNotebook?.id ?? activeNotebookId ?? notebooks[0]?.id)}
           >
             <FilePlus2 data-icon="inline-start" />

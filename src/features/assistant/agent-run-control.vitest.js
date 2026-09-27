@@ -3,7 +3,7 @@ import {
   activitiesFromEvents,
   activityStateForToolCompletion,
   agentInputDisposition,
-  canRetryApprovalDecision,
+  approvalBackedToolCallIds,
   deriveBranchRuntimeState,
   presentAgentError,
   queuedInputsFromEvents,
@@ -123,13 +123,54 @@ describe("activitiesFromEvents", () => {
 
   it("treats a post-decision propose acknowledgement as successful during live completion", () => {
     expect(activityStateForToolCompletion({
+      toolCallId: "proposal-1",
       name: "propose_document_patch",
       ok: false,
       revisionCode: "document_context_stale",
     }, {
-      approvalCreated: true,
-      approvalDecided: true,
+      approvalBackedToolCalls: approvalBackedToolCallIds(
+        [{ id: "proposal-1", name: "propose_document_patch" }],
+        [{ runId: "run-1", toolCallId: "proposal-1" }],
+      ),
     })).toBe("completed");
+  });
+
+  it("keeps an earlier rejected proposal attempt visible after the run self-corrects", () => {
+    // The approval proves only that proposal-2 passed preflight. Reloading the
+    // thread used to mark both calls successful, hiding the correction the
+    // teacher had already watched happen live.
+    expect(activitiesFromEvents([
+      { type: "tool.started", toolCallId: "proposal-1", name: "propose_document_patch", label: "准备修改建议" },
+      {
+        type: "tool.completed",
+        toolCallId: "proposal-1",
+        name: "propose_document_patch",
+        ok: false,
+        revisionCode: "semantic_quality_rejected",
+      },
+      { type: "tool.started", toolCallId: "proposal-2", name: "propose_document_patch", label: "准备修改建议" },
+      { type: "tool.completed", toolCallId: "proposal-2", name: "propose_document_patch", ok: true },
+      {
+        type: "approval.required",
+        runId: "run-1",
+        approvalId: "approval-1",
+        toolCallId: "proposal-2",
+        patch: {},
+      },
+    ], "awaiting_approval")).toMatchObject([
+      { id: "proposal-1", state: "needs_revision" },
+      { id: "proposal-2", state: "completed" },
+    ]);
+  });
+
+  it("attributes an approval that predates tool-call attribution to the last proposal", () => {
+    expect(approvalBackedToolCallIds(
+      [
+        { id: "proposal-1", name: "propose_document_patch" },
+        { id: "proposal-2", name: "propose_document_patch" },
+      ],
+      [{ runId: "run-1" }],
+    )).toEqual(new Set(["proposal-2"]));
   });
 
   it("presents no-effect proposals as unchanged instead of failed", () => {
@@ -197,19 +238,6 @@ describe("activitiesFromEvents", () => {
   });
 });
 
-describe("canRetryApprovalDecision", () => {
-  it("clears approvals that the server has made terminal", () => {
-    expect(canRetryApprovalDecision("stale_document")).toBe(false);
-    expect(canRetryApprovalDecision("stale_design_basis")).toBe(false);
-    expect(canRetryApprovalDecision("approval_expired")).toBe(false);
-  });
-
-  it("keeps a pending approval available after a retryable transport failure", () => {
-    expect(canRetryApprovalDecision("agent_timeout")).toBe(true);
-    expect(canRetryApprovalDecision("approval_resume_failed")).toBe(true);
-  });
-});
-
 describe("presentAgentError", () => {
   it("does not describe a pre-request provider outage as a failed modification", () => {
     expect(presentAgentError("agent_provider_unavailable")).toEqual({
@@ -267,6 +295,14 @@ describe("deriveBranchRuntimeState", () => {
     })).toEqual({ status: "ready", runId: null, error: null });
   });
 
+  it("keeps a failed terminal run visible without locking the conversation", () => {
+    expect(deriveBranchRuntimeState({
+      runtimeAvailable: true,
+      approvals: [],
+      persistedRun: { id: "run-failed", status: "failed", error: "agent_provider_error" },
+    })).toEqual({ status: "ready", runId: null, error: null });
+  });
+
   it("restores the selected branch pending approval", () => {
     expect(deriveBranchRuntimeState({
       runtimeAvailable: true,
@@ -281,7 +317,8 @@ describe("deriveBranchRuntimeState", () => {
       approvals: [{
         id: "approval-legacy",
         runId: "run-legacy",
-        state: "continuation",
+        state: "approved",
+        continuationStatus: "ready",
         patch: { kind: "presentation_storyboard", slides: [] },
       }],
       persistedRun: { id: "run-legacy", status: "failed", error: "presentation_generation_failed" },

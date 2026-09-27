@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { SkillRegistry } from "./skill-registry.js";
+import { createNodeSkillRegistry } from "./skill-registry-node.js";
 
 describe("SkillRegistry", () => {
   it("adapts the generic Dashi package to LessonUp's Pi tool boundary", async () => {
-    const registry = await new SkillRegistry().load();
+    const registry = await createNodeSkillRegistry().load();
     const [skill] = registry.resolve(["dashi-ppt"]);
 
     expect(skill.instructions).toContain("one content artifact only");
@@ -15,10 +15,18 @@ describe("SkillRegistry", () => {
   });
 
   it("keeps full lesson authoring policy server-side", async () => {
-    const registry = await new SkillRegistry().load();
+    const registry = await createNodeSkillRegistry().load();
     const [skill] = registry.resolve(["lesson-full-authoring"]);
 
     expect(skill.instructions).toContain("守住当前课时容量与内容边界");
     expect(skill.requiredTools).toEqual(["read_document", "propose_document_patch"]);
+  });
+
+  it("lists the latest Skill of each id in a stable catalog order", async () => {
+    const registry = await createNodeSkillRegistry().load();
+    const catalog = registry.listLatest();
+    expect(catalog.map((skill) => skill.id)).toEqual([...catalog.map((skill) => skill.id)].sort());
+    expect(catalog.map((skill) => skill.id)).toContain("lesson-full-authoring");
+    expect(catalog.map((skill) => skill.id)).toContain("dashi-ppt");
   });
 });

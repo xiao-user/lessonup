@@ -30,6 +30,8 @@ import type {
   LessonDesignBasisEntryRecord,
   LessonDesignBasisPatch,
   LessonDesignBasisRecord,
+  LessonGenerationIntentRecord,
+  SemesterFrameworkWritebackIntentRecord,
   LessonBlueprintRecord,
   LessonFileRecord,
   NotebookRecord,
@@ -64,7 +66,7 @@ import type {
   LessonRepository,
 } from "../repository.js";
 import { createLessonPlanPreview } from "../../src/lib/lesson-preview.js";
-import { persistedActivitiesFromEvents, persistedTurnPhaseFromEvents } from "../agent-activity-presentation.js";
+import { persistedActivitiesFromEvents, persistedTurnPhaseFromEvents, persistedTurnTextsFromEvents } from "../agent-activity-presentation.js";
 import {
   type BeginClassroomPresentationGenerationResult,
   type ClassroomPresentationGeneration,
@@ -248,6 +250,31 @@ const mapLessonDesignBasisAggregate = (
   entries: (payload.entries ?? []).map(mapLessonDesignBasisEntry),
 });
 
+const mapLessonGenerationIntent = (row: Record<string, any>): LessonGenerationIntentRecord => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  lessonFileId: row.lesson_file_id,
+  prompt: row.prompt,
+  state: row.state,
+  runId: row.run_id ?? undefined,
+  createdAt: row.created_at,
+  claimedAt: row.claimed_at ?? undefined,
+});
+
+const mapSemesterFrameworkWritebackIntent = (
+  row: Record<string, any>,
+): SemesterFrameworkWritebackIntentRecord => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  frameworkId: row.framework_id,
+  feedbackId: row.feedback_id,
+  prompt: row.prompt,
+  state: row.state,
+  runId: row.run_id ?? undefined,
+  createdAt: row.created_at,
+  claimedAt: row.claimed_at ?? undefined,
+});
+
 const mapFrameworkContinuityCandidate = (
   row: Record<string, any>,
 ): FrameworkContinuityCandidateRecord => ({
@@ -375,8 +402,14 @@ const mapRun = (row: Record<string, any>): AgentRunRecord => ({
   leaseExpiresAt: row.lease_expires_at ?? undefined,
   heartbeatAt: row.heartbeat_at ?? undefined,
   cancelRequestedAt: row.cancel_requested_at ?? undefined,
+  generationIntentId: row.generation_intent_id ?? undefined,
+  clientCommandId: row.client_command_id ?? undefined,
+  commandFingerprint: row.command_fingerprint ?? undefined,
+  userMessageId: row.user_message_id ?? undefined,
   assistantMessageId: row.assistant_message_id ?? undefined,
 });
+
+const withoutCreatedAt = ({ createdAt: _createdAt, ...message }: AgentMessageRecord) => message;
 
 const mapApproval = (row: Record<string, any>): AgentApprovalRecord => ({
   id: row.id,
@@ -385,6 +418,7 @@ const mapApproval = (row: Record<string, any>): AgentApprovalRecord => ({
   threadId: row.thread_id,
   branchId: row.branch_id,
   assistantMessageId: row.assistant_message_id ?? undefined,
+  toolCallId: row.tool_call_id ?? undefined,
   state: row.state,
   patch: row.patch,
   encryptedRunState: row.encrypted_run_state,
@@ -641,6 +675,55 @@ export class SupabaseLessonRepository implements LessonRepository {
     return result.data ? mapFile(result.data) : null;
   }
 
+  async getLessonFileContext(ownerId: string, fileId: string) {
+    const result = await this.client.from("lesson_files")
+      .select("id,owner_id,notebook_id,document_version,context_profile")
+      .eq("owner_id", ownerId).eq("id", fileId).maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    return result.data ? {
+      id: result.data.id,
+      ownerId: result.data.owner_id,
+      notebookId: result.data.notebook_id,
+      documentVersion: Number(result.data.document_version),
+      contextProfile: result.data.context_profile ?? {},
+    } : null;
+  }
+
+  // Retired adapter compatibility only. Production uses D1; this preserves
+  // the storage port so a future PostgreSQL adapter remains mechanical.
+  async getPendingLessonGenerationIntent(ownerId: string, lessonFileId: string) {
+    const result = await this.client.from("lesson_generation_intents").select("*")
+      .eq("owner_id", ownerId).eq("lesson_file_id", lessonFileId).eq("state", "pending").maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    return result.data ? mapLessonGenerationIntent(result.data) : null;
+  }
+
+  async enqueueLessonGenerationIntent(input: Parameters<LessonRepository["enqueueLessonGenerationIntent"]>[0]) {
+    const prompt = input.prompt.trim();
+    if (!prompt) throw new Error("generation_intent_prompt_empty");
+    const record: LessonGenerationIntentRecord = {
+      id: crypto.randomUUID(), ownerId: input.ownerId, lessonFileId: input.lessonFileId,
+      prompt, state: "pending", createdAt: new Date().toISOString(),
+    };
+    const result = await this.client.from("lesson_generation_intents").upsert({
+      id: record.id, owner_id: record.ownerId, lesson_file_id: record.lessonFileId,
+      prompt: record.prompt, state: record.state, run_id: null,
+      created_at: record.createdAt, claimed_at: null,
+    }, { onConflict: "owner_id,lesson_file_id" }).select("*").single();
+    if (result.error) throw new Error(result.error.message);
+    return mapLessonGenerationIntent(result.data);
+  }
+
+  async claimLessonGenerationIntent(input: Parameters<LessonRepository["claimLessonGenerationIntent"]>[0]) {
+    const result = await this.client.from("lesson_generation_intents")
+      .update({ state: "claimed", run_id: input.runId, claimed_at: new Date().toISOString() })
+      .eq("owner_id", input.ownerId).eq("lesson_file_id", input.lessonFileId)
+      .eq("id", input.intentId).eq("state", "pending").select("*").maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (!result.data) throw new Error("lesson_generation_intent_unavailable");
+    return mapLessonGenerationIntent(result.data);
+  }
+
   async getLessonDesignBasis(ownerId: string, lessonFileId: string) {
     const result = await this.client.rpc("lesson_design_basis_snapshot", {
       p_owner_id: ownerId,
@@ -774,6 +857,28 @@ export class SupabaseLessonRepository implements LessonRepository {
     return result.data ? mapThread(result.data) : null;
   }
 
+  async getConversationSnapshot(ownerId: string, threadId: string, branchId: string) {
+    const [thread, branch, branches, messages, latestRun, approvals] = await Promise.all([
+      this.getThread(ownerId, threadId),
+      this.getBranch(ownerId, threadId, branchId),
+      this.listBranches(ownerId, threadId),
+      this.listMessages(ownerId, threadId, branchId),
+      this.getLatestRun(ownerId, threadId, branchId),
+      this.listApprovals(ownerId, threadId, branchId),
+    ]);
+    if (!thread || !branch) return null;
+    const events = latestRun ? await this.listRunEvents(ownerId, latestRun.id) : [];
+    const capturedAt = new Date().toISOString();
+    return {
+      schemaVersion: 1 as const,
+      capturedAt,
+      aggregateVersion: [thread.updatedAt, latestRun?.id ?? "none", latestRun?.status ?? "idle", events.length].join(":"),
+      thread, branch, branches, messages, latestRun, events,
+      throughSequence: events.length,
+      approvals,
+    };
+  }
+
   async updateThread(ownerId: string, threadId: string, patch: Partial<AgentThreadRecord>) {
     const payload: Record<string, unknown> = {};
     if (patch.title !== undefined) payload.title = patch.title;
@@ -876,6 +981,7 @@ export class SupabaseLessonRepository implements LessonRepository {
       return {
         ...message,
         activities: persistedActivitiesFromEvents(runEvents, run.status),
+        turnTexts: persistedTurnTextsFromEvents(runEvents),
         turn: {
           runId: run.id,
           status: run.status,
@@ -937,15 +1043,44 @@ export class SupabaseLessonRepository implements LessonRepository {
       lease_expires_at: input.leaseExpiresAt,
       heartbeat_at: input.heartbeatAt,
       cancel_requested_at: input.cancelRequestedAt,
+      generation_intent_id: input.generationIntentId,
+      client_command_id: input.clientCommandId,
+      command_fingerprint: input.commandFingerprint,
       assistant_message_id: input.assistantMessageId,
       started_at: input.startedAt,
     }).select("*").single();
     return mapRun(unwrap(result as any));
   }
 
+  // The active production adapter is D1, whose implementation commits this
+  // operation atomically. Keep the retired Supabase adapter contract-complete
+  // for migration tooling and local compatibility.
+  async createRunWithInitialMessages(input: {
+    run: AgentRunRecord;
+    userMessage?: AgentMessageRecord;
+    assistantMessage: AgentMessageRecord;
+  }) {
+    const run = await this.createRun(input.run);
+    const userMessage = input.userMessage
+      ? await this.appendMessage(withoutCreatedAt(input.userMessage))
+      : undefined;
+    const { createdAt: _assistantCreatedAt, ...assistantInput } = input.assistantMessage;
+    const assistantMessage = await this.appendMessage(assistantInput);
+    await this.updateThread(input.run.ownerId, input.run.threadId, { status: "running" });
+    return { run, userMessage, assistantMessage };
+  }
+
   async getRun(ownerId: string, runId: string) {
     const result = await this.client.from("agent_runs").select("*")
       .eq("owner_id", ownerId).eq("id", runId).maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    return result.data ? mapRun(result.data) : null;
+  }
+
+  async getRunByClientCommand(ownerId: string, threadId: string, clientCommandId: string) {
+    const result = await this.client.from("agent_runs").select("*")
+      .eq("owner_id", ownerId).eq("thread_id", threadId)
+      .eq("client_command_id", clientCommandId).maybeSingle();
     if (result.error) throw new Error(result.error.message);
     return result.data ? mapRun(result.data) : null;
   }
@@ -1050,6 +1185,7 @@ export class SupabaseLessonRepository implements LessonRepository {
       id: approval.id, owner_id: approval.ownerId, run_id: approval.runId,
       thread_id: approval.threadId, branch_id: approval.branchId, state: approval.state,
       assistant_message_id: approval.assistantMessageId,
+      tool_call_id: approval.toolCallId,
       patch: approval.patch, encrypted_run_state: approval.encryptedRunState,
       agent_definition_version: approval.agentDefinitionVersion,
       resource_type: approval.resourceType,
@@ -1959,6 +2095,45 @@ export class SupabaseLessonRepository implements LessonRepository {
     return (result.data ?? []).map((row) => this.mapClassFeedback(row));
   }
 
+  async getPendingSemesterFrameworkWritebackIntent(ownerId: string, frameworkId: string) {
+    const result = await this.client.from("semester_framework_writeback_intents").select("*")
+      .eq("owner_id", ownerId).eq("framework_id", frameworkId).eq("state", "pending")
+      .order("created_at", { ascending: true }).limit(1).maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    return result.data ? mapSemesterFrameworkWritebackIntent(result.data) : null;
+  }
+
+  async enqueueSemesterFrameworkWritebackIntent(input: Parameters<LessonRepository["enqueueSemesterFrameworkWritebackIntent"]>[0]) {
+    const prompt = input.prompt.trim();
+    if (!prompt) throw new Error("framework_writeback_prompt_empty");
+    const record: SemesterFrameworkWritebackIntentRecord = {
+      id: crypto.randomUUID(), ownerId: input.ownerId, frameworkId: input.frameworkId,
+      feedbackId: input.feedbackId, prompt, state: "pending", createdAt: new Date().toISOString(),
+    };
+    const result = await this.client.from("semester_framework_writeback_intents").upsert({
+      id: record.id, owner_id: record.ownerId, framework_id: record.frameworkId,
+      feedback_id: record.feedbackId, prompt: record.prompt, state: record.state,
+      run_id: null, created_at: record.createdAt, claimed_at: null,
+    }, { onConflict: "feedback_id", ignoreDuplicates: true }).select("*").maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (result.data) return mapSemesterFrameworkWritebackIntent(result.data);
+    const existing = await this.client.from("semester_framework_writeback_intents").select("*")
+      .eq("owner_id", input.ownerId).eq("feedback_id", input.feedbackId).maybeSingle();
+    if (existing.error) throw new Error(existing.error.message);
+    if (!existing.data) throw new Error("framework_writeback_intent_not_created");
+    return mapSemesterFrameworkWritebackIntent(existing.data);
+  }
+
+  async claimSemesterFrameworkWritebackIntent(input: Parameters<LessonRepository["claimSemesterFrameworkWritebackIntent"]>[0]) {
+    const result = await this.client.from("semester_framework_writeback_intents")
+      .update({ state: "claimed", run_id: input.runId, claimed_at: new Date().toISOString() })
+      .eq("owner_id", input.ownerId).eq("framework_id", input.frameworkId)
+      .eq("id", input.intentId).eq("state", "pending").select("*").maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (!result.data) throw new Error("semester_framework_writeback_intent_unavailable");
+    return mapSemesterFrameworkWritebackIntent(result.data);
+  }
+
   async findClassroomPresentationByRequest(ownerId: string, idempotencyKey: string) {
     const result = await this.client.from("classroom_presentation_documents").select("*")
       .eq("owner_id", ownerId).eq("idempotency_key", idempotencyKey).maybeSingle();
@@ -2049,6 +2224,24 @@ export class SupabaseLessonRepository implements LessonRepository {
     }).eq("owner_id", args.ownerId).eq("id", args.presentationId).select("*").maybeSingle();
     if (result.error) throw new Error(result.error.message);
     if (!result.data) throw new Error("presentation_not_found");
+    return mapDirectClassroomPresentation(result.data);
+  }
+
+  async updateClassroomPresentationGoal(args: Parameters<LessonRepository["updateClassroomPresentationGoal"]>[0]) {
+    const result = await this.client.from("classroom_presentation_documents").update({
+      title: args.goal.title,
+      theme: args.goal.themePack,
+      outline: args.goal,
+      ...(args.artifact ? { storage_key: args.artifact.storageKey, byte_size: args.artifact.byteSize } : {}),
+      checksum: args.checksum,
+      updated_at: args.updatedAt,
+    }).eq("owner_id", args.ownerId).eq("id", args.presentationId)
+      .eq("checksum", args.expectedChecksum).select("*").maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    if (!result.data) {
+      const current = await this.getClassroomPresentation(args.ownerId, args.presentationId);
+      throw new Error(current ? "presentation_edit_conflict" : "presentation_not_found");
+    }
     return mapDirectClassroomPresentation(result.data);
   }
 

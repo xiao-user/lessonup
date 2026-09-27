@@ -1,11 +1,8 @@
-import { config, hasSupabase } from "../config.js";
+import type { SqlDatabase } from "../platform/sql-database.js";
 import type { LessonRepository } from "../repository.js";
 import { MemoryLessonRepository } from "./memory-repository.js";
-import { SupabaseLessonRepository } from "./supabase-repository.js";
+import { createD1LessonCoreRepository } from "./d1-lesson-core-repository.js";
 
-export function createRepository(): LessonRepository {
-  if (hasSupabase) {
-    return new SupabaseLessonRepository(config.SUPABASE_URL!, config.SUPABASE_SERVICE_ROLE_KEY!);
-  }
-  return new MemoryLessonRepository();
+export function createRepository(database?: SqlDatabase): LessonRepository {
+  return database ? createD1LessonCoreRepository(database) : new MemoryLessonRepository();
 }

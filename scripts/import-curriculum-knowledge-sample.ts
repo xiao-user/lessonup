@@ -49,9 +49,9 @@ async function sha256File(filePath: string) {
 }
 
 async function createEmbeddings(texts: string[]) {
-  const baseUrl = process.env.BGE_M3_BASE_URL;
-  if (!baseUrl) throw new Error("embedding_not_configured");
-  const model = process.env.BGE_M3_MODEL ?? "BAAI/bge-m3";
+  const baseUrl = process.env.EMBEDDING_BASE_URL;
+  const model = process.env.EMBEDDING_MODEL;
+  if (!baseUrl || !model) throw new Error("embedding_not_configured");
   const result: number[][] = [];
   for (let index = 0; index < texts.length; index += 32) {
     const input = texts.slice(index, index + 32);
@@ -60,8 +60,8 @@ async function createEmbeddings(texts: string[]) {
       signal: AbortSignal.timeout(60_000),
       headers: {
         "content-type": "application/json",
-        ...(process.env.BGE_M3_API_KEY
-          ? { authorization: `Bearer ${process.env.BGE_M3_API_KEY}` }
+        ...(process.env.EMBEDDING_API_KEY
+          ? { authorization: `Bearer ${process.env.EMBEDDING_API_KEY}` }
           : {}),
       },
       body: JSON.stringify({ model, input }),

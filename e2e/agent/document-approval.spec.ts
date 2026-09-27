@@ -9,6 +9,9 @@ const assessmentEditor = (page: import("@playwright/test").Page) => fieldEditor(
 const approvalCard = (page: import("@playwright/test").Page) => page
   .getByRole("button", { name: "接受修改" })
   .locator("xpath=ancestor::section[1]");
+const approvalDiff = (page: import("@playwright/test").Page) => page
+  .getByText("教案修改对比", { exact: true })
+  .locator("xpath=../..");
 
 test("confirms one complete lesson change and writes basis plus A4 atomically", async ({ lessonPage: page }) => {
   await sendPrompt(page, "请提交完整备课调整");
@@ -16,7 +19,7 @@ test("confirms one complete lesson change and writes basis plus A4 atomically", 
   await expect(confirmation).toBeVisible();
   await expect(confirmation).toContainText("补充学生困难并落实到评价练习");
   await expect(confirmation).toContainText("确认前不会写入任何修改");
-  const overflow = await confirmation.evaluate((element) => {
+  const overflow = await approvalDiff(page).evaluate((element) => {
     const card = element.getBoundingClientRect();
     return [...element.querySelectorAll("del, ins, details")].some((child) => {
       const box = child.getBoundingClientRect();
@@ -24,7 +27,7 @@ test("confirms one complete lesson change and writes basis plus A4 atomically", 
     });
   });
   expect(overflow).toBe(false);
-  await expect(confirmation.locator("ins")).toContainText("要求学生说明判断所依据的文本证据");
+  await expect(approvalDiff(page).locator("ins")).toContainText("要求学生说明判断所依据的文本证据");
 
   await page.getByRole("button", { name: "接受修改" }).click();
   await expect(page.getByText("修改已按确认写入教案。", { exact: true })).toBeVisible();
@@ -98,7 +101,7 @@ test("shows and applies an explicit design-basis projection without changing the
   await expect(confirmation).toBeVisible();
   await expect(confirmation).toContainText("把已确认的学生困难落实到评价练习");
   await expect(confirmation).toContainText("确认前不会写入任何修改");
-  await expect(confirmation.locator("ins")).toContainText("要求学生说明判断所依据的文本证据");
+  await expect(approvalDiff(page).locator("ins")).toContainText("要求学生说明判断所依据的文本证据");
 
   await page.getByRole("button", { name: "接受修改" }).click();
   await expect(page.getByText("修改已按确认写入教案。", { exact: true })).toBeVisible();
@@ -116,14 +119,14 @@ test("covers approval diff, refresh recovery, reject, approve, safe rebase and u
   await sendPrompt(page, "请提交修改并展示 diff");
   const confirmation = approvalCard(page);
   await expect(confirmation).toBeVisible();
-  await expect(confirmation.locator("del")).toHaveText(initialObjective);
-  await expect(confirmation.locator("ins")).toHaveText(approvedObjective);
+  await expect(approvalDiff(page).locator("del")).toHaveText(initialObjective);
+  await expect(approvalDiff(page).locator("ins")).toHaveText(approvedObjective);
 
   await page.reload();
   await openLessonFile(page);
   await expect(approvalCard(page)).toBeVisible();
   await page.getByRole("button", { name: "拒绝" }).click();
-  await expect(page.getByText("已保留原文", { exact: true })).toBeVisible();
+  await expect(page.getByText("已保留教案原文。", { exact: true })).toBeVisible();
   await expect(objectivesEditor(page)).toContainText(initialObjective.replace(/^\d+\.\s*/, ""));
 
   await createThread(page);
@@ -159,7 +162,7 @@ test("flushes a pending manual edit before starting a document-writing run", asy
 
   const confirmation = approvalCard(page);
   await expect(confirmation).toBeVisible();
-  await expect(confirmation.locator("del")).toContainText("先观察春日声音，再用文本证据说明判断。");
+  await expect(approvalDiff(page).locator("del")).toContainText("先观察春日声音，再用文本证据说明判断。");
 });
 
 test("replays the same save transaction after a committed response is lost", async ({ lessonPage: page }) => {

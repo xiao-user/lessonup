@@ -130,7 +130,27 @@ function LessonFieldEditor({
   useEffect(() => {
     if (!editor) return undefined;
     const key = editorKey(field, start, end);
-    registerEditor(key, { editor, field, start, end });
+    registerEditor(key, {
+      editor,
+      field,
+      start,
+      end,
+      flush() {
+        const previousValue = publishedValueRef.current;
+        const nextValue = serializeEditor(editor);
+        if (nextValue === previousValue) return;
+        publishedValueRef.current = nextValue;
+        callbacksRef.current.onChange({
+          ...rangeRef.current,
+          previousValue,
+          value: nextValue,
+        }, {
+          field: rangeRef.current.field,
+          kind: "typing",
+          origin: "tiptap",
+        });
+      },
+    });
     return () => registerEditor(key, null);
   }, [editor, end, field, registerEditor, start]);
 
@@ -239,7 +259,7 @@ function SectionRow({ entry, commonProps }) {
 
 function presentationFilename(presentation) {
   const title = String(presentation?.title ?? "课堂").replace(/\s*·\s*课堂演示\s*$/, "").trim();
-  return `${title || "课堂"}演示材料.html`;
+  return `${title || "课堂"}课堂演示`;
 }
 
 export function PresentationMaterialRow({
@@ -314,7 +334,11 @@ export function LessonPlanTiptapEditor({
     if (registration) editorsRef.current.set(key, registration);
     else editorsRef.current.delete(key);
   }, []);
-  const bridge = useMemo(() => ({ flush() {} }), []);
+  const bridge = useMemo(() => ({
+    flush() {
+      for (const registration of editorsRef.current.values()) registration.flush();
+    },
+  }), []);
 
   useEffect(() => {
     onEditorReady(bridge);

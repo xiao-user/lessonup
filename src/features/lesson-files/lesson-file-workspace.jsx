@@ -157,7 +157,13 @@ function pageLayoutSignature(pages) {
   }).join("|")).join("||");
 }
 
-export function LessonFileWorkspace({ notebook, file, sourceElement, originRect, closeSignal = 0, onSave, onAgentVersionCommitted, onClose, initialAgentPrompt = null, onInitialAgentPromptConsumed }) {
+function pageContentSignature(pages) {
+  return pages.flat().map((entry) => (
+    `${entry.key}:${entry.start ?? ""}:${entry.end ?? ""}:${entry.value ?? ""}`
+  )).join("\u001e");
+}
+
+export function LessonFileWorkspace({ notebook, file, sourceElement, originRect, closeSignal = 0, onSave, onAgentVersionCommitted, onClose }) {
   const rootRef = useRef(null);
   const scrollRef = useRef(null);
   const documentPagesRef = useRef(null);
@@ -209,6 +215,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
   });
   const [pages, setPages] = useState(() => paginateLessonPlan(initialPlan, {}, presentationMaterial));
   const pageLayoutSignatureRef = useRef(pageLayoutSignature(pages));
+  const pageContentSignatureRef = useRef(pageContentSignature(pages));
   const [pageLayoutRevision, setPageLayoutRevision] = useState(0);
   const hasSpatialOrigin = Boolean(
     originRect?.width
@@ -300,10 +307,13 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
 
     const measuredPages = paginateLessonPlan(currentPlan, measurements, presentationMaterial);
     const measuredSignature = pageLayoutSignature(measuredPages);
-    if (pageLayoutSignatureRef.current !== measuredSignature) {
+    const measuredContentSignature = pageContentSignature(measuredPages);
+    const layoutChanged = pageLayoutSignatureRef.current !== measuredSignature;
+    if (layoutChanged || pageContentSignatureRef.current !== measuredContentSignature) {
       pageLayoutSignatureRef.current = measuredSignature;
+      pageContentSignatureRef.current = measuredContentSignature;
       setPages(measuredPages);
-      setPageLayoutRevision((revision) => revision + 1);
+      if (layoutChanged) setPageLayoutRevision((revision) => revision + 1);
     }
 
     const agentCommit = pendingAgentCommitRef.current;
@@ -809,7 +819,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     if (canonicalFile.documentVersion < documentVersionRef.current) return;
     if (
       canonicalFile.documentVersion === documentVersionRef.current
-      && canonicalFile.document === planRef.current
+      && JSON.stringify(canonicalFile.document) === JSON.stringify(planRef.current)
     ) return;
     documentVersionRef.current = canonicalFile.documentVersion;
     setDocumentVersion(canonicalFile.documentVersion);
@@ -1075,8 +1085,6 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
             onCanonicalDocument={applyCanonicalAgentDocument}
             onBeforeRun={flushDocumentBeforeAgentRun}
             onNavigateToSection={scrollToSection}
-            initialPrompt={initialAgentPrompt}
-            onInitialPromptConsumed={onInitialAgentPromptConsumed}
           />
         </Suspense>
       </aside>

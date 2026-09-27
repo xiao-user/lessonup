@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 describe("LessonUp Dashi native validation boundary", () => {
-  it("does not turn editorial layout preferences into generation failures", () => {
+  it("preserves the native Dashi layout uniqueness guard", () => {
     const validator = fileURLToPath(new URL(
       "../agent/skills/dashi-ppt/project/scripts/validate-goal-spec.mjs",
       import.meta.url,
@@ -22,6 +22,8 @@ describe("LessonUp Dashi native validation boundary", () => {
       source,
     ], { encoding: "utf8" })) as string[];
 
-    expect(errors.filter((error) => /duplicate layout|only one cover|repeated (?:visible|core) copy|cover-like layouts/.test(error))).toEqual([]);
+    expect(errors).toContain(
+      "deck field slides: duplicate layout theme02_page001 used on slide 1, slide 2; choose a unique layout for every slide variant",
+    );
   });
 });

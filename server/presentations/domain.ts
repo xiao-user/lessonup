@@ -22,13 +22,12 @@ export type DirectClassroomPresentationRecord = {
   // Keep them readable but do not open them as an editable native Dashi deck.
   dashiGoal: DashiGoal | null;
   /**
-   * Native Dashi decks stay in the local Dashi workspace so its own preview,
-   * autosave and export endpoints keep working.  Older self-contained files
-   * are intentionally not opened through this path.
+   * Native Dashi goals stay canonical. The browser theme runtime mounts that
+   * goal; older self-contained files are not opened through this path.
    */
   delivery: "native-dashi" | "legacy-static";
-  // Kept while the first local-prototype migration remains deployed. These are
-  // metadata only for native decks; no HTML is uploaded or compressed.
+  // Points to the one private generated HTML object. The editor shell and
+  // theme runtimes are shared application assets and never stored per deck.
   storageKey: string;
   mediaType: string;
   byteSize: number;

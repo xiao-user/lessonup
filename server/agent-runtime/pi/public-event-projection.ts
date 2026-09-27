@@ -33,11 +33,16 @@ export function projectPublicPiEvents(args: {
   runId: string;
   signal?: AbortSignal;
   emit: Emit;
-  onTextDelta?: (delta: string) => void | Promise<void>;
+  onTextDelta?: (delta: string, turn: number) => void | boolean | Promise<void | boolean>;
 }) {
   let currentTurn = 0;
   const publicText = new PublicTextGuard();
   const toolPresentations = new Map<string, ReturnType<typeof safeToolPresentation> & { detail: string }>();
+  let publishedTurnText = "";
+  const publishDelta = async (delta: string) => {
+    const published = await args.onTextDelta?.(delta, currentTurn);
+    if (published !== false) publishedTurnText += delta;
+  };
   const unsubscribe = args.agent.subscribe(async (event: AgentEvent) => {
     if (event.type === "agent_start") {
       await args.emit({ type: "agent.started", runId: args.runId });
@@ -58,12 +63,21 @@ export function projectPublicPiEvents(args: {
         args.agent.abort();
         return;
       }
-      if (delta) await args.onTextDelta?.(delta);
+      if (delta) await publishDelta(delta);
       return;
     }
     if (event.type === "message_end" && event.message.role === "assistant") {
       const delta = publicText.flush();
-      if (delta) await args.onTextDelta?.(delta);
+      if (delta) await publishDelta(delta);
+      if (publishedTurnText) {
+        await args.emit({
+          type: "message.turn_text",
+          runId: args.runId,
+          turn: currentTurn,
+          text: publishedTurnText,
+        });
+      }
+      publishedTurnText = "";
       const outcome = event.message.stopReason === "error"
         ? "failed"
         : event.message.stopReason === "aborted"
@@ -111,7 +125,12 @@ export function projectPublicPiEvents(args: {
       };
       const presentation = {
         ...startedPresentation,
-        detail: safeToolCompletionDetail(event.toolName, startedPresentation.label, event.isError),
+        detail: safeToolCompletionDetail(
+          event.toolName,
+          startedPresentation.label,
+          event.isError,
+          startedPresentation.detail,
+        ),
       };
       await args.emit({
         type: "tool.completed",

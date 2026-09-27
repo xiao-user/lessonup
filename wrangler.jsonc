@@ -1,0 +1,45 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "lessonup",
+  "main": "./cloudflare/worker.ts",
+  "compatibility_date": "2026-08-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "NODE_ENV": "production",
+    "LESSONUP_PERSISTENCE": "d1",
+    "APP_ORIGIN": "https://lessonup.liuxiao-dawn.workers.dev"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/mcp/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "LESSONUP_AGENT_RUNTIME", "class_name": "LessonUpAgentRuntime" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["LessonUpRuntime"] },
+    { "tag": "v2", "new_sqlite_classes": ["LessonUpAgentRuntime"] }
+  ],
+  "d1_databases": [
+    {
+      "binding": "LESSONUP_DB",
+      "database_name": "lessonup",
+      "database_id": "00a6480e-e7eb-4d37-b464-ec9ceb4ea59e",
+      "migrations_dir": "./d1/migrations"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "LESSONUP_PRIVATE_OBJECTS", "bucket_name": "lessonup-private" }
+  ]
+}

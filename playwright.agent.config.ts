@@ -8,8 +8,6 @@ export default defineConfig({
   timeout: 45_000,
   expect: { timeout: 8_000 },
   reporter: "line",
-  globalSetup: "./e2e/agent/global-setup.ts",
-  globalTeardown: "./e2e/agent/global-teardown.ts",
   outputDir: "output/playwright/agent",
   use: {
     baseURL: "http://127.0.0.1:5176",
@@ -22,7 +20,7 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: "NODE_ENV=test LESSONUP_DEV_AUTH=1 MODEL_API_KEY=e2e-placeholder MODEL_BASE_URL=http://127.0.0.1:9/v1 MODEL_ID=e2e-placeholder PORT=8790 APP_ORIGIN=http://127.0.0.1:5176 npx tsx server/e2e-agent-index.ts",
+      command: "NODE_ENV=test LESSONUP_DEV_AUTH=1 MODEL_API_KEY=e2e-placeholder MODEL_BASE_URL=http://127.0.0.1:9/v1 MODEL_ID=e2e-placeholder MODEL_API=openai-completions MODEL_CONTEXT_WINDOW=100000 MODEL_MAX_TOKENS=8000 EMBEDDING_BASE_URL=http://127.0.0.1:9/v1 EMBEDDING_API_KEY=e2e-placeholder EMBEDDING_MODEL=e2e-placeholder EMBEDDING_DIMENSIONS=3 PORT=8790 APP_ORIGIN=http://127.0.0.1:5176 npx tsx server/e2e-agent-index.ts",
       url: "http://127.0.0.1:8790/api/health",
       reuseExistingServer: false,
       timeout: 60_000,
