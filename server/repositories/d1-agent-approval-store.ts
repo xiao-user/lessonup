@@ -67,7 +67,7 @@ export class D1AgentApprovalStore implements AgentApprovalStore {
     const results = await this.database.batch([
       { sql: "UPDATE agent_approvals SET state = 'expired', continuation_error = 'approval_expired', resolved_at = ? WHERE owner_id = ? AND id = ? AND state = 'pending' AND expires_at <= ?", params: [now, ownerId, approvalId, now] },
       { sql: "UPDATE agent_runs SET status = 'failed', error = 'approval_expired', completed_at = ? WHERE owner_id = ? AND id = ? AND status NOT IN ('completed', 'cancelled') AND EXISTS (SELECT 1 FROM agent_approvals WHERE owner_id = ? AND id = ? AND state = 'expired')", params: [now, ownerId, current.runId, ownerId, approvalId] },
-      { sql: "UPDATE agent_threads SET status = 'idle', updated_at = ? WHERE owner_id = ? AND id = ? AND status IN ('awaiting_approval', 'running') AND EXISTS (SELECT 1 FROM agent_approvals WHERE owner_id = ? AND id = ? AND state = 'expired')", params: [now, ownerId, current.threadId, ownerId, approvalId] },
+      { sql: "UPDATE agent_threads SET status = 'idle', updated_at = ? WHERE owner_id = ? AND id = ? AND status IN ('awaiting_approval', 'running') AND EXISTS (SELECT 1 FROM agent_approvals WHERE owner_id = ? AND id = ? AND state = 'expired') AND NOT EXISTS (SELECT 1 FROM agent_runs WHERE owner_id = ? AND thread_id = ? AND status IN ('queued', 'running', 'awaiting_approval'))", params: [now, ownerId, current.threadId, ownerId, approvalId, ownerId, current.threadId] },
     ]);
     if (!results[0]?.rowsAffected) {
       const refreshed = await this.requireApproval(ownerId, approvalId);

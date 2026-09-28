@@ -26,6 +26,7 @@ import {
 import { dedupeAgentSources, latestAssistantSources } from "./source-state.js";
 import { approvalPhase } from "./approval-state.js";
 import { executeApprovalCommand } from "./approval-command.js";
+import { isDocumentApproval, reduceDocumentDraft } from "./document-draft.js";
 import {
   conversationStateReducer,
   initialConversationState,
@@ -107,6 +108,8 @@ export function useAgentChat({
   const [thinkingLevel, setThinkingLevelState] = useState(readStoredThinkingLevel);
   const [transportRevision, bumpTransportRevision] = useReducer((value) => value + 1, 0);
   const [syncError, setSyncError] = useState(null);
+  const [documentDraft, setDocumentDraft] = useState(null);
+  useEffect(() => { setDocumentDraft(null); }, [activeThreadId, activeBranchId, resourceId]);
   const approvalCommandsRef = useRef(new Set());
   // Invalidates snapshot reads when a newer read, event or selection wins.
   const hydrationRevisionRef = useRef(0);
@@ -209,6 +212,7 @@ export function useAgentChat({
       return null;
     }
     const presentedApprovals = approvalRecords;
+    setDocumentDraft((snapshot.events ?? []).reduce(reduceDocumentDraft, null));
     dispatchConversation({
       type: "hydrate",
       aggregateVersion: snapshot.aggregateVersion,
@@ -563,7 +567,11 @@ export function useAgentChat({
       activeBranchRef.current,
     );
     if (isActive) ++hydrationRevisionRef.current;
-    if (isActive && ["approval.required", "approval.decided", "approval.delivered", "run.completed", "run.cancelled"].includes(event.type)) {
+    if (isActive) setDocumentDraft((current) => reduceDocumentDraft(current, event));
+    if (isActive && event.type === "approval.failed") {
+      setApprovals((current) => current.map((item) => item.id === event.approvalId ? { ...item, decisionError: event.error, transport: "unknown" } : item));
+    }
+    if (isActive && ["approval.required", "approval.decided", "approval.settled", "approval.delivered", "run.completed", "run.cancelled"].includes(event.type)) {
       dispatchConversation({ type: "approval-event", event });
     }
     if (isActive && event.type === "agent.started") {
@@ -730,7 +738,7 @@ export function useAgentChat({
       setSources((current) => dedupeAgentSources([...current, event.source]));
     }
     if (event.type === "approval.required") {
-      if (scope) setThreads((current) => current.map((thread) => thread.id === scope.threadId ? { ...thread, status: "awaiting_approval" } : thread));
+      if (scope && !isDocumentApproval(event)) setThreads((current) => current.map((thread) => thread.id === scope.threadId ? { ...thread, status: "awaiting_approval" } : thread));
       if (!isActive) return;
       setActivities((current) => current.map((activity) => (
         activity.state === "running" ? { ...activity, state: "completed", outcome: "completed" } : activity
@@ -1119,7 +1127,8 @@ export function useAgentChat({
     setThreads(persistedThreads);
   }, [activeBranchId, activeThreadId, loadMessages, resourceScope, runId, runtime?.agent]);
 
-  const respondApproval = useCallback(async (approved) => {
+  const respondApproval = useCallback(async (approved, selectedApproval = approval) => {
+    const approval = selectedApproval;
     if (!approval || !["pending", "recoverable"].includes(approvalPhase(approval))
       || approvalCommandsRef.current.has(approval.id)) return;
     const requestScope = {
@@ -1129,6 +1138,7 @@ export function useAgentChat({
     const isCurrent = () => isAgentEventActive(requestScope, activeThreadRef.current, activeBranchRef.current);
     // Acquire before flushing the editor: React has not disabled the button yet.
     approvalCommandsRef.current.add(approval.id);
+    const detached = isDocumentApproval(approval);
     try {
       const flushed = await onBeforeRun?.();
       const flushedVersion = resourceType === "semester_framework"
@@ -1140,8 +1150,9 @@ export function useAgentChat({
     } catch {
       approvalCommandsRef.current.delete(approval.id);
       if (isCurrent()) {
-        setError("document_save_failed");
-        setStatus("awaiting_approval");
+        if (detached) setApprovals((current) => current.map((item) => item.id === approval.id ? { ...item, decisionError: "document_save_failed" } : item));
+        else setError("document_save_failed");
+        if (!detached) setStatus("awaiting_approval");
       }
       return;
     }
@@ -1153,14 +1164,16 @@ export function useAgentChat({
     setSyncError(null);
     setApprovals((current) => current.map((item) => (
       item.id === approval.id
-        ? { ...item, transport: "submitting" }
+        ? { ...item, transport: "submitting", decisionError: undefined }
         : item
     )));
-    setStatus("streaming");
-    setRunId(approval.runId);
-    runScopesRef.current.set(approval.runId, requestScope);
+    if (!detached) {
+      setStatus("streaming");
+      setRunId(approval.runId);
+    }
+    if (!detached) runScopesRef.current.set(approval.runId, requestScope);
     const controller = new AbortController();
-    streamControllersRef.current.set(requestScope.threadId, controller);
+    if (!detached) streamControllersRef.current.set(requestScope.threadId, controller);
     const idempotencyKey = crypto.randomUUID();
     try {
       const result = await executeApprovalCommand({
@@ -1173,11 +1186,13 @@ export function useAgentChat({
       });
       if (isCurrent() && result.transportError && !result.terminal
         && result.synchronization?.approvals.some((item) => item.id === approval.id && item.state === "pending")) {
-        setError(result.transportError.message);
+        if (detached) setApprovals((current) => current.map((item) => item.id === approval.id ? { ...item, decisionError: result.transportError.message } : item));
+        else setError(result.transportError.message);
       }
-      if (isCurrent() && !result.synchronization) {
+      if (isCurrent() && !result.synchronization && !result.terminal) {
         // Unknown is a read-recovery state, not permission to execute again.
-        dispatchConversation({ type: "approval-sync-unavailable", approvalId: approval.id });
+        if (detached) setApprovals((current) => current.map((item) => item.id === approval.id ? { ...item, transport: "unknown" } : item));
+        else dispatchConversation({ type: "approval-sync-unavailable", approvalId: approval.id });
       }
     } finally {
       approvalCommandsRef.current.delete(approval.id);
@@ -1270,6 +1285,7 @@ export function useAgentChat({
   }, [replaceUploads]);
 
   return {
+    documentDraft,
     runtime, threads, activeThreadId, branches, activeBranchId, messages,
     activities, queuedInputs, queueDelivery, sources, approvals, approval, pendingInteraction, status, error, syncError, uploadError, runId, draft, uploads,
     startersLoading, startersError, thinkingLevel,

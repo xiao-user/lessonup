@@ -4,6 +4,9 @@ import { describe, expect, it } from "vitest";
 import { D1LessonWorkspaceStore } from "./d1-workspace-store.js";
 import { D1AgentRuntimeStore } from "./d1-agent-runtime-store.js";
 import { D1AgentApprovalStore } from "./d1-agent-approval-store.js";
+import { D1ApprovalCoordinator } from "./d1-approval-coordinator.js";
+import { D1LessonDesignBasisRepository } from "./d1-lesson-design-basis-repository.js";
+import { lessonDesignChangePatchSchema } from "../domain.js";
 import type { SqlDatabase, SqlStatement } from "../platform/sql-database.js";
 
 const plan = { unit: "单元", period: "1", totalPeriods: "1", topic: "课题", objectives: "目标", knowledgePoints: "", continuity: "", focus: "重点", preparation: "准备", process: "过程", assessment: "评价", homework: "作业", board: "板书", reflection: "反思" };
@@ -37,6 +40,43 @@ function database() {
 }
 
 describe("D1 transaction integrity with actual SQLite migrations", () => {
+  it("adopts a combined A4 draft atomically without claiming or disturbing a newer run", async () => {
+    const { db, port, fail } = database();
+    const now = "2026-09-28T00:00:00.000Z", clock = () => now;
+    try {
+      const workspace = new D1LessonWorkspaceStore(port, clock), runtime = new D1AgentRuntimeStore(port, clock);
+      const approvals = new D1AgentApprovalStore(port, clock), bases = new D1LessonDesignBasisRepository(port, clock);
+      const coordinator = new D1ApprovalCoordinator(port, clock);
+      const book = await workspace.createNotebook("owner", { title: "book", className: "A", year: "2026", subject: "math", tone: "teal" });
+      const file = await workspace.createLessonFile("owner", { notebookId: book.id, title: "lesson", type: "教案", document: plan, pageCount: 1 });
+      const { thread, branch } = await runtime.createThread("owner", { notebookId: book.id, lessonFileId: file.id });
+      await runtime.createRun({ id: "draft-run", ownerId: "owner", threadId: thread.id, branchId: branch.id, model: "test", status: "completed", startedAt: now });
+      await runtime.createRun({ id: "new-run", ownerId: "owner", threadId: thread.id, branchId: branch.id, model: "test", status: "running", startedAt: now });
+      await runtime.updateThread("owner", thread.id, { status: "running" });
+      const basis = (await bases.getLessonDesignBasis("owner", file.id))!.basis;
+      const patch = lessonDesignChangePatchSchema.parse({ fileId: file.id, baseDocumentVersion: 0, summary: "combined",
+        operations: [{ op: "replace_text", field: "assessment", start: 0, end: 2, expectedText: "评价", replacement: "新评价" }],
+        designBasisPatch: { basisId: basis.id, fileId: file.id, baseBasisVersion: 0, summary: "notes",
+          operations: [{ op: "replace_design_basis_field", field: "teacherNotes", expectedValue: "", replacement: "新依据" }] } });
+      await approvals.saveApproval({ id: "draft", ownerId: "owner", runId: "draft-run", threadId: thread.id, branchId: branch.id,
+        state: "pending", continuationStatus: "pending", encryptedRunState: "test", agentDefinitionVersion: "pi", patch,
+        createdAt: now, expiresAt: "2026-09-29T00:00:00.000Z" });
+      const args = { ownerId: "owner", approvalId: "draft", approved: true, encryptedRunState: "test", completeWithoutContinuation: true };
+      fail(6); // After document/approval writes, inside the basis write path.
+      await expect(coordinator.decideApproval(args)).rejects.toThrow("injected_failure");
+      expect(await workspace.getLessonFile("owner", file.id)).toMatchObject({ documentVersion: 0 });
+      expect(await bases.getLessonDesignBasis("owner", file.id)).toMatchObject({ basis: { version: 0, teacherNotes: "" } });
+      expect(await approvals.getApproval("owner", "draft")).toMatchObject({ state: "pending" });
+      fail(-1);
+      await coordinator.decideApproval(args);
+      await coordinator.decideApproval(args);
+      expect(await workspace.getLessonFile("owner", file.id)).toMatchObject({ documentVersion: 1, document: { assessment: "新评价" } });
+      expect(await bases.getLessonDesignBasis("owner", file.id)).toMatchObject({ basis: { version: 1, teacherNotes: "新依据" } });
+      expect(await approvals.getApproval("owner", "draft")).toMatchObject({ state: "approved", continuationStatus: "completed", patch: { designBasisPatch: patch.designBasisPatch } });
+      expect(await runtime.getRun("owner", "new-run")).toMatchObject({ status: "running" });
+      expect(await runtime.getThread("owner", thread.id)).toMatchObject({ status: "running" });
+    } finally { db.close(); }
+  });
   it("fences continuation attempts with the run lease and preserves cancellation across replay", async () => {
     const { db, port, fail } = database();
     let now = "2026-09-27T00:00:00.000Z";

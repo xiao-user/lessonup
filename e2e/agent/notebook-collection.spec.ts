@@ -184,7 +184,7 @@ test("echoes persisted uploads in personal info and deletes Storage with databas
 
     await page.getByRole("button", { name: `删除文件${title}`, exact: true }).click();
     await expect(page.getByRole("heading", { name: "删除这个文件？", exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "确认删除", exact: true }).click();
+    await page.getByRole("button", { name: "删除文件", exact: true }).click();
     await expect(page.getByText(title, { exact: true })).toHaveCount(0);
 
     expect((await page.request.get(`/api/knowledge/uploads/${sourceId}`)).status()).toBe(404);

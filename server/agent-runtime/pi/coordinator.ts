@@ -1,6 +1,7 @@
 import type { Model } from "@earendil-works/pi-ai";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { config } from "../../config.js";
+import { isDocumentDraftPatch } from "./document-draft.js";
 import { isSemesterFrameworkAgentContext, type AgentApprovalRecord, type AgentMessageRecord, type AgentRunRecord, type CapabilityPlan, type LessonAgentContext, type LessonAgentSelection, type SourceRef } from "../../domain.js";
 import type { LessonRepository } from "../../repository.js";
 import { routeCapabilities } from "../../agent/capability-router.js";
@@ -146,7 +147,7 @@ export class PiLessonAgentCoordinator {
     if (["running", "awaiting_approval"].includes(existingThread.status)) {
       throw new Error("active_run_exists");
     }
-    if (pendingOnBranch.some((item) => item.state === "pending")) {
+    if (pendingOnBranch.some((item) => item.state === "pending" && !isDocumentDraftPatch(item.patch))) {
       throw new Error("active_run_exists");
     }
     if (input.generationIntentId && input.frameworkWritebackIntentId) {
@@ -519,6 +520,9 @@ export class PiLessonAgentCoordinator {
             settle: false,
           });
         },
+        documentDraftScope: !isSemesterFrameworkAgentContext(context)
+          ? { fileId: context.lessonFileId, baseDocumentVersion: context.documentVersion }
+          : undefined,
         onTextDelta: async (delta, turn) => {
           // Presentation prose between tool calls remains private work. The
           // validated approval card is the public artifact for that workflow.
@@ -601,6 +605,12 @@ export class PiLessonAgentCoordinator {
           messageStatus: "cancelled",
           messageContent: content,
         }).catch(() => undefined);
+        const pending = await this.repository.listPendingApprovals(
+          input.userId, input.threadId, input.branchId,
+        ).catch(() => []);
+        await Promise.allSettled(pending
+          .filter((approval) => approval.runId === runId && approval.state === "pending")
+          .map((approval) => this.repository.resolveApproval(input.userId, approval.id, "expired")));
         await emit({ type: "run.cancelled", runId });
         return;
       }

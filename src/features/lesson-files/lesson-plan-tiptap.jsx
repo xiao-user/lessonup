@@ -341,8 +341,8 @@ export function LessonPlanTiptapEditor({
   }), []);
 
   useEffect(() => {
-    onEditorReady(bridge);
-    return () => onEditorReady(null);
+    onEditorReady?.(bridge);
+    return () => onEditorReady?.(null);
   }, [bridge, onEditorReady]);
 
   useEffect(() => {

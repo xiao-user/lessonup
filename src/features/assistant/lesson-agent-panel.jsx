@@ -21,6 +21,8 @@ import {
   formatTextbookSelectionLabel,
 } from "@/features/curriculum/labels";
 import { agentApi } from "@/lib/agent-api";
+import { isDocumentApproval } from "./document-draft.js";
+import { approvalPhase } from "./approval-state.js";
 
 const CONTEXT_NONE = "__none__";
 
@@ -42,6 +44,7 @@ export function LessonAgentPanel({
   onClearSelection,
   onCanonicalDocument,
   onBeforeRun,
+  onDocumentDraft,
   onNavigateToSection,
 }) {
   const [generationIntent, setGenerationIntent] = useState(null);
@@ -60,6 +63,25 @@ export function LessonAgentPanel({
     starterSuggestionsEnabled: generationIntentLoaded && !generationIntent,
   });
   const activeThread = chat.threads.find((thread) => thread.id === chat.activeThreadId);
+  const [selectedDraftId, setSelectedDraftId] = useState(null);
+  const documentApprovals = useMemo(() => [...chat.approvals].reverse().filter((item) => isDocumentApproval(item) && approvalPhase(item) !== "settled"), [chat.approvals]);
+  const documentApproval = documentApprovals.find((item) => item.id === selectedDraftId) ?? documentApprovals[0];
+  useEffect(() => {
+    const streaming = chat.documentDraft?.fileId === file.id ? chat.documentDraft : null;
+    const pending = documentApproval?.patch.fileId === file.id ? documentApproval : null;
+    onDocumentDraft?.(streaming ? { ...streaming, phase: "streaming" } : pending ? {
+      ...pending, phase: approvalPhase(pending),
+      error: pending.decisionError ? presentAgentError(pending.decisionError).message : null,
+      choices: documentApprovals.map((item) => ({ id: item.id, label: item.patch.summary })),
+      choose: setSelectedDraftId,
+      // A tool preflight can finish just before the proposing run settles.
+      generating: chat.status === "streaming" && chat.runId === pending.runId,
+      accept: () => chat.respondApproval(approvalPhase(pending) === "recoverable" ? pending.state === "approved" : true, pending),
+      discard: () => chat.respondApproval(false, pending),
+      synchronize: chat.synchronizeConversation,
+    } : null);
+  }, [chat.documentDraft, documentApproval, documentApprovals, chat.status, chat.runId, chat.respondApproval, chat.synchronizeConversation, file.id, onDocumentDraft]);
+  useEffect(() => () => onDocumentDraft?.(null), [onDocumentDraft]);
   const starterSuggestions = activeThread?.starterSuggestions ?? [];
   const hasPendingThreads = chat.threads.some((thread) => thread.status === "awaiting_approval");
   const errorPresentation = chat.error ? presentAgentError(chat.error) : null;
@@ -334,7 +356,7 @@ export function LessonAgentPanel({
       </header>
 
       <IceCreamHarness
-        chat={chat}
+        chat={{ ...chat, documentApprovalInEditor: true }}
         messages={presentedMessages}
         statusText={statusText}
         emptyTitle={statusText[chat.status] ?? "备课助手"}

@@ -13,9 +13,10 @@ import type { PiRunLifecycle } from "./run-lifecycle.js";
 import type { PiAgentExecutor } from "./executor.js";
 import type { PiToolSurface } from "./tool-surface.js";
 import { emitRunEvidence } from "./run-evidence.js";
+import { isDocumentDraftPatch } from "./document-draft.js";
 
-/** Coordinates an explicit teacher decision, durable delivery, and a brief Pi reply.
- * Execution control is shared with ordinary turns; delivery stays in business services. */
+/** Coordinates teacher decisions and durable delivery. Completed A4 drafts settle
+ * independently; workflows that need continuation share ordinary Pi execution. */
 export class PiApprovalWorkflow {
   constructor(
     private readonly repository: LessonRepository,
@@ -93,7 +94,7 @@ export class PiApprovalWorkflow {
         ownerId: args.userId,
         runId: args.runId,
         leaseToken: args.leaseToken,
-        status: "awaiting_approval",
+        status: isDocumentDraftPatch(args.proposal.patch) ? "completed" : "awaiting_approval",
         tokenUsage: args.tokenUsage,
         messageStatus: "completed",
         messageContent: args.content,
@@ -113,6 +114,9 @@ export class PiApprovalWorkflow {
     if (args.settle !== false && args.emitCompletedMessage !== false) {
       const message = await this.repository.getMessage(args.userId, args.assistant.id) ?? args.assistant;
       await args.emit({ type: "message.completed", runId: args.runId, message });
+      if (isDocumentDraftPatch(args.proposal.patch)) {
+        await args.emit({ type: "run.completed", runId: args.runId });
+      }
     }
   }
 
@@ -143,6 +147,18 @@ export class PiApprovalWorkflow {
     if (!run?.capabilityPlan) throw new Error("run_not_found");
     if (run.status === "cancelled") {
       await args.emit({ type: "run.cancelled", runId: run.id });
+      return;
+    }
+    // A completed A4 draft is an independent decision, not another model run.
+    // It can be adopted while the teacher continues a different chat turn.
+    if (isDocumentDraftPatch(approval.patch) && run.status === "completed") {
+      const decision = await this.repository.decideApproval({
+        ownerId: args.userId, approvalId: approval.id, approved: args.approved,
+        encryptedRunState: approval.encryptedRunState, completeWithoutContinuation: true,
+      });
+      if (decision.file) await args.emit({ type: "document.updated", runId: run.id, file: decision.file });
+      if (decision.basis) await args.emit({ type: "design_basis.updated", runId: run.id, basis: decision.basis });
+      await args.emit({ type: "approval.settled", runId: run.id, approvalId: approval.id, decision: desired });
       return;
     }
     await args.emit({

@@ -327,7 +327,11 @@ export function deriveBranchRuntimeState({
   const obsoleteLegacyContinuation = approvals.some((item) => (
     isObsoleteLegacyContinuation(item) && item.runId === persistedRun?.id
   ));
-  const activeApproval = activeApprovalFrom(approvals);
+  const activeApproval = activeApprovalFrom(approvals.filter((item) => (
+    !(item.patch && "baseDocumentVersion" in item.patch)
+    || ["ready", "running"].includes(item.continuationStatus)
+    || (persistedRun?.id === item.runId && persistedRun.status === "awaiting_approval")
+  )));
   if (activeApproval) {
     const phase = approvalPhase(activeApproval);
     return {

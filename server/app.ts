@@ -1272,6 +1272,10 @@ export function createApp(
     const input = z.object({ approved: z.boolean() }).parse(await c.req.json());
     const userId = c.get("userId");
     const idempotencyKey = c.req.header("idempotency-key") ?? crypto.randomUUID();
+    const targetApproval = await repository.getApproval(userId, c.req.param("approvalId"));
+    const detachedDecision = targetApproval?.runId === c.req.param("runId")
+      && "baseDocumentVersion" in targetApproval.patch
+      && (await repository.getRun(userId, targetApproval.runId))?.status === "completed";
     return streamSSE(c, async (stream) => {
       const dispatcher = new RunEventDispatcher(
         (event: Parameters<Parameters<typeof agent.resumeApproval>[0]["emit"]>[0]) => stream.writeSSE({
@@ -1301,9 +1305,11 @@ export function createApp(
           "Agent approval continuation failed",
           error instanceof Error ? error.message : "unknown_error",
         );
-        await emit({
-          type: "run.failed", runId: c.req.param("runId"),
+        await emit(detachedDecision ? {
+          type: "approval.failed", runId: c.req.param("runId"), approvalId: c.req.param("approvalId"),
           error: publicAgentError(error, "approval_resume_failed"),
+        } : {
+          type: "run.failed", runId: c.req.param("runId"), error: publicAgentError(error, "approval_resume_failed"),
         });
       } finally {
         const failures = await dispatcher.flush();

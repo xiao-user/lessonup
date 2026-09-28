@@ -65,6 +65,12 @@ export function approvalEvent(approvals, event) {
   }
   return approvals.map((item) => {
     if (item.runId !== event.runId || item.continuationStatus === "completed") return item;
+    if (event.type === "run.cancelled" && item.state === "pending") {
+      return { ...item, state: "expired", transport: undefined };
+    }
+    if (event.type === "approval.settled" && item.id === event.approvalId) {
+      return { ...item, state: event.decision, continuationStatus: "completed", transport: undefined };
+    }
     if (event.type === "approval.decided" && item.id === event.approvalId) {
       return { ...item, state: event.decision, continuationStatus: "running", transport: undefined };
     }
@@ -83,6 +89,7 @@ export function reconcileApprovals(current, incoming) {
   return incoming.map((record) => {
     const previous = byId.get(record.id);
     if (previous?.continuationStatus === "completed" && record.continuationStatus !== "completed") return previous;
+    if (record.state === "pending" && previous?.decisionError) return { ...record, decisionError: previous.decisionError };
     return record;
   });
 }

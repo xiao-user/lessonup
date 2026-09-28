@@ -1,5 +1,6 @@
 import { approvalEvent, reconcileApprovals } from "./approval-state.js";
 import { deriveBranchRuntimeState } from "./agent-run-control.js";
+import { isDocumentApproval } from "./document-draft.js";
 
 export const initialConversationState = Object.freeze({
   messages: [],
@@ -32,7 +33,7 @@ export function conversationStateReducer(state, action) {
     const approvals = approvalEvent(state.approvals, action.event);
     if (approvals === state.approvals) return state;
     return { ...state, approvals,
-      ...(action.event.type === "approval.required" ? { status: "awaiting_approval" } : {}),
+      ...(action.event.type === "approval.required" && !isDocumentApproval(action.event) ? { status: "awaiting_approval" } : {}),
     };
   }
   if (action.type === "set") {

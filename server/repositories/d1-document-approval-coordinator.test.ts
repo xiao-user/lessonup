@@ -16,10 +16,11 @@ describe("D1DocumentApprovalCoordinator", () => {
     } as unknown as SqlDatabase;
     const coordinator = new D1DocumentApprovalCoordinator(database, () => "2026-08-24T00:00:00.000Z");
     await expect(coordinator.applyApprovedPatch({ ownerId: "owner-1", approvalId: "approval-1", idempotencyKey: "approval:approval-1" })).resolves.toMatchObject({ documentVersion: 1, document: { objectives: "可评价目标" } });
-    expect(batches[0]).toHaveLength(4);
+    expect(batches[0]).toHaveLength(5);
     expect(batches[0]?.[0]?.sql).toContain("document_version = ?");
-    expect(batches[0]?.[2]?.sql).toContain("state = 'pending'");
-    expect(batches[0]?.[3]?.sql).toContain("operation_idempotency");
+    expect(batches[0]?.[0]?.sql).toContain("ELSE NULL");
+    expect(batches[0]?.[3]?.sql).toContain("state = 'pending'");
+    expect(batches[0]?.[4]?.sql).toContain("operation_idempotency");
   });
 
   it("uses the same guarded document path for an approval decision", async () => {
@@ -35,7 +36,7 @@ describe("D1DocumentApprovalCoordinator", () => {
     } as unknown as SqlDatabase;
     const coordinator = new D1DocumentApprovalCoordinator(database, () => "2026-08-24T00:00:00.000Z");
     await expect(coordinator.decideApproval({ ownerId: "owner-1", approvalId: "approval-1", approved: true, encryptedRunState: "after-decision" })).resolves.toMatchObject({ file: { documentVersion: 1 }, approval: { state: "pending" } });
-    expect(batches[0]?.[2]?.params).toContain("after-decision");
+    expect(batches[0]?.[3]?.params).toContain("after-decision");
   });
 });
 

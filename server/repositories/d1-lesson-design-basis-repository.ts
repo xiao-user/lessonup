@@ -42,16 +42,25 @@ export class D1LessonDesignBasisRepository implements D1LessonDesignBasisStore {
     const replay = await this.database.query<{ request_fingerprint: string; response_json: string }>({ sql: "SELECT request_fingerprint, response_json FROM operation_idempotency WHERE owner_id = ? AND operation = 'lesson_design_basis_patch' AND idempotency_key = ?", params: [ownerId, context.idempotencyKey] });
     if (replay.rows[0]) { if (replay.rows[0].request_fingerprint !== fingerprint) throw new Error("idempotency_conflict"); return JSON.parse(replay.rows[0].response_json) as LessonDesignBasisAggregate; }
     const now = this.clock(); const next = applyLessonDesignBasisPatch(current, patch, now); const snapshot = JSON.stringify(next);
-    const removed = current.entries.filter((entry) => !next.entries.some((item) => item.id === entry.id));
     const statements: SqlStatement[] = [
-      { sql: "UPDATE lesson_design_bases SET learner_context_json = ?, teacher_notes = ?, status = ?, version = ?, updated_at = ? WHERE owner_id = ? AND id = ? AND version = ?", params: [JSON.stringify(next.basis.learnerContext), next.basis.teacherNotes, next.basis.status, next.basis.version, now, ownerId, current.basis.id, current.basis.version] },
-      ...removed.map((entry) => ({ sql: "DELETE FROM lesson_design_basis_entries WHERE owner_id = ? AND basis_id = ? AND id = ?", params: [ownerId, current.basis.id, entry.id] })),
-      ...next.entries.map((entry) => entryStatement(ownerId, current.basis.id, entry)),
-      { sql: "INSERT INTO lesson_design_basis_versions (id, owner_id, basis_id, basis_version, snapshot_json, actor, run_id, approval_id, idempotency_key, request_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params: [crypto.randomUUID(), ownerId, current.basis.id, next.basis.version, snapshot, context.actor, context.runId ?? null, context.approvalId ?? null, context.idempotencyKey, fingerprint, now] },
+      ...designBasisSnapshotStatements(ownerId, current, next, { ...context, fingerprint, now }),
       { sql: "INSERT INTO operation_idempotency (owner_id, operation, idempotency_key, request_fingerprint, response_json, created_at) VALUES (?, 'lesson_design_basis_patch', ?, ?, ?, ?)", params: [ownerId, context.idempotencyKey, fingerprint, snapshot, now] },
     ];
     const result = await this.database.batch(statements); if (result[0]?.rowsAffected !== 1) throw new Error("stale_resource"); return next;
   }
+}
+
+/** Composable writes; the caller owns the surrounding D1 transaction/CAS. */
+export function designBasisSnapshotStatements(ownerId: string, current: LessonDesignBasisAggregate, next: LessonDesignBasisAggregate, context: {
+  actor: "manual" | "agent"; idempotencyKey: string; fingerprint: string; now: string; approvalId?: string; runId?: string;
+}): SqlStatement[] {
+  const removed = current.entries.filter(entry => !next.entries.some(item => item.id === entry.id));
+  return [
+    { sql: "UPDATE lesson_design_bases SET learner_context_json = ?, teacher_notes = ?, status = ?, version = ?, updated_at = ? WHERE owner_id = ? AND id = ? AND version = ?", params: [JSON.stringify(next.basis.learnerContext), next.basis.teacherNotes, next.basis.status, next.basis.version, context.now, ownerId, current.basis.id, current.basis.version] },
+    ...removed.map(entry => ({ sql: "DELETE FROM lesson_design_basis_entries WHERE owner_id = ? AND basis_id = ? AND id = ?", params: [ownerId, current.basis.id, entry.id] })),
+    ...next.entries.map(entry => entryStatement(ownerId, current.basis.id, entry)),
+    { sql: "INSERT INTO lesson_design_basis_versions (id, owner_id, basis_id, basis_version, snapshot_json, actor, run_id, approval_id, idempotency_key, request_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params: [crypto.randomUUID(), ownerId, current.basis.id, next.basis.version, JSON.stringify(next), context.actor, context.runId ?? null, context.approvalId ?? null, context.idempotencyKey, context.fingerprint, context.now] },
+  ];
 }
 
 const basisSelect = "SELECT id, owner_id, notebook_id, lesson_file_id, framework_id, semester_unit_id, lesson_blueprint_id, catalog_release_id, textbook_id, curriculum_node_id, semantic_release_id, source_framework_version, source_blueprint_version, learner_context_json, teacher_notes, status, version, created_at, updated_at FROM lesson_design_bases";

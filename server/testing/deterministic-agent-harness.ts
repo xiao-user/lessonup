@@ -241,6 +241,13 @@ export class DeterministicAgentHarness {
     if (approval.state !== "pending" && approval.state !== desiredState) {
       throw new Error("approval_already_resolved");
     }
+    if ((await this.repository.getRun(args.userId, approval.runId))?.status === "completed") {
+      const decision = await this.repository.decideApproval({ ownerId: args.userId, approvalId: approval.id,
+        approved: args.approved, encryptedRunState: "e2e-decision", completeWithoutContinuation: true });
+      if (decision.file) await args.emit({ type: "document.updated", runId: approval.runId, file: decision.file });
+      await args.emit({ type: "approval.settled", runId: approval.runId, approvalId: approval.id, decision: desiredState });
+      return decision.file;
+    }
     const wasPending = approval.state === "pending";
     const leaseToken = `e2e:${args.approvalId}:${args.idempotencyKey}`;
     let continuationClaimed = false;
@@ -472,6 +479,20 @@ export class DeterministicAgentHarness {
     patch: DocumentPatch;
     emit: Emit;
   }) {
+    const file = await this.repository.getLessonFile(args.input.userId, args.patch.fileId);
+    const fields: Partial<Record<keyof NonNullable<typeof file>["document"], string>> = {};
+    // Deterministic transport fixture only; native Pi streaming is covered by
+    // coordinator.integration.test.ts, not inferred from these browser events.
+    for (const operation of args.patch.operations) {
+      const original = file!.document[operation.field];
+      const full = original.slice(0, operation.start) + operation.replacement + original.slice(operation.end);
+      for (let length = 6; length < full.length + 6; length += 6) {
+        fields[operation.field] = full.slice(0, length);
+        await args.emit({ type: "document.draft", runId: args.runId, toolCallId: `draft:${args.runId}`,
+          fileId: args.patch.fileId, baseDocumentVersion: args.patch.baseDocumentVersion, fields: { ...fields } });
+        await wait(35);
+      }
+    }
     const approval: AgentApprovalRecord = {
       id: crypto.randomUUID(),
       ownerId: args.input.userId,
@@ -479,6 +500,7 @@ export class DeterministicAgentHarness {
       threadId: args.input.threadId,
       branchId: args.input.branchId,
       assistantMessageId: args.assistantId,
+      toolCallId: `draft:${args.runId}`,
       state: "pending",
       patch: args.patch,
       encryptedRunState: "deterministic-e2e-state",
@@ -495,16 +517,18 @@ export class DeterministicAgentHarness {
     const message = await this.repository.updateMessage(args.input.userId, args.assistantId, {
       content: "已准备一项教案修改，请确认。", status: "completed",
     });
-    await this.repository.updateRun(args.input.userId, args.runId, { status: "awaiting_approval" });
-    await this.repository.updateThread(args.input.userId, args.input.threadId, { status: "awaiting_approval" });
+    await this.repository.updateRun(args.input.userId, args.runId, { status: "completed" });
+    await this.repository.updateThread(args.input.userId, args.input.threadId, { status: "idle" });
     await args.emit({ type: "message.completed", runId: args.runId, message });
     await args.emit({
       type: "approval.required",
       runId: args.runId,
       approvalId: approval.id,
       assistantMessageId: args.assistantId,
+      toolCallId: approval.toolCallId,
       patch: args.patch,
     });
+    await args.emit({ type: "run.completed", runId: args.runId });
   }
 
   private async fail(

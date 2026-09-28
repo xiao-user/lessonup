@@ -147,7 +147,7 @@ function ApprovalOutcome({ approval, resourceLabel }: { approval: any; resourceL
   const presentation = approval.patch?.kind === "presentation_storyboard";
   const label = presentation ? (approval.state === "approved" ? approval.delivery?.status === "ready" ? "课堂演示已保存" : "课堂演示方案已确认" : "已退回课堂演示") : (approval.state === "approved" ? `修改已写入${resourceLabel}` : "已保留原文");
   const hasArtifact = presentation ? presentationContextChunks(approval).length > 0 : approvalRows(approval).length > 0;
-  if (hasArtifact) return null;
+  if (hasArtifact && !(approval.patch && "baseDocumentVersion" in approval.patch)) return null;
   return <StreamingText content={label} />;
 }
 
@@ -238,6 +238,7 @@ function ActiveInteraction({ chat, resourceLabel }: any) {
   }
   const approval = chat.approval;
   if (!approval) return null;
+  if (chat.documentApprovalInEditor && approval.patch && "baseDocumentVersion" in approval.patch) return null;
   const interaction = approvalInteraction(approval, resourceLabel);
   if (!interaction) return null;
   const { action, ...props } = interaction;

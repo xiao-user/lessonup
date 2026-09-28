@@ -357,6 +357,7 @@ export interface LessonRepository {
     approvalId: string;
     approved: boolean;
     encryptedRunState: string;
+    completeWithoutContinuation?: boolean;
   }): Promise<{
     approval: AgentApprovalRecord;
     file: LessonFileRecord | null;

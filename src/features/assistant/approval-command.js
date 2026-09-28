@@ -9,7 +9,7 @@ export async function executeApprovalCommand({ execute, onEvent, synchronize }) 
   try {
     await execute((event) => {
       if (terminal) return;
-      if (["run.completed", "run.cancelled", "run.failed"].includes(event.type)) terminal = event.type;
+      if (["approval.settled", "approval.failed", "run.completed", "run.cancelled", "run.failed"].includes(event.type)) terminal = event.type;
       onEvent(event);
     });
   } catch (error) {

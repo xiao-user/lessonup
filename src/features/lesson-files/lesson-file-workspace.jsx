@@ -20,6 +20,7 @@ import { LessonPlanTiptapEditor, PresentationMaterialRow } from "@/features/less
 import { applyLessonFieldEdit } from "@/features/lesson-files/lesson-plan-tiptap-bridge";
 import { renderLessonMarkdownHtml } from "@/features/lesson-files/lesson-markdown";
 import { agentApi } from "@/lib/agent-api";
+import { previewDocumentDraft } from "@/features/assistant/document-draft.js";
 
 gsap.registerPlugin(useGSAP);
 
@@ -193,6 +194,12 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     [file, notebook],
   );
   const [plan, setPlan] = useState(initialPlan);
+  const [agentDraft, setAgentDraft] = useState(null);
+  const [showOriginal, setShowOriginal] = useState(false);
+  const draftIdentity = agentDraft?.id ?? agentDraft?.toolCallId;
+  useEffect(() => { setShowOriginal(false); }, [draftIdentity]);
+  const draftPlan = useMemo(() => previewDocumentDraft(plan, agentDraft), [plan, agentDraft]);
+  const displayingDraft = Boolean(agentDraft && draftPlan && !showOriginal);
   const historyRef = useRef(createLessonHistory(initialPlan));
   const [historyAvailability, setHistoryAvailability] = useState({
     canUndo: false,
@@ -214,6 +221,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     confirmingDelete: false,
   });
   const [pages, setPages] = useState(() => paginateLessonPlan(initialPlan, {}, presentationMaterial));
+  const draftPages = useMemo(() => displayingDraft ? paginateLessonPlan(draftPlan, {}, presentationMaterial) : null, [displayingDraft, draftPlan, presentationMaterial]);
   const pageLayoutSignatureRef = useRef(pageLayoutSignature(pages));
   const pageContentSignatureRef = useRef(pageContentSignature(pages));
   const [pageLayoutRevision, setPageLayoutRevision] = useState(0);
@@ -499,7 +507,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     observer.observe(scrollRoot);
     updateScale();
     return () => observer.disconnect();
-  }, [editorReadyRevision]);
+  }, [editorReadyRevision, displayingDraft]);
 
   useEffect(() => {
     const scrollRoot = scrollRef.current;
@@ -512,7 +520,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
       if (anchorScrollActiveRef.current) return;
       const scrollRect = scrollRoot.getBoundingClientRect();
       const anchorTop = scrollRect.top + Math.min(140, scrollRect.height * 0.2);
-      const sections = [...root.querySelectorAll("[data-lesson-section]")].map((section) => {
+      const sections = [...root.querySelectorAll("[data-lesson-section]")].filter((section) => !section.closest("[hidden]")).map((section) => {
         const rect = section.getBoundingClientRect();
         return {
           id: section.dataset.lessonSection,
@@ -786,7 +794,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
 
   const scrollToSection = contextSafe((sectionId) => {
     const scrollRoot = scrollRef.current;
-    const target = rootRef.current.querySelector(`#lesson-section-${sectionId}`);
+    const target = documentPagesRef.current?.querySelector(`#lesson-section-${sectionId}`);
     if (!scrollRoot || !target) return;
     const targetTop = target.getBoundingClientRect().top
       - scrollRoot.getBoundingClientRect().top
@@ -1051,6 +1059,21 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
           aria-label="A4教案编辑区"
         >
           <p className="lesson-mobile-document-hint">上下滚动查看完整教案</p>
+          {displayingDraft ? <LessonPlanTiptapEditor
+            key="agent-draft"
+            plan={draftPlan}
+            pages={draftPages}
+            readOnly
+            externalRevision={0}
+            layoutRevision={0}
+            displayRevision="draft"
+            containerRef={setDocumentPagesRef}
+            onFieldChange={() => {}}
+            onFieldFocus={setActiveSection}
+            onSelectionChange={() => {}}
+            presentationMaterial={presentationMaterial}
+          /> : null}
+          <div hidden={displayingDraft}>
           <LessonPlanTiptapEditor
             plan={plan}
             pages={pages}
@@ -1058,7 +1081,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
             externalRevision={editorExternalRevision}
             layoutRevision={pageLayoutRevision}
             displayRevision="canonical"
-            containerRef={setDocumentPagesRef}
+            containerRef={displayingDraft ? undefined : setDocumentPagesRef}
             onEditorReady={handleTiptapEditorReady}
             onFieldChange={commitEditorFragment}
             onFieldFocus={setActiveSection}
@@ -1070,7 +1093,23 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
               onDelete: deletePresentationMaterial,
             }}
           />
+          </div>
         </main>
+        {agentDraft ? <div className="lesson-draft-bar" aria-label="A4 草稿操作">
+          <div role="status">
+            <strong>{agentDraft.phase === "streaming" || agentDraft.generating ? "正在生成草稿…" : agentDraft.phase === "executing" ? "正在保存决定…" : agentDraft.patch?.summary ?? "修改待采用"}</strong>
+            <span>{agentDraft.phase === "recoverable" ? "决定已保存，仅需恢复旧会话回复。" : !draftPlan ? "原文已变化，请重新生成；未覆盖你的编辑。" : "草稿尚未保存，对话可以继续。"}</span>
+            {agentDraft.error ? <span role="alert">{agentDraft.error}</span> : null}
+          </div>
+          <Button variant="ghost" size="sm" onClick={() => setShowOriginal((value) => !value)}>{showOriginal ? "查看草稿" : "查看原文"}</Button>
+          {agentDraft.choices?.length > 1 ? <select aria-label="选择待采用草稿" value={agentDraft.id} onChange={(event) => agentDraft.choose(event.target.value)}>
+            {agentDraft.choices.map((choice) => <option key={choice.id} value={choice.id}>{choice.label}</option>)}
+          </select> : null}
+          {agentDraft.phase === "syncing" ? <Button size="sm" onClick={agentDraft.synchronize}>同步结果</Button> : <>
+            <Button variant="outline" size="sm" disabled={agentDraft.phase !== "pending" || agentDraft.generating} onClick={agentDraft.discard}>放弃修改</Button>
+            <Button size="sm" disabled={agentDraft.phase !== "recoverable" && (!draftPlan || agentDraft.phase !== "pending" || agentDraft.generating)} onClick={agentDraft.accept}>{agentDraft.phase === "recoverable" ? "恢复回复" : "采用修改"}</Button>
+          </>}
+        </div> : null}
       </div>
 
       <aside id="lesson-assistant-panel" className={`lesson-side-rail lesson-assistant-rail ${mobileRail === "assistant" ? "is-mobile-open" : ""}`}>
@@ -1084,6 +1123,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
             onClearSelection={() => setSelectionContext(null)}
             onCanonicalDocument={applyCanonicalAgentDocument}
             onBeforeRun={flushDocumentBeforeAgentRun}
+            onDocumentDraft={setAgentDraft}
             onNavigateToSection={scrollToSection}
           />
         </Suspense>

@@ -46,6 +46,7 @@ export class PiAgentExecutor {
     thinkingLevel?: TeacherThinkingLevel;
     lane?: "fast" | "agent";
     onCapturedProposal?: (session: { revision: number; cursor: number }) => void | Promise<void>;
+    documentDraftScope?: { fileId: string; baseDocumentVersion: number };
   }): Promise<PiAgentRunResult> {
     const { ownerId, threadId, branchId } = args.scope;
     const lane = args.lane ?? "agent";
@@ -66,17 +67,21 @@ export class PiAgentExecutor {
     const systemPrompt = lane === "fast"
       ? FAST_SYSTEM_INSTRUCTIONS
       : systemPromptWithSkills(STATIC_SYSTEM_INSTRUCTIONS, skills);
-    const promptOverheadBytes = piProviderPromptOverheadBytes({
-      systemPrompt,
-      tools,
-      turnContext: args.turnContext,
-    });
     let durableHistory = repairDurableHistory(decodePiAgentMessages(snapshot?.messages ?? []));
     const knownApprovalToolCallIds = new Set(
       approvals
         .map((item) => item.toolCallId)
         .filter((toolCallId): toolCallId is string => Boolean(toolCallId)),
     );
+    // A4 decisions no longer run another model turn. Supply their durable facts
+    // in the dynamic context on the next turn without rewriting raw history.
+    const turnContext = {
+      ...(args.turnContext && typeof args.turnContext === "object" ? args.turnContext : {}),
+      documentDecisions: approvals.filter((item) => "baseDocumentVersion" in item.patch).map((item) => ({
+        id: item.id, toolCallId: item.toolCallId, state: item.state, summary: item.patch.summary,
+      })),
+    };
+    const promptOverheadBytes = piProviderPromptOverheadBytes({ systemPrompt, tools, turnContext });
     durableHistory = rejectOrphanApprovalRequiredResults(durableHistory, knownApprovalToolCallIds);
     let expectedRevision = snapshot?.revision ?? 0;
     let lastSaved = snapshot ?? null;
@@ -149,12 +154,12 @@ export class PiAgentExecutor {
         lane === "fast"
           ? bindFastProviderContext({
             messages,
-            turnContext: args.turnContext,
+            turnContext,
           })
           : bindProviderContext({
             messages,
             memory,
-            turnContext: args.turnContext,
+            turnContext,
           })
       ),
       shouldStopAfterTurn: (context) => {
@@ -265,6 +270,7 @@ export class PiAgentExecutor {
       signal: args.signal,
       emit: args.emit,
       onTextDelta: args.onTextDelta,
+      documentDraftScope: args.documentDraftScope,
     });
     const abort = () => agent.abort();
     if (args.signal?.aborted) agent.abort();

@@ -2,23 +2,59 @@ import { createThread, expect, openLessonFile, sendPrompt, test } from "./fixtur
 import { approvedObjective, initialObjective, lessonFileId } from "./test-data.js";
 
 const fieldEditor = (page: import("@playwright/test").Page, label: string) => page
-  .locator(`.lesson-tiptap-field[aria-label="${label}"]`)
+  .locator(`.lesson-tiptap-field[aria-label="${label}"]:visible`)
   .first();
 const objectivesEditor = (page: import("@playwright/test").Page) => fieldEditor(page, "教学目标");
 const assessmentEditor = (page: import("@playwright/test").Page) => fieldEditor(page, "评价练习");
 const approvalCard = (page: import("@playwright/test").Page) => page
-  .getByRole("button", { name: "接受修改" })
-  .locator("xpath=ancestor::section[1]");
+  .getByLabel("A4 草稿操作");
 const approvalDiff = (page: import("@playwright/test").Page) => page
   .getByText("教案修改对比", { exact: true })
   .locator("xpath=../..");
+
+test("streams an isolated A4 draft, keeps chat available, and recovers before adoption", async ({ lessonPage: page }) => {
+  const consoleErrors: string[] = [];
+  page.on("pageerror", error => consoleErrors.push(error.message));
+  await sendPrompt(page, "请提交修改");
+  await expect(page.getByText("正在生成草稿…", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "采用修改" })).toBeDisabled();
+  await expect(objectivesEditor(page)).toHaveAttribute("contenteditable", "false");
+  const partial = await objectivesEditor(page).innerText();
+  const canonicalBefore = await (await page.request.get(`/api/lesson-files/${lessonFileId}`)).json();
+  expect(canonicalBefore.document.objectives).toContain(initialObjective);
+  await expect(page.getByRole("button", { name: "采用修改" })).toBeEnabled();
+  expect((await objectivesEditor(page).innerText()).length).toBeGreaterThan(partial.length);
+  await expect(page.getByLabel("向备课助手提问")).toBeEnabled();
+  await page.screenshot({ path: "/tmp/lessonup-a4-draft-desktop.png" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator("#lesson-assistant-panel")).toBeHidden();
+  await expect(page.locator("#lesson-outline-panel")).toBeHidden();
+  await expect(approvalCard(page)).toBeVisible();
+  await page.getByRole("button", { name: "采用修改" }).click({ trial: true });
+  expect(await approvalCard(page).evaluate(element => element.getBoundingClientRect().right)).toBeLessThanOrEqual(390);
+  await page.screenshot({ path: "/tmp/lessonup-a4-draft-mobile.png" });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.reload();
+  await openLessonFile(page);
+  await expect(page.getByRole("button", { name: "采用修改" })).toBeEnabled();
+  await sendPrompt(page, "继续讨论教学方法");
+  await expect(page.getByRole("heading", { name: "确定性回复" })).toBeVisible();
+  const canonicalAfterChat = await (await page.request.get(`/api/lesson-files/${lessonFileId}`)).json();
+  expect(canonicalAfterChat.document).toEqual(canonicalBefore.document);
+  expect(canonicalAfterChat.documentVersion).toBe(canonicalBefore.documentVersion);
+  await page.getByRole("button", { name: "采用修改" }).click();
+  await expect(page.getByText("修改已写入教案", { exact: true })).toBeVisible();
+  await expect(objectivesEditor(page)).toContainText(approvedObjective.replace(/^\d+\.\s*/, ""));
+  await expect(page.getByLabel("向备课助手提问")).toBeEnabled();
+  expect(consoleErrors).toEqual([]);
+});
 
 test("confirms one complete lesson change and writes basis plus A4 atomically", async ({ lessonPage: page }) => {
   await sendPrompt(page, "请提交完整备课调整");
   const confirmation = approvalCard(page);
   await expect(confirmation).toBeVisible();
   await expect(confirmation).toContainText("补充学生困难并落实到评价练习");
-  await expect(confirmation).toContainText("确认前不会写入任何修改");
+  await expect(confirmation).toContainText("草稿尚未保存，对话可以继续。");
   const overflow = await approvalDiff(page).evaluate((element) => {
     const card = element.getBoundingClientRect();
     return [...element.querySelectorAll("del, ins, details")].some((child) => {
@@ -29,8 +65,8 @@ test("confirms one complete lesson change and writes basis plus A4 atomically", 
   expect(overflow).toBe(false);
   await expect(approvalDiff(page).locator("ins")).toContainText("要求学生说明判断所依据的文本证据");
 
-  await page.getByRole("button", { name: "接受修改" }).click();
-  await expect(page.getByText("修改已按确认写入教案。", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "采用修改" }).click();
+  await expect(page.getByText("修改已写入教案", { exact: true })).toBeVisible();
   await expect(assessmentEditor(page)).toContainText("要求学生说明判断所依据的文本证据");
 
   const basisResponse = await page.request.get(`/api/lesson-files/${lessonFileId}/design-basis`);
@@ -50,10 +86,10 @@ test("rolls back a complete lesson change when the A4 target conflicts", async (
   await expect(approvalCard(page)).toBeVisible();
 
   const teacherValue = "教师自行设计了新的测评任务，不采用原评价表述。";
+  await page.getByRole("button", { name: "查看原文" }).click();
   await assessmentEditor(page).fill(teacherValue);
-  await page.getByRole("button", { name: "接受修改" }).click();
-
-  await expect(page.getByText(/教案内容已在其他会话或编辑器中更新/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "采用修改" })).toBeDisabled();
+  await expect(page.getByText(/原文已变化，请重新生成/)).toBeVisible();
   await expect(assessmentEditor(page)).toContainText(teacherValue);
   const basisResponse = await page.request.get(`/api/lesson-files/${lessonFileId}/design-basis`);
   expect(basisResponse.ok()).toBeTruthy();
@@ -100,11 +136,11 @@ test("shows and applies an explicit design-basis projection without changing the
   const confirmation = approvalCard(page);
   await expect(confirmation).toBeVisible();
   await expect(confirmation).toContainText("把已确认的学生困难落实到评价练习");
-  await expect(confirmation).toContainText("确认前不会写入任何修改");
+  await expect(confirmation).toContainText("草稿尚未保存，对话可以继续。");
   await expect(approvalDiff(page).locator("ins")).toContainText("要求学生说明判断所依据的文本证据");
 
-  await page.getByRole("button", { name: "接受修改" }).click();
-  await expect(page.getByText("修改已按确认写入教案。", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "采用修改" }).click();
+  await expect(page.getByText("修改已写入教案", { exact: true })).toBeVisible();
   await expect(assessmentEditor(page)).toContainText("要求学生说明判断所依据的文本证据");
 
   const finalBasisResponse = await page.request.get(`/api/lesson-files/${lessonFileId}/design-basis`);
@@ -125,14 +161,14 @@ test("covers approval diff, refresh recovery, reject, approve, safe rebase and u
   await page.reload();
   await openLessonFile(page);
   await expect(approvalCard(page)).toBeVisible();
-  await page.getByRole("button", { name: "拒绝" }).click();
-  await expect(page.getByText("已保留教案原文。", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "放弃修改" }).click();
+  await expect(page.getByText("已保留原文", { exact: true })).toBeVisible();
   await expect(objectivesEditor(page)).toContainText(initialObjective.replace(/^\d+\.\s*/, ""));
 
   await createThread(page);
   await sendPrompt(page, "请提交修改");
-  await page.getByRole("button", { name: "接受修改" }).click();
-  await expect(page.getByText("修改已按确认写入教案。", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "采用修改" }).click();
+  await expect(page.getByText("修改已写入教案", { exact: true })).toBeVisible();
   await expect(objectivesEditor(page)).toContainText(approvedObjective.replace(/^\d+\.\s*/, ""));
   await expect(page.getByRole("button", { name: "撤销" })).toBeEnabled();
   await page.getByRole("button", { name: "撤销" }).click();
@@ -145,12 +181,13 @@ test("covers approval diff, refresh recovery, reject, approve, safe rebase and u
   await expect(approvalCard(page)).toBeVisible();
   await expect(page.getByRole("region", { name: "春日的第一声鸟鸣备课文件" })).toBeVisible();
   const manualValue = `${initialObjective}（并发编辑）\n2. 在观察、比较与讨论中形成解决问题的方法。`;
+  await page.getByRole("button", { name: "查看原文" }).click();
   await objectivesEditor(page).fill(manualValue);
   await expect(page.getByRole("region", { name: "春日的第一声鸟鸣备课文件" })).toBeVisible();
   await objectivesEditor(page).blur();
   await expect(page.getByText("已自动保存", { exact: false })).toBeVisible();
-  await page.getByRole("button", { name: "接受修改" }).click();
-  await expect(page.getByText("修改已按确认写入教案。", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "采用修改" }).click();
+  await expect(page.getByText("修改已写入教案", { exact: true })).toBeVisible();
   await expect(objectivesEditor(page)).toContainText("能从文本证据中解释春日意象的形成。（并发编辑）");
 });
 
@@ -203,11 +240,12 @@ test("flushes a pending edit before approval and safely preserves it", async ({ 
   await expect(approvalCard(page)).toBeVisible();
 
   const unsavedValue = `${initialObjective}（审批前继续编辑）\n2. 保留教师刚刚补充的内容。`;
+  await page.getByRole("button", { name: "查看原文" }).click();
   await objectivesEditor(page).fill(unsavedValue);
-  await page.getByRole("button", { name: "接受修改" }).click();
+  await page.getByRole("button", { name: "采用修改" }).click();
 
   const mergedValue = `${approvedObjective}（审批前继续编辑）\n2. 保留教师刚刚补充的内容。`;
-  await expect(page.getByText("修改已按确认写入教案。", { exact: true })).toBeVisible();
+  await expect(page.getByText("修改已写入教案", { exact: true })).toBeVisible();
   await expect(objectivesEditor(page)).toContainText("能从文本证据中解释春日意象的形成。（审批前继续编辑）");
   await page.reload();
   await openLessonFile(page);
@@ -219,28 +257,28 @@ test("rejects a true conflict when the teacher changes the proposed target", asy
   await expect(approvalCard(page)).toBeVisible();
 
   const teacherValue = "1. 教师已将本项目标改为观察声音线索。\n2. 保留教师自己的教学判断。";
+  await page.getByRole("button", { name: "查看原文" }).click();
   await objectivesEditor(page).fill(teacherValue);
-  await page.getByRole("button", { name: "接受修改" }).click();
-
-  await expect(page.getByText(/教案内容已在其他会话或编辑器中更新/)).toBeVisible();
-  await expect(page.getByRole("button", { name: "重试" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "采用修改" })).toBeDisabled();
+  await expect(page.getByText(/原文已变化，请重新生成/)).toBeVisible();
   await expect(objectivesEditor(page)).toContainText("教师已将本项目标改为观察声音线索");
 });
 
-test("recovers a committed approval after continuation failure without applying the patch twice", async ({ lessonPage: page }) => {
+test("recovers a committed decision after a lost response without starting a reply run", async ({ lessonPage: page }) => {
   await sendPrompt(page, "请提交修改并验证续跑恢复");
-  await page.getByRole("button", { name: "接受修改" }).click();
-
-  await expect(page.getByText(/修改已经保存到教案，仅需恢复助手回复/)).toBeVisible();
-  await expect(page.locator(".lesson-agent-error")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "重试回复" })).toBeVisible();
-
+  await expect(page.getByRole("button", { name: "采用修改" })).toBeEnabled();
+  const before = await (await page.request.get(`/api/lesson-files/${lessonFileId}`)).json();
+  await page.route("**/api/agent/runs/*/approvals/*", async (route) => {
+    await route.fetch();
+    await route.abort("failed");
+  });
+  await page.getByRole("button", { name: "采用修改" }).click();
+  await expect(page.getByText("修改已写入教案", { exact: true })).toBeVisible();
   await page.reload();
   await openLessonFile(page);
-  await expect(page.getByRole("button", { name: "重试回复" })).toBeVisible();
-  await page.getByRole("button", { name: "重试回复" }).click();
-
-  await expect(page.getByText("修改已按确认写入教案。", { exact: true })).toBeVisible();
+  await expect(page.getByText("修改已写入教案", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "重试回复" })).toHaveCount(0);
+  const canonical = await page.request.get(`/api/lesson-files/${lessonFileId}`);
+  expect((await canonical.json()).documentVersion).toBe(before.documentVersion + 1);
   await expect(objectivesEditor(page)).toContainText(approvedObjective.replace(/^\d+\.\s*/, ""));
 });

@@ -109,23 +109,23 @@ test("routes a theme Approval Card answer into the next Turn instead of the Pi q
   await expect(page.getByText("已接收主题 theme02，并进入下一步。", { exact: true })).toBeVisible();
 });
 
-test("reopens a thread on the branch that owns its pending approval", async ({ lessonPage: page }) => {
+test("isolates drafts on their proposing branch and recovers them on reopen", async ({ lessonPage: page }) => {
   await sendPrompt(page, "先生成一个可分支的回复");
   await expect(page.getByRole("heading", { name: "确定性回复" })).toBeVisible();
   await page.getByRole("button", { name: "从此创建分支" }).click();
   await expect(page.getByLabel("切换消息分支")).toBeVisible();
 
   await sendPrompt(page, "请提交修改");
-  await expect(page.getByRole("button", { name: "接受修改" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "采用修改" })).toBeVisible();
 
   await page.getByLabel("切换消息分支").click();
   await page.getByRole("listbox").getByRole("option").first().click();
-  await expect(page.getByRole("button", { name: "接受修改" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "采用修改" })).toHaveCount(0);
 
   await page.reload();
   await openLessonFile(page);
-  await expect(page.getByRole("button", { name: "接受修改" })).toBeVisible();
-  await expect(page.getByText("确认前不会写入任何修改。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "采用修改" })).toBeVisible();
+  await expect(page.getByText("草稿尚未保存，对话可以继续。", { exact: true })).toBeVisible();
 });
 
 test("deletes an unsent composer attachment when the user starts another thread", async ({ lessonPage: page }) => {

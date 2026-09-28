@@ -1437,6 +1437,8 @@ export type NormalizedAgentEvent =
   | { type: "agent.completed"; runId: string; turnCount: number }
   | { type: "thread.updated"; runId: string; thread: AgentThreadRecord }
   | { type: "document.updated"; runId: string; file: LessonFileRecord }
+  | { type: "document.draft"; runId: string; toolCallId: string; fileId: string; baseDocumentVersion: number; fields: Partial<Record<LessonField, string>> }
+  | { type: "document.draft.discarded"; runId: string; toolCallId: string }
   | { type: "design_basis.updated"; runId: string; basis: LessonDesignBasisAggregate }
   | { type: "resource.updated"; runId: string; resourceType: "semester_framework"; framework: SemesterFrameworkAggregate }
   | { type: "message.delta"; runId: string; delta: string; turn?: number }
@@ -1495,6 +1497,8 @@ export type NormalizedAgentEvent =
     transportTiming?: import("./agent-runtime/pi/transport-timing.js").PiTransportTiming;
   }
   | { type: "approval.decided"; runId: string; approvalId: string; decision: "approved" | "rejected" }
+  | { type: "approval.settled"; runId: string; approvalId: string; decision: "approved" | "rejected" }
+  | { type: "approval.failed"; runId: string; approvalId: string; error: string }
   | { type: "approval.delivered"; runId: string; approvalId: string; presentationId: string }
   | { type: "message.completed"; runId: string; message: AgentMessageRecord }
   | {

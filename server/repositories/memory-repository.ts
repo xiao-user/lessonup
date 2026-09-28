@@ -1503,7 +1503,8 @@ export class MemoryLessonRepository implements LessonRepository {
       });
     }
     const thread = await this.getThread(ownerId, approval.threadId);
-    if (thread?.status === "awaiting_approval" || thread?.status === "running") {
+    const anotherActiveRun = [...this.runs.values()].some((item) => item.ownerId === ownerId && item.threadId === approval.threadId && ["queued", "running", "awaiting_approval"].includes(item.status));
+    if (!anotherActiveRun && (thread?.status === "awaiting_approval" || thread?.status === "running")) {
       await this.updateThread(ownerId, thread.id, { status: "idle" });
     }
     return structuredClone(updated);
@@ -1514,6 +1515,7 @@ export class MemoryLessonRepository implements LessonRepository {
     approvalId: string;
     approved: boolean;
     encryptedRunState: string;
+    completeWithoutContinuation?: boolean;
   }) {
     let approval = await this.getApproval(args.ownerId, args.approvalId);
     if (!approval) throw new Error("approval_not_found");
@@ -1582,7 +1584,7 @@ export class MemoryLessonRepository implements LessonRepository {
       ...approval,
       state: desiredState,
       encryptedRunState: args.encryptedRunState,
-      continuationStatus: approval.continuationStatus === "completed" ? "completed" : "ready",
+      continuationStatus: args.completeWithoutContinuation || approval.continuationStatus === "completed" ? "completed" : "ready",
       continuationLeaseToken: undefined,
       continuationLeaseExpiresAt: undefined,
       continuationError: undefined,

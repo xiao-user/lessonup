@@ -598,7 +598,7 @@ describe("Pi production coordinator", () => {
     expect(JSON.stringify(session?.messages)).toContain('\\"status\\":\\"approval_required\\"');
   });
 
-  it("does not start a new turn while a leftover pending approval is still open", async () => {
+  it("allows a new turn while a leftover document draft is still pending", async () => {
     const { repository, created, coordinator } = await fixture();
     const assistant = await repository.appendMessage({
       id: "assistant-leftover-approval",
@@ -656,7 +656,7 @@ describe("Pi production coordinator", () => {
       activeSectionId: "assessment",
       documentVersion: 0,
       attachmentIds: [],
-    }, () => undefined)).rejects.toThrow("active_run_exists");
+    }, () => undefined)).resolves.toBeUndefined();
   });
 
   it("nudges an explicit write to propose inside the same Agent run", async () => {
@@ -891,7 +891,71 @@ describe("Pi production coordinator", () => {
     expect(calls.filter((call) => call === "render")).toHaveLength(1);
   });
 
-  it.each(["getMessage", "appendMessage"] as const)("releases a continuation after %s initialization fails and safely retries", async (method) => {
+  it("streams A4 before tool completion and adopts a draft without taking over a later native turn", async () => {
+    const { repository, created, faux, coordinator } = await fixture();
+    const replacement = "提交两处文本证据，并解释它们如何支持判断。";
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("read_document", { fields: ["assessment"] }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("propose_document_patch", {
+        summary: "修改评价", operations: [{ field: "assessment", replacement }],
+      }), { stopReason: "toolUse" }),
+    ]);
+    const events: any[] = [];
+    await coordinator.start({ userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
+      message: "请修改评价练习，让它检验文本证据。", activeSectionId: "assessment", documentVersion: 0, attachmentIds: [],
+    }, event => { events.push(event); });
+    const drafts = events.filter(event => event.type === "document.draft");
+    expect(drafts.length).toBeGreaterThan(1);
+    expect(drafts.some(event => event.fields.assessment.length > 0 && event.fields.assessment.length < replacement.length)).toBe(true);
+    expect(events.indexOf(drafts[0])).toBeLessThan(events.findIndex(event => event.type === "tool.started" && event.name === "propose_document_patch"));
+    expect(await repository.getLessonFile(ownerId, lessonFileId)).toMatchObject({ documentVersion: 0, document: lesson });
+    const [approval] = await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id);
+    expect(await repository.getRun(ownerId, approval!.runId)).toMatchObject({ status: "completed" });
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const finish = new Promise<void>(resolve => { release = resolve; });
+    faux.setResponses([async () => { entered(); await finish; return fauxAssistantMessage("可以继续讨论。"); }]);
+    const next = coordinator.start({ userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
+      message: "你好", activeSectionId: "assessment", documentVersion: 0, attachmentIds: [],
+    }, () => {});
+    await started;
+    try {
+      const decisionEvents: any[] = [];
+      const args = { userId: ownerId, runId: approval!.runId, approvalId: approval!.id,
+        approved: true, idempotencyKey: "adopt", emit: (event: any) => { decisionEvents.push(event); } };
+      await coordinator.resumeApproval(args);
+      await coordinator.resumeApproval(args);
+      expect(decisionEvents.map(event => event.type)).toEqual(["document.updated", "approval.settled", "document.updated", "approval.settled"]);
+      expect(await repository.getThread(ownerId, created.thread.id)).toMatchObject({ status: "running" });
+      expect(await repository.getLessonFile(ownerId, lessonFileId)).toMatchObject({ documentVersion: 1, document: { assessment: replacement } });
+      expect(await repository.getApproval(ownerId, approval!.id)).toMatchObject({ state: "approved", continuationStatus: "completed" });
+    } finally { release(); await next; }
+  });
+
+  it("cancels a partially streamed native document without persisting its text or an adoptable proposal", async () => {
+    const { repository, created, faux, coordinator } = await fixture();
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("read_document", { fields: ["assessment"] }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("propose_document_patch", {
+        summary: "修改评价", operations: [{ field: "assessment", replacement: "用文本证据解释判断。".repeat(100) }],
+      }), { stopReason: "toolUse" }),
+    ]);
+    let cancellation: Promise<boolean> | undefined;
+    const events: any[] = [];
+    await coordinator.start({ userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
+      message: "请修改评价练习，让它检验文本证据。", activeSectionId: "assessment", documentVersion: 0, attachmentIds: [],
+    }, event => {
+      events.push(event);
+      if (event.type === "document.draft" && !cancellation) cancellation = coordinator.cancel(ownerId, event.runId);
+    });
+    expect(await cancellation).toBe(true);
+    expect(events.some(event => event.type === "run.cancelled")).toBe(true);
+    expect(await repository.getLessonFile(ownerId, lessonFileId)).toMatchObject({ documentVersion: 0, document: lesson });
+    expect((await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id)).filter(item => item.state === "pending")).toEqual([]);
+  });
+
+  it.each(["getMessage", "appendMessage"] as const)("releases a legacy continuation after %s initialization fails and safely retries", async (method) => {
     const { repository, created, faux, coordinator } = await fixture();
     faux.setResponses([
       fauxAssistantMessage(fauxToolCall("read_document", { fields: ["assessment"] }), { stopReason: "toolUse" }),
@@ -904,6 +968,7 @@ describe("Pi production coordinator", () => {
     }, () => undefined);
     const [approval] = await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id);
     expect(approval).toBeTruthy();
+    await repository.updateRun(ownerId, approval!.runId, { status: "awaiting_approval" });
     const spy = vi.spyOn(repository, method).mockRejectedValueOnce(new Error("injected_initialization_failure"));
     const args = { userId: ownerId, runId: approval!.runId, approvalId: approval!.id,
       approved: true, idempotencyKey: "same-http-command", emit: () => undefined };
@@ -947,7 +1012,7 @@ describe("Pi production coordinator", () => {
     expect((await repository.getApproval(ownerId, approval!.id))?.continuationStatus).toBe("completed");
   });
 
-  it("cancels the continuation without undoing delivery or replaying a completed event", async () => {
+  it("cancels a legacy continuation without undoing delivery or replaying a completed event", async () => {
     const { repository, created, faux, coordinator } = await fixture();
     faux.setResponses([
       fauxAssistantMessage(fauxToolCall("read_document", { fields: ["assessment"] }), { stopReason: "toolUse" }),
@@ -959,6 +1024,7 @@ describe("Pi production coordinator", () => {
     await coordinator.start(input, () => undefined);
     const [approval] = await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id);
     let entered!: () => void;
+    await repository.updateRun(ownerId, approval!.runId, { status: "awaiting_approval" });
     const started = new Promise<void>(resolve => { entered = resolve; });
     faux.setResponses([async (_context, options) => {
       entered();
