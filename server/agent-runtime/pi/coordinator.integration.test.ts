@@ -371,6 +371,55 @@ describe("Pi production coordinator", () => {
     expect(await repository.getPendingLessonGenerationIntent(ownerId, lessonFileId)).toBeNull();
   });
 
+  it("provides optional emphasis guidance to the native Pi author before the A4 proposal", async () => {
+    const { repository, created, faux, coordinator } = await fixture();
+    repository.searchCurriculumStandards = async () => [{
+      id: "standard-1",
+      title: "义务教育语文课程标准",
+      kind: "public",
+      passage: "结合具体语言材料形成理解。",
+      score: 1,
+    }];
+    faux.setResponses([
+      (context) => {
+        expect(context.systemPrompt).toContain("skill://lesson-full-authoring@1.1.0");
+        return fauxAssistantMessage(fauxToolCall("read_skill", {
+          id: "lesson-full-authoring", version: "1.1.0",
+        }), { stopReason: "toolUse" });
+      },
+      (context) => {
+        const received = JSON.stringify(context.messages ?? []);
+        expect(received).toContain("重要性是突出显示的首要依据");
+        expect(received).toContain("重要内容应得到恰当突出，但不必每处都涂色");
+        return fauxAssistantMessage(fauxToolCall("read_document", {}), { stopReason: "toolUse" });
+      },
+      fauxAssistantMessage(fauxToolCall("search_curriculum_standards", {
+        query: "语文阅读 理解语言材料",
+      }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("propose_document_patch", {
+        summary: "完善教学过程",
+        operations: [{
+          field: "process",
+          replacement: "## 探究\n\n学生圈画==关键证据==，再解释它如何支持判断。",
+        }],
+      }), { stopReason: "toolUse" }),
+    ]);
+
+    await coordinator.start({
+      userId: ownerId,
+      threadId: created.thread.id,
+      branchId: created.branch.id,
+      message: "请依据当前信息完整编写教案并提交确认。",
+      activeSectionId: "process",
+      documentVersion: 0,
+      attachmentIds: [],
+    }, () => undefined);
+
+    const approvals = await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id);
+    expect(approvals).toHaveLength(1);
+    expect(await repository.getLessonFile(ownerId, lessonFileId)).toMatchObject({ documentVersion: 0 });
+  });
+
   it("routes a running-turn instruction through Pi's native steering queue", async () => {
     const { repository, created, faux, coordinator } = await fixture();
     let releaseFirst!: () => void;
@@ -1763,6 +1812,9 @@ describe("Pi production coordinator", () => {
 
     expect(systemPrompts).toHaveLength(2);
     expect(systemPrompts[0]).toBe(systemPrompts[1]);
+    expect(systemPrompts[0]).toContain("=={pink}文字==");
+    expect(systemPrompts[0]).toContain("可编辑的 Markdown 原文");
+    expect(systemPrompts[0]).toContain("依据本课内容的重要性");
     expect(systemPrompts[0]).not.toContain("dashi-ppt");
     expect(systemPrompts[0]).not.toContain('trust="server-policy"');
     expect(systemPrompts[0]).not.toContain('"sectionId"');

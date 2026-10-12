@@ -52,10 +52,23 @@ const findNaturalBreak = (text, start, rawEnd) => {
   const lowerBound = start + Math.floor((rawEnd - start) * 0.72);
   const preferredBreak = /[\n。！？；，]/;
   for (let index = rawEnd; index > lowerBound; index -= 1) {
-    if (preferredBreak.test(text[index - 1])) return index;
+    if (preferredBreak.test(text[index - 1])) return avoidSplitMarker(text, start, index);
   }
-  return rawEnd;
+  return avoidSplitMarker(text, start, rawEnd);
 };
+
+function avoidSplitMarker(text, start, end) {
+  for (const marker of text.slice(start).matchAll(/==(?:\{(?:yellow|pink|green|blue|red)\})?[^=\n]+==/g)) {
+    const opener = start + marker.index;
+    if (opener >= end) break;
+    if (opener < end && end < opener + marker[0].length) {
+      // A short marked phrase travels intact to the next page. If it is
+      // longer than a whole page, still make progress with the normal split.
+      return opener > start ? opener : end;
+    }
+  }
+  return end;
+}
 
 const takeTextForHeight = (text, start, availableHeight, measureText) => {
   let low = start + 1;

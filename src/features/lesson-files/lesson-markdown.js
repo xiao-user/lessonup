@@ -5,9 +5,51 @@ import Highlight from "@tiptap/extension-highlight";
 import { TableKit } from "@tiptap/extension-table";
 import { Marked } from "marked";
 
+export const lessonHighlightTones = ["yellow", "pink", "green", "blue", "red"];
+
+const LessonHighlight = Highlight.extend({
+  addAttributes() {
+    return {
+      tone: {
+        default: "yellow",
+        parseHTML: (element) => lessonHighlightTones.includes(element.getAttribute("data-tone"))
+          ? element.getAttribute("data-tone") : "yellow",
+        renderHTML: ({ tone }) => ({ "data-tone": lessonHighlightTones.includes(tone) ? tone : "yellow" }),
+      },
+    };
+  },
+  renderMarkdown(node, helpers) {
+    const tone = lessonHighlightTones.includes(node.attrs?.tone) ? node.attrs.tone : "yellow";
+    return `==${tone === "yellow" ? "" : `{${tone}}`}${helpers.renderChildren(node)}==`;
+  },
+  parseMarkdown(token, helpers) {
+    return helpers.applyMark("highlight", helpers.parseInline(token.tokens || []), {
+      tone: token.tone || "yellow",
+    });
+  },
+  markdownTokenizer: {
+    name: "highlight",
+    level: "inline",
+    start: (source) => source.indexOf("=="),
+    tokenize(source, _, helpers) {
+      const match = /^==(?:\{(yellow|pink|green|blue|red)\})?([^=\n]+)==/.exec(source);
+      if (!match) return undefined;
+      const text = match[2].trim();
+      if (!text) return undefined;
+      return {
+        type: "highlight",
+        raw: match[0],
+        text,
+        tone: match[1] || "yellow",
+        tokens: helpers.inlineTokens(text),
+      };
+    },
+  },
+});
+
 export const lessonFieldExtensions = [
   StarterKit.configure({ undoRedo: false }),
-  Highlight,
+  LessonHighlight,
   TableKit.configure({ table: { resizable: false, renderWrapper: false } }),
 ];
 

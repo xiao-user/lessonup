@@ -62,6 +62,21 @@ test("Markdown pagination prefers complete lines over splitting a structural mar
   assert.ok(fragments.slice(0, -1).every((entry) => entry.value.endsWith("\n")));
 });
 
+test("A4 pagination does not cut a short inline marker across two pages", () => {
+  const plan = createLessonPlanDraft({ subject: "语文" }, { title: "春" });
+  const marked = `=={pink}关键证据==`;
+  const pages = paginateLessonPlan({ ...plan, process: `${"前".repeat(80)}${marked}${"后".repeat(80)}` }, {
+    pageHeight: 120,
+    measureBasics: () => 12,
+    measureTopic: () => 12,
+    measureSection: (_section, value) => 12 + String(value).length,
+  });
+  const fragments = pages.flat().filter((entry) => entry.sectionId === "process");
+  assert.ok(fragments.length > 1);
+  assert.ok(fragments.some((entry) => entry.value.includes(marked)));
+  assert.ok(fragments.every((entry) => !entry.value.includes("==") || entry.value.includes(marked)));
+});
+
 test("editable text preserves deliberate leading and trailing blank lines", () => {
   const value = "\n教学过程\n\n\n";
   assert.equal(normalizeEditableText(value), value);
@@ -237,6 +252,20 @@ test("double-equals highlight survives A4 parse, edit serialization, and reparse
     )),
     true,
   );
+});
+
+test("colored marker strokes preserve their tone through A4 edits and pagination fragments", () => {
+  const source = "## 探究环节\n\n- 圈画=={pink}关键证据==，再用=={blue}自己的话解释==。\n- 比较=={green}两种解法==与=={red}常见误区==。";
+  const parsed = parseLessonMarkdown(source);
+  const list = parsed.content?.[1];
+  const marked = list.content.flatMap((item) => item.content?.[0]?.content ?? [])
+    .filter((node) => node.marks?.some((mark) => mark.type === "highlight"));
+
+  assert.equal(parsed.content?.[0]?.type, "heading");
+  assert.deepEqual(marked.map((node) => node.marks.find((mark) => mark.type === "highlight")?.attrs?.tone), ["pink", "blue", "green", "red"]);
+  assert.equal(serializeLessonMarkdown(parsed), source);
+  assert.deepEqual(parseLessonMarkdown(serializeLessonMarkdown(parsed)), parsed);
+  assert.equal(projectLessonMarkdownDocument(source).content?.[1]?.type, "bulletList");
 });
 
 test("editing a list does not persist a second visible marker or the gap cursor", () => {

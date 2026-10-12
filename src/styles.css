@@ -2346,27 +2346,97 @@
   -webkit-line-clamp: 2;
 }
 
+.lesson-tiptap-field, .lesson-field-editor {
+  --lesson-mark-yellow: rgb(255 213 90 / 55%);
+  --lesson-mark-pink: rgb(255 117 165 / 43%);
+  --lesson-mark-green: rgb(129 218 145 / 50%);
+  --lesson-ink-blue: #326a98;
+  --lesson-ink-red: #b75456;
+}
 .lesson-tiptap-field {
   font-size: var(--text-copy-14);
-  line-height: var(--text-copy-14--line-height);
+  line-height: 1.65;
 }
 
 .lesson-tiptap-field > :first-child { margin-top: 0; }
 .lesson-tiptap-field > :last-child { margin-bottom: 0; }
-.lesson-tiptap-field :where(p, ul, ol, blockquote, pre, table) { margin-block: 10px; }
-.lesson-tiptap-field :where(ul, ol) { padding-left: 20px; }
+.lesson-tiptap-field :where(p, ul, ol, blockquote, pre, table) { margin-block: 8px; }
+.lesson-tiptap-field :where(ul, ol) { padding-left: 22px; }
 .lesson-tiptap-field ul { list-style: disc; }
 .lesson-tiptap-field ol { list-style: decimal; }
-.lesson-tiptap-field li { margin-block: 4px; }
+.lesson-tiptap-field li { margin-block: 5px; padding-left: 2px; }
 .lesson-tiptap-field li::marker { color: var(--gray-700); }
+.lesson-tiptap-field :where(strong, b) { color: var(--foreground); font-weight: 650; }
 .lesson-tiptap-field :where(h1, h2, h3, h4) {
-  margin-block: 16px 8px;
+  margin-block: 16px 7px;
   color: var(--foreground);
-  font-size: var(--text-heading-14);
-  font-weight: var(--text-heading-14--font-weight);
-  line-height: var(--text-heading-14--line-height);
-  letter-spacing: var(--text-heading-14--letter-spacing);
+  font-weight: 650;
+  line-height: 1.4;
+  text-wrap: balance;
 }
+.lesson-tiptap-field h1 { font-size: 19px; }
+.lesson-tiptap-field h2 { font-size: 16px; }
+.lesson-tiptap-field h3 { font-size: 14px; }
+.lesson-tiptap-field h4 { font-size: 13px; }
+.lesson-tiptap-field :where(h1, h2) { padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+
+.lesson-tiptap-field mark {
+  padding-inline: 1px;
+  border-radius: 2px;
+  background: linear-gradient(176deg, transparent 34%, var(--lesson-mark-yellow) 38%, var(--lesson-mark-yellow) 86%, transparent 94%);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  color: inherit;
+}
+.lesson-tiptap-field mark[data-tone="pink"] { background-image: linear-gradient(177deg, transparent 33%, var(--lesson-mark-pink) 39%, var(--lesson-mark-pink) 86%, transparent 94%); }
+.lesson-tiptap-field mark[data-tone="green"] { background-image: linear-gradient(175deg, transparent 34%, var(--lesson-mark-green) 39%, var(--lesson-mark-green) 87%, transparent 94%); }
+.lesson-tiptap-field mark[data-tone="blue"],
+.lesson-tiptap-field mark[data-tone="red"] {
+  padding-inline: 0;
+  border-radius: 0;
+  background-color: transparent;
+  background-repeat: no-repeat;
+  background-size: 100% 2px, 97% 1px;
+  background-position: left calc(100% - 1px), 2px calc(100% - 4px);
+}
+.lesson-tiptap-field mark[data-tone="blue"] { background-image: linear-gradient(178deg, var(--lesson-ink-blue), var(--lesson-ink-blue)), linear-gradient(175deg, var(--lesson-ink-blue), var(--lesson-ink-blue)); }
+.lesson-tiptap-field mark[data-tone="red"] { background-image: linear-gradient(178deg, var(--lesson-ink-red), var(--lesson-ink-red)), linear-gradient(175deg, var(--lesson-ink-red), var(--lesson-ink-red)); }
+
+.lesson-field-editor { position: relative; }
+.lesson-marker-toolbar {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 12%);
+}
+.lesson-marker-choice {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  flex: none;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+.lesson-marker-choice:hover, .lesson-marker-choice:focus-visible { background: var(--muted); outline: none; }
+.lesson-marker-choice[data-tone="pink"] span { box-shadow: inset 0 -7px var(--lesson-mark-pink); }
+.lesson-marker-choice[data-tone="green"] span { box-shadow: inset 0 -7px var(--lesson-mark-green); }
+.lesson-marker-choice[data-tone="yellow"] span { box-shadow: inset 0 -7px var(--lesson-mark-yellow); }
+.lesson-marker-choice[data-tone="blue"] span { border-bottom: 2px solid var(--lesson-ink-blue); }
+.lesson-marker-choice[data-tone="red"] span { border-bottom: 2px solid var(--lesson-ink-red); }
+.lesson-marker-choice svg { width: 15px; height: 15px; }
+.lesson-marker-divider { width: 1px; height: 17px; margin-inline: 2px; background: var(--border); }
 
 .lesson-tiptap-field blockquote {
   padding-left: 12px;

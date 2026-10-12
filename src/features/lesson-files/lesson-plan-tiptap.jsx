@@ -1,6 +1,6 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
-import { Eye, FileText, LoaderCircle, RefreshCw, Trash2 } from "lucide-react";
+import { Eraser, Eye, FileText, LoaderCircle, RefreshCw, Trash2 } from "lucide-react";
 
 import { normalizeEditableText } from "./editable-text";
 import {
@@ -10,6 +10,13 @@ import {
 } from "./lesson-markdown";
 
 const fieldExtensions = lessonFieldExtensions;
+const markerOptions = [
+  { tone: "pink", label: "粉色荧光" },
+  { tone: "green", label: "绿色荧光" },
+  { tone: "yellow", label: "黄色荧光" },
+  { tone: "blue", label: "蓝色划线" },
+  { tone: "red", label: "红色划线" },
+];
 
 function serializeEditor(editor) {
   return normalizeEditableText(serializeLessonMarkdown(editor.getJSON()));
@@ -54,6 +61,7 @@ function LessonFieldEditor({
   onCaretChange,
   registerEditor,
 }) {
+  const [markerToolbar, setMarkerToolbar] = useState(null);
   const incomingValueRef = useRef(normalizeEditableText(value));
   const publishedValueRef = useRef(normalizeEditableText(value));
   const rangeRef = useRef({ field, start, end });
@@ -104,12 +112,25 @@ function LessonFieldEditor({
     onFocus() {
       callbacksRef.current.onFocus();
     },
+    onBlur() {
+      setMarkerToolbar(null);
+    },
     onSelectionUpdate({ editor: instance }) {
       // setContent during editor creation also emits selection updates. Those
       // are schema initialization, not a teacher-owned caret, and must never
       // focus a later page or scroll the document during the spatial morph.
       if (!instance.isFocused) return;
       const { from, to } = instance.state.selection;
+      if (from === to || !instance.isEditable) {
+        setMarkerToolbar(null);
+      } else {
+        const rect = instance.view.dom.getBoundingClientRect();
+        const anchor = instance.view.coordsAtPos(from);
+        setMarkerToolbar({
+          top: Math.max(4, anchor.top - rect.top - 34),
+          left: Math.min(Math.max(4, anchor.left - rect.left), Math.max(4, rect.width - 204)),
+        });
+      }
       const startOffset = textOffsetAtPosition(instance.state.doc, from);
       callbacksRef.current.onCaretChange({
         field: rangeRef.current.field,
@@ -175,13 +196,20 @@ function LessonFieldEditor({
   }, [editor, readOnly]);
 
   return (
-    <EditorContent
-      className="lesson-field-editor"
-      data-field={field}
-      data-start={start}
-      data-end={end}
-      editor={editor}
-    />
+    <div className="lesson-field-editor" data-field={field} data-start={start} data-end={end}>
+      <EditorContent editor={editor} />
+      {markerToolbar && !readOnly ? (
+        <div className="lesson-marker-toolbar" role="toolbar" aria-label="标记选中文字" style={markerToolbar} onMouseDown={(event) => event.preventDefault()}>
+          {markerOptions.map(({ tone, label: markerLabel }) => (
+            <button key={tone} type="button" className="lesson-marker-choice" data-tone={tone} aria-label={markerLabel} title={markerLabel} onClick={() => editor?.chain().focus().setHighlight({ tone }).run()}>
+              <span aria-hidden="true">Aa</span>
+            </button>
+          ))}
+          <span className="lesson-marker-divider" aria-hidden="true" />
+          <button type="button" className="lesson-marker-choice" aria-label="清除标记" title="清除标记" onClick={() => editor?.chain().focus().unsetHighlight().run()}><Eraser aria-hidden="true" /></button>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

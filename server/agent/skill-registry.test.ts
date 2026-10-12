@@ -19,6 +19,11 @@ describe("SkillRegistry", () => {
     const [skill] = registry.resolve(["lesson-full-authoring"]);
 
     expect(skill.instructions).toContain("守住当前课时容量与内容边界");
+    expect(skill.instructions).toContain("重要性是突出显示的首要依据");
+    expect(skill.instructions).toContain("不以内容是否藏在长段落里、是否容易被漏读为前提");
+    expect(skill.instructions).toContain("重要内容应得到恰当突出，但不必每处都涂色");
+    expect(skill.instructions).toContain("不规定标记数量、密度、每栏必标或颜色与教学类别的固定对应");
+    expect(skill.version).toBe("1.1.0");
     expect(skill.requiredTools).toEqual(["read_document", "propose_document_patch"]);
   });
 
