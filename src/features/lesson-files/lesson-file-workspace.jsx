@@ -145,6 +145,12 @@ function createDomMeasurements(measureRoot, plan) {
   };
 }
 
+function paginateMeasuredPlan(measureRoot, plan, presentationMaterial) {
+  if (!measureRoot || !plan) return null;
+  const measurements = createDomMeasurements(measureRoot, plan);
+  return measurements ? paginateLessonPlan(plan, measurements, presentationMaterial) : null;
+}
+
 function pageLayoutSignature(pages) {
   const fieldOccurrences = new Map();
   pages.flat().forEach((entry) => {
@@ -176,6 +182,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
   const syncActiveSectionRef = useRef(() => {});
   const saveTimerRef = useRef(null);
   const measureRef = useRef(null);
+  const draftMeasureRef = useRef(null);
   const onSaveRef = useRef(onSave);
   const onAgentVersionCommittedRef = useRef(onAgentVersionCommitted);
   const planRef = useRef(null);
@@ -196,7 +203,9 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
   const [plan, setPlan] = useState(initialPlan);
   const [agentDraft, setAgentDraft] = useState(null);
   const [showOriginal, setShowOriginal] = useState(false);
-  const draftIdentity = agentDraft?.id ?? agentDraft?.toolCallId;
+  // The same proposal gains an approval id after streaming; keep the teacher's
+  // original/draft view selection stable across that handoff.
+  const draftIdentity = agentDraft?.toolCallId ?? agentDraft?.id;
   useEffect(() => { setShowOriginal(false); }, [draftIdentity]);
   const draftPlan = useMemo(() => previewDocumentDraft(plan, agentDraft), [plan, agentDraft]);
   const displayingDraft = Boolean(agentDraft && draftPlan && !showOriginal);
@@ -221,7 +230,13 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     confirmingDelete: false,
   });
   const [pages, setPages] = useState(() => paginateLessonPlan(initialPlan, {}, presentationMaterial));
-  const draftPages = useMemo(() => displayingDraft ? paginateLessonPlan(draftPlan, {}, presentationMaterial) : null, [displayingDraft, draftPlan, presentationMaterial]);
+  const [measuredDraft, setMeasuredDraft] = useState(null);
+  const draftPages = useMemo(() => {
+    if (!displayingDraft) return null;
+    return measuredDraft?.plan === draftPlan && measuredDraft.presentationMaterial === presentationMaterial
+      ? measuredDraft.pages
+      : paginateLessonPlan(draftPlan, {}, presentationMaterial);
+  }, [displayingDraft, draftPlan, measuredDraft, presentationMaterial]);
   const pageLayoutSignatureRef = useRef(pageLayoutSignature(pages));
   const pageContentSignatureRef = useRef(pageContentSignature(pages));
   const [pageLayoutRevision, setPageLayoutRevision] = useState(0);
@@ -307,13 +322,9 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
 
   const measureAndPaginateRef = useRef(() => {});
   measureAndPaginateRef.current = () => {
-    const measureRoot = measureRef.current;
     const currentPlan = planRef.current;
-    if (!measureRoot || !currentPlan) return;
-    const measurements = createDomMeasurements(measureRoot, currentPlan);
-    if (!measurements) return;
-
-    const measuredPages = paginateLessonPlan(currentPlan, measurements, presentationMaterial);
+    const measuredPages = paginateMeasuredPlan(measureRef.current, currentPlan, presentationMaterial);
+    if (!measuredPages) return;
     const measuredSignature = pageLayoutSignature(measuredPages);
     const measuredContentSignature = pageContentSignature(measuredPages);
     const layoutChanged = pageLayoutSignatureRef.current !== measuredSignature;
@@ -345,6 +356,13 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
         persistPendingSaveRef.current().catch(() => null);
       }, 320);
     }
+  };
+
+  const measureDraftRef = useRef(() => {});
+  measureDraftRef.current = () => {
+    if (!displayingDraft) return;
+    const measuredPages = paginateMeasuredPlan(draftMeasureRef.current, draftPlan, presentationMaterial);
+    if (measuredPages) setMeasuredDraft({ plan: draftPlan, presentationMaterial, pages: measuredPages });
   };
 
   const flushDocumentBeforeAgentRun = useCallback(async () => {
@@ -474,10 +492,17 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     measureAndPaginateRef.current();
   }, [plan, presentationMaterial]);
 
+  useLayoutEffect(() => {
+    measureDraftRef.current();
+  }, [displayingDraft, draftPlan, presentationMaterial]);
+
   useEffect(() => {
     let cancelled = false;
     document.fonts?.ready.then(() => {
-      if (!cancelled) measureAndPaginateRef.current();
+      if (!cancelled) {
+        measureAndPaginateRef.current();
+        measureDraftRef.current();
+      }
     });
     return () => { cancelled = true; };
   }, [editorReadyRevision]);
@@ -948,6 +973,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
       tabIndex={-1}
     >
       <PaginationMeasure plan={plan} presentationMaterial={presentationMaterial} measureRef={measureRef} />
+      {displayingDraft ? <PaginationMeasure plan={draftPlan} presentationMaterial={presentationMaterial} measureRef={draftMeasureRef} /> : null}
       <div className="lesson-mobile-switcher" aria-label="详情页工具">
         <Button
           variant="outline"

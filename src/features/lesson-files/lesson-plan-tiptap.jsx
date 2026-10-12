@@ -64,6 +64,9 @@ function LessonFieldEditor({
   const [markerToolbar, setMarkerToolbar] = useState(null);
   const incomingValueRef = useRef(normalizeEditableText(value));
   const publishedValueRef = useRef(normalizeEditableText(value));
+  // A paginated Markdown fragment can serialize differently before any edit.
+  // Track the editor's baseline separately so flush never rewrites raw source.
+  const editorContentRef = useRef(null);
   const rangeRef = useRef({ field, start, end });
   const callbacksRef = useRef({ onChange, onFocus, onSelectionChange, onCaretChange });
   const applyingRef = useRef(false);
@@ -92,11 +95,14 @@ function LessonFieldEditor({
       } finally {
         applyingRef.current = false;
       }
+      editorContentRef.current = serializeEditor(instance);
     },
     onUpdate({ editor: instance, transaction }) {
       if (applyingRef.current || !transaction.docChanged) return;
-      const previousValue = publishedValueRef.current;
       const nextValue = serializeEditor(instance);
+      if (nextValue === editorContentRef.current) return;
+      editorContentRef.current = nextValue;
+      const previousValue = publishedValueRef.current;
       if (nextValue === previousValue) return;
       publishedValueRef.current = nextValue;
       callbacksRef.current.onChange({
@@ -157,8 +163,10 @@ function LessonFieldEditor({
       start,
       end,
       flush() {
-        const previousValue = publishedValueRef.current;
         const nextValue = serializeEditor(editor);
+        if (nextValue === editorContentRef.current) return;
+        editorContentRef.current = nextValue;
+        const previousValue = publishedValueRef.current;
         if (nextValue === previousValue) return;
         publishedValueRef.current = nextValue;
         callbacksRef.current.onChange({
@@ -186,6 +194,7 @@ function LessonFieldEditor({
         { emitUpdate: false },
       );
       publishedValueRef.current = nextValue;
+      editorContentRef.current = serializeEditor(editor);
     } finally {
       applyingRef.current = false;
     }

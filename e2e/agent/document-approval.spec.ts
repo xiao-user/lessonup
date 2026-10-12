@@ -12,6 +12,39 @@ const approvalDiff = (page: import("@playwright/test").Page) => page
   .getByText("教案修改对比", { exact: true })
   .locator("xpath=../..");
 
+test("pending A4 draft uses the same measured page breaks as the adopted document", async ({ lessonPage: page }) => {
+  const file = await (await page.request.get(`/api/lesson-files/${lessonFileId}`)).json();
+  const process = Array.from({ length: 8 }, (_, index) => [
+    `## 活动${index + 1} · 观察、比较与说明`,
+    "- 学生圈画=={pink}关键证据==，比较两种理解并记录理由。",
+    "- 教师根据学生的解释追问依据，组织同伴补充和修正。",
+    "- 小组用自己的话归纳判断方法，再用新材料检验。",
+  ].join("\n")).join("\n\n");
+  const saved = await page.request.patch(`/api/lesson-files/${lessonFileId}/document`, {
+    headers: { "idempotency-key": crypto.randomUUID() },
+    data: { baseVersion: file.documentVersion, document: { ...file.document, process }, pageCount: 3, source: "manual" },
+  });
+  expect(saved.ok(), await saved.text()).toBeTruthy();
+  await page.reload();
+  await openLessonFile(page);
+  expect((await (await page.request.get(`/api/lesson-files/${lessonFileId}`)).json()).document.process).toBe(process);
+
+  const processByPage = () => page.locator(".lesson-document-pages:visible .lesson-sheet-slot").evaluateAll((slots) => (
+    slots.map((slot) => [...slot.querySelectorAll('[data-lesson-section="process"] .lesson-tiptap-field')]
+      .map((field) => field.textContent).join(""))
+  ));
+  await sendPrompt(page, "请提交修改");
+  await expect(page.getByRole("button", { name: "采用修改" })).toBeEnabled();
+  expect((await (await page.request.get(`/api/lesson-files/${lessonFileId}`)).json()).document.process).toBe(process);
+  const draftBreaks = await processByPage();
+  expect(draftBreaks.filter(Boolean).length).toBeGreaterThan(1);
+
+  await page.getByRole("button", { name: "采用修改" }).click();
+  await expect(page.getByText("修改已写入教案", { exact: true })).toBeVisible();
+  expect((await (await page.request.get(`/api/lesson-files/${lessonFileId}`)).json()).document.process).toBe(process);
+  await expect.poll(processByPage).toEqual(draftBreaks);
+});
+
 test("streams an isolated A4 draft, keeps chat available, and recovers before adoption", async ({ lessonPage: page }) => {
   const consoleErrors: string[] = [];
   page.on("pageerror", error => consoleErrors.push(error.message));
