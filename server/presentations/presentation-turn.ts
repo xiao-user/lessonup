@@ -69,9 +69,10 @@ export type PresentationTurnResolution = {
 
 /**
  * Resolve the presentation conversation protocol before Pi tools are built.
- * A pending interaction belongs to one document snapshot and consumes only an
- * explicit theme, delegation, retry, or cancel message. Ordinary conversation
- * never resumes presentation generation implicitly.
+ * A theme choice belongs to the teacher's presentation request, even if the
+ * editor saves a newer document snapshot while the teacher is choosing. A
+ * generation retry still belongs to the exact document snapshot it started on.
+ * Ordinary conversation never resumes presentation generation implicitly.
  */
 export function resolvePresentationTurn(input: {
   message: string;
@@ -84,7 +85,8 @@ export function resolvePresentationTurn(input: {
   const selectedTheme = parseDashiTheme(input.message);
   const delegated = delegatesDashiThemeChoice(input.message);
   const cancelled = cancelsDashiThemeChoice(input.message);
-  const currentPending = input.pendingInteraction?.documentVersion === input.documentVersion
+  const currentPending = (input.pendingInteraction?.kind === "presentation_theme"
+    || input.pendingInteraction?.documentVersion === input.documentVersion)
     ? input.pendingInteraction
     : null;
 

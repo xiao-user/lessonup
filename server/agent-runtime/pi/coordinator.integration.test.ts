@@ -1094,7 +1094,7 @@ describe("Pi production coordinator", () => {
       .toMatchObject({ status: "completed" });
   });
 
-  it("continues the same branch immediately after a numeric theme choice", async () => {
+  it("continues with Dashi after a theme choice even when the editor saved a newer version", async () => {
     const { repository, created, faux, coordinator } = await fixture();
     const theme09Goal: DashiGoal = {
       ...goal,
@@ -1129,13 +1129,22 @@ describe("Pi production coordinator", () => {
       documentVersion: 0,
       attachmentIds: [],
     }, () => undefined);
+    await repository.saveLessonDocument({
+      ownerId,
+      fileId: lessonFileId,
+      baseVersion: 0,
+      document: { ...lesson, process: `${lesson.process}；课堂补充活动` },
+      pageCount: 1,
+      source: "manual",
+      idempotencyKey: "theme-choice-autosave",
+    });
     await coordinator.start({
       userId: ownerId,
       threadId: created.thread.id,
       branchId: created.branch.id,
       message: "09",
       activeSectionId: "process",
-      documentVersion: 0,
+      documentVersion: 1,
       attachmentIds: [],
     }, () => undefined);
 

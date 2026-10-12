@@ -30,6 +30,23 @@ describe("presentation turn protocol", () => {
     expect(result.pendingInteraction).toMatchObject({ kind: "presentation_generation", confirmedTheme: "theme02" });
   });
 
+  it("keeps a pending theme choice across an editor autosave and binds generation to the latest version", () => {
+    const result = resolvePresentationTurn({
+      message: "theme01",
+      routedPlan: deterministicCapabilityPlan("theme01"),
+      documentVersion: 5,
+      pendingInteraction: { kind: "presentation_theme", originalRequest: request, documentVersion: 4, requestedAt },
+    });
+
+    expect(result.plan).toMatchObject({
+      presentationRequested: true,
+      confirmedPresentationTheme: "theme01",
+      skillIds: ["dashi-ppt"],
+    });
+    expect(result.presentationRequest).toBe(request);
+    expect(result.pendingInteraction).toMatchObject({ kind: "presentation_generation", documentVersion: 5 });
+  });
+
   it("does not let an acknowledgement consume a pending theme request", () => {
     const result = resolvePresentationTurn({
       message: "好的",
@@ -77,6 +94,24 @@ describe("presentation turn protocol", () => {
 
     expect(result.plan).toMatchObject({ presentationRequested: true, confirmedPresentationTheme: "theme09" });
     expect(result.presentationRequest).toBe(request);
+  });
+
+  it("does not retry generation against a changed document snapshot", () => {
+    const result = resolvePresentationTurn({
+      message: "继续",
+      routedPlan: deterministicCapabilityPlan("继续"),
+      documentVersion: 5,
+      pendingInteraction: {
+        kind: "presentation_generation",
+        originalRequest: request,
+        documentVersion: 4,
+        requestedAt,
+        confirmedTheme: "theme09",
+      },
+    });
+
+    expect(result.plan.presentationRequested).toBe(false);
+    expect(result.pendingInteraction).toBeNull();
   });
 
   it("asks for a theme only for a fresh presentation request without a choice", () => {
