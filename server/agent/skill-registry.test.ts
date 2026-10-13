@@ -22,8 +22,10 @@ describe("SkillRegistry", () => {
     expect(skill.instructions).toContain("重要性是突出显示的首要依据");
     expect(skill.instructions).toContain("不以内容是否藏在长段落里、是否容易被漏读为前提");
     expect(skill.instructions).toContain("重要内容应得到恰当突出，但不必每处都涂色");
-    expect(skill.instructions).toContain("不规定标记数量、密度、每栏必标或颜色与教学类别的固定对应");
-    expect(skill.version).toBe("1.1.0");
+    expect(skill.instructions).toContain("不规定标题数量、标记数量、密度、每栏必标或颜色与教学类别的固定对应");
+    expect(skill.instructions).toContain("不要把每条目标或每个要点都包装成“标题＋解释”");
+    expect(skill.instructions).toContain("某段、某栏乃至整份教案可以没有小标题或笔迹标记");
+    expect(skill.version).toBe("1.1.1");
     expect(skill.requiredTools).toEqual(["read_document", "propose_document_patch"]);
   });
 

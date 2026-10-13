@@ -371,7 +371,7 @@ describe("Pi production coordinator", () => {
     expect(await repository.getPendingLessonGenerationIntent(ownerId, lessonFileId)).toBeNull();
   });
 
-  it("provides optional emphasis guidance to the native Pi author before the A4 proposal", async () => {
+  it("lets native Pi propose A4 content without decorative subheadings", async () => {
     const { repository, created, faux, coordinator } = await fixture();
     repository.searchCurriculumStandards = async () => [{
       id: "standard-1",
@@ -382,15 +382,17 @@ describe("Pi production coordinator", () => {
     }];
     faux.setResponses([
       (context) => {
-        expect(context.systemPrompt).toContain("skill://lesson-full-authoring@1.1.0");
+        expect(context.systemPrompt).toContain("skill://lesson-full-authoring@1.1.1");
+        expect(context.systemPrompt).toContain("段落或清单已能表达清楚时不加小标题");
         return fauxAssistantMessage(fauxToolCall("read_skill", {
-          id: "lesson-full-authoring", version: "1.1.0",
+          id: "lesson-full-authoring", version: "1.1.1",
         }), { stopReason: "toolUse" });
       },
       (context) => {
         const received = JSON.stringify(context.messages ?? []);
         expect(received).toContain("重要性是突出显示的首要依据");
         expect(received).toContain("重要内容应得到恰当突出，但不必每处都涂色");
+        expect(received).toContain("不要把每条目标或每个要点都包装成“标题＋解释”");
         return fauxAssistantMessage(fauxToolCall("read_document", {}), { stopReason: "toolUse" });
       },
       fauxAssistantMessage(fauxToolCall("search_curriculum_standards", {
@@ -400,7 +402,7 @@ describe("Pi production coordinator", () => {
         summary: "完善教学过程",
         operations: [{
           field: "process",
-          replacement: "## 探究\n\n学生圈画==关键证据==，再解释它如何支持判断。",
+          replacement: "学生圈画==关键证据==，再解释它如何支持判断。",
         }],
       }), { stopReason: "toolUse" }),
     ]);
@@ -417,6 +419,9 @@ describe("Pi production coordinator", () => {
 
     const approvals = await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id);
     expect(approvals).toHaveLength(1);
+    expect(approvals[0]?.patch).toMatchObject({
+      operations: [{ field: "process", replacement: "学生圈画==关键证据==，再解释它如何支持判断。" }],
+    });
     expect(await repository.getLessonFile(ownerId, lessonFileId)).toMatchObject({ documentVersion: 0 });
   });
 

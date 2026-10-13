@@ -37,6 +37,12 @@ describe("provider-bound prompt layout", () => {
     expect(STATIC_SYSTEM_INSTRUCTIONS).not.toContain('"sectionId"');
   });
 
+  it("makes A4 subheadings conditional on real content structure", () => {
+    expect(STATIC_SYSTEM_INSTRUCTIONS).toContain("段落或清单已能表达清楚时不加小标题");
+    expect(STATIC_SYSTEM_INSTRUCTIONS).toContain("仅当同一栏确有需要区分的主题或阶段");
+    expect(STATIC_SYSTEM_INSTRUCTIONS).not.toContain("优先用简短标题");
+  });
+
   it("appends the current turn context after history so two turns share a prefix", () => {
     const history = [userMessage("教学过程写得怎么样？"), fauxAssistantMessage("已经完整。")];
     const first = bindProviderContext({ messages: history, turnContext: { focus: { sectionId: "process" } } });
