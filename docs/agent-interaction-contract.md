@@ -6,6 +6,39 @@ The assistant always works within the current whole lesson plan. The section in
 view is a focus hint, and an exact text selection is a narrower hint. Neither
 changes the authorization boundary or replaces whole-document context.
 
+## Routing lanes
+
+Routing is deterministic and never calls a model. Acknowledgements and follow-ups
+that point back at the conversation itself ("why?", "what did you mean by that?")
+take the Fast lane: one model call, no tools, no lesson content. A question about
+the lesson, or about facts that need a source, always takes the Agent lane, which
+can read the document and retrieve evidence. When in doubt the router chooses the
+Agent lane, because a wrong Fast answer is incorrect while a wrong Agent answer is
+only slower. A request for a courseware ("课件", PPT, slides) is a presentation
+request, whichever of those words the teacher uses.
+
+## Retrieval
+
+Knowledge and curriculum-standard search embed the query when an embedding
+service is configured. Standards use vector-plus-text ranking only when every
+candidate in the scoped release has a compatible vector; a partly embedded
+release uses one text-only scale so unembedded, relevant passages are not buried.
+A missing or failing service also degrades to text ranking; it never fails the
+tool, and a result ranked without the query vector it should have had is not
+cached. Text ranking must work for Chinese that has no spaces between words.
+
+A turn that requires evidence cannot be answered from memory: the run must have
+retrieved. What counts differs by outcome. A consultation whose search found
+nothing still completes, because the honest answer is that no source was found;
+failing it would punish the reply we want. A proposal to change the lesson needs
+stored evidence from the run, and a search that came back empty does not back it.
+
+## Diagnostics
+
+The browser only receives a public error code. The real cause of a failed run is
+logged server-side as a structured `Agent failure` entry: opaque ids, the code and
+the error with its cause chain, never the teacher's message or model output.
+
 ## Read strategy
 
 - Use `read_section` once when one specific section is sufficient.

@@ -7,11 +7,13 @@ import type { LessonRepository } from "../../repository.js";
 import { routeCapabilities } from "../../agent/capability-router.js";
 import { validateObservedEvidence } from "../../agent/evidence-validation.js";
 import { publicPiAgentError } from "../../agent/public-error.js";
+import { logAgentFailure } from "../../agent/failure-log.js";
 import { SkillRegistry, type PlatformSkill } from "../../agent/skill-registry.js";
 import type { PresentationService } from "../../presentations/service.js";
 import { presentationLanguageForRequest, resolvePresentationTurn } from "../../presentations/presentation-turn.js";
 import type { WebSearchProvider } from "../../providers/web-search.js";
 import { UnavailableWebSearchProvider } from "../../providers/unavailable-web-search.js";
+import { createQueryEmbedder, type QueryEmbedder } from "../../providers/query-embedding.js";
 import { createPiModelRuntime } from "./model-provider.js";
 import { createMessageCheckpoint } from "./message-checkpoint.js";
 import { type PiCapturedProposal } from "./proposal-tools.js";
@@ -67,6 +69,8 @@ export class PiLessonAgentCoordinator {
       dashi?: PiDashi | null;
       webProvider?: WebSearchProvider;
       registry?: SkillRegistry;
+      /** Query embedding for retrieval tools; defaults to the configured service, null forces lexical only. */
+      embedQuery?: QueryEmbedder | null;
       /** Worker/DO-owned background lifetime; absent in the local Node runtime. */
       defer?: (task: Promise<unknown>) => void;
     } = {},
@@ -97,7 +101,8 @@ export class PiLessonAgentCoordinator {
     this.lifecycle = new PiRunLifecycle(repository);
     this.executor = new PiAgentExecutor(repository, model, streamFn, sessionSecret, this.lifecycle, options.defer);
     this.toolSurface = new PiToolSurface(repository, registry,
-      options.webProvider ?? new UnavailableWebSearchProvider(), this.dashi);
+      options.webProvider ?? new UnavailableWebSearchProvider(), this.dashi,
+      options.embedQuery === undefined ? createQueryEmbedder() : options.embedQuery ?? undefined);
     this.approvals = new PiApprovalWorkflow(repository, this.lifecycle, this.executor,
       this.toolSurface, this.ready, this.dashi, options.presentations ?? null);
   }
@@ -548,7 +553,11 @@ export class PiLessonAgentCoordinator {
         throw new Error("write_proposal_missing");
       }
       const evidence = await this.repository.listRunEvidence(input.userId, runId);
-      if (!proposal && validateObservedEvidence({ plan, evidence }).tripwireTriggered) {
+      if (!proposal && validateObservedEvidence({
+        plan,
+        evidence,
+        attemptedKinds: runtimeTools.getEvidenceAttempts(),
+      }).tripwireTriggered) {
         throw new Error("evidence_required");
       }
       const sources = await emitRunEvidence(this.repository, input.userId, runId, emit);
@@ -655,6 +664,7 @@ export class PiLessonAgentCoordinator {
         }
       }
       const code = publicPiAgentError(error);
+      logAgentFailure({ source: "run", runId, threadId: input.threadId }, code, error);
       await this.repository.settleRun({
         ownerId: input.userId,
         runId,

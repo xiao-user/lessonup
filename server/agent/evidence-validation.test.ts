@@ -30,6 +30,41 @@ describe("validateObservedEvidence", () => {
   });
 });
 
+describe("validateObservedEvidence with attempted retrievals", () => {
+  const consult = plan({ writeMode: "consultative", requiredEvidenceKinds: ["curriculum_standard_search"] });
+
+  it("counts a search that found nothing as a look, so a consultation can say so honestly", () => {
+    expect(validateObservedEvidence({
+      plan: consult,
+      evidence: [],
+      attemptedKinds: new Set(["curriculum_standard_search"]),
+    })).toMatchObject({ tripwireTriggered: false, outputInfo: { code: "ok", missingKinds: [] } });
+  });
+
+  it("does not let an attempt at one kind stand in for another required kind", () => {
+    expect(validateObservedEvidence({
+      plan: consult,
+      evidence: [],
+      attemptedKinds: new Set(["knowledge_search"]),
+    })).toMatchObject({
+      tripwireTriggered: true,
+      outputInfo: { missingKinds: ["curriculum_standard_search"] },
+    });
+  });
+
+  it("ignores attempts at reads that are not direct observations", () => {
+    expect(validateObservedEvidence({
+      plan: plan({ writeMode: "consultative" }),
+      evidence: [],
+      attemptedKinds: new Set(["web_search", "source_metadata"]),
+    }).tripwireTriggered).toBe(true);
+  });
+
+  it("still asks for stored records when no attempts are passed, as a write does", () => {
+    expect(validateObservedEvidence({ plan: consult, evidence: [] }).tripwireTriggered).toBe(true);
+  });
+});
+
 describe("evidenceRequiredToolError", () => {
   it("returns JSON that names the missing kinds and the matching read tools", () => {
     const payload = JSON.parse(evidenceRequiredToolError(["curriculum_standard_search"]).message);

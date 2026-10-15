@@ -83,7 +83,19 @@ const documentConsultationPattern = new RegExp(
 const adviceOnlyPattern = /(?:给出?|提供|说说|列出|整理).{0,10}(?:修改|调整|优化|完善|改进)?(?:建议|方案|思路)|(?:修改|调整|优化|完善|改进)(?:建议|方案|思路)/;
 const designBasisDeniedPattern = /(?:不要|不用|无需|不必|禁止).{0,16}(?:结构化)?设计依据|(?:结构化)?设计依据.{0,16}(?:不要|不用|无需|不必|禁止|不建立|不修改)/;
 const semesterPlanningContinuityPattern = /整学期|整体教学框架|学期规划|单元规划|课时蓝图|规划.{0,12}(?:单元|课时)|生成.{0,12}蓝图|完善.{0,12}框架/;
-const classroomPresentationPattern = /(?:(?:生成|创建|制作|设计|做|产出|渲染|调用).{0,16}(?:课堂)?(?:演示文稿|演示|PPT|幻灯片|Dashi))|(?:(?:课堂)?(?:演示文稿|演示|PPT|幻灯片|Dashi).{0,16}(?:生成|创建|制作|设计|做|产出|渲染|调用|Skill))|(?:直接渲染|交给\s*Dashi|调用\s*Dashi(?:\s*Skill)?)/i;
+// 教师说“课件”，与“演示/PPT/幻灯片”同义。“课件”只在制作动作之后才算新建请求；
+// “课件里的设计……”多半是在引用已有课件，因此不放进“名词在前”的分支。
+const presentationNoun = "(?:课堂)?(?:演示文稿|演示|PPT|幻灯片|课件|Dashi)";
+const classroomPresentationPattern = new RegExp([
+  `(?:生成|创建|制作|设计|做|产出|渲染|调用).{0,16}${presentationNoun}`,
+  "(?:课堂)?(?:演示文稿|演示|PPT|幻灯片|Dashi).{0,16}(?:生成|创建|制作|设计|做|产出|渲染|调用|Skill)",
+  "直接渲染|交给\\s*Dashi|调用\\s*Dashi(?:\\s*Skill)?",
+  // 口语说法：“来个课件”“出一份PPT”“把教案改成课件”“我要上课用的PPT”“课件做一下”。
+  `(?:出|来|弄|搞|准备|写|需要|想要|要)(?:一|个|份|套).{0,8}${presentationNoun}`,
+  `(?:转|变|改)(?:成|为).{0,4}${presentationNoun}`,
+  `上课(?:用|使用)的?.{0,4}${presentationNoun}`,
+  "课件(?:做|制作|生成|设计)(?:一下|好|出来|吧)?",
+].join("|"), "i");
 const independentSpecialistPattern = /独立(?:复核|审查|判断)|第二意见|另一个角度|多专家|专家会诊/;
 
 const documentFieldAliases: Array<[LessonField, RegExp]> = [
@@ -223,17 +235,7 @@ export const deterministicCapabilityPlan = (
       requestedDocumentFields: undefined,
     });
   }
-  // 下列词在 LessonUp 中描述的是教案业务产物，不等于教师要求检索
-  // 外部出处。剔除固定业务词后仍命中证据词，才启动知识 MCP。
-  const externalEvidenceRequest = externalEvidencePattern.test(
-    message
-      .replaceAll("教案设计依据", "")
-      .replaceAll("设计依据", "")
-      .replaceAll("平台知识点", "")
-      .replaceAll("教材知识点", "")
-      .replaceAll("教学依据", "")
-      .replaceAll("评价证据", ""),
-  );
+  const externalEvidenceRequest = requestsExternalEvidence(message);
   if (/目标|课标|重点|难点/.test(message)) {
     plan.skillIds.push("lesson-objective-review");
     if (independentSpecialistPattern.test(message)) plan.specialistAgents.push("curriculum-analysis");
@@ -328,6 +330,22 @@ export const deterministicCapabilityPlan = (
   });
 };
 
+/**
+ * 下列词在 LessonUp 中描述的是教案业务产物，不等于教师要求检索外部出处。
+ * 剔除固定业务词后仍命中证据词，才启动知识检索。
+ */
+function requestsExternalEvidence(message: string) {
+  return externalEvidencePattern.test(
+    message
+      .replaceAll("教案设计依据", "")
+      .replaceAll("设计依据", "")
+      .replaceAll("平台知识点", "")
+      .replaceAll("教材知识点", "")
+      .replaceAll("教学依据", "")
+      .replaceAll("评价证据", ""),
+  );
+}
+
 export function requiresDocumentWrite(message: string) {
   if (designBasisWritePattern.test(message)) return true;
   if (explicitApprovalPattern.test(message)) return true;
@@ -362,10 +380,19 @@ export function isConversationalControlMessage(message: string) {
 
 const FAST_FOLLOW_UP_LIMIT = 72;
 const fastFollowUpPattern = /[?？]|什么意思|为什么|为啥|(?:再|请)?(?:简单)?(?:解释|说明)(?:一下)?|举个?例/;
+// Fast chat has no tools and never sees the lesson, so it only takes a message
+// that points back at the conversation itself: a bare "why / what do you mean",
+// or a question that names something the assistant just said.
+const bareFollowUpPattern = /^(?:那|所以|然后|可是|但是)?(?:为什么|为啥|什么意思|啥意思|怎么讲|怎么说|怎么理解|然后呢|接着呢|具体(?:点|一点|说说)|详细(?:点|一点|说说)|展开(?:说说|讲讲)?|再(?:说|讲)(?:一遍|一下)|举个?例(?:子)?吗?|比如呢|(?:能|可以)(?:再)?(?:解释|说明)(?:一下)?吗|请(?:再)?(?:解释|说明)(?:一下)?)[？?。！!\s]*$/;
+// “上面/前面”不算：在教案上下文里它们多半指文档的位置，不是上一条回复。
+const conversationReferencePattern = /刚才|刚刚|你(?:刚才|刚刚)?(?:说|讲|提到|建议|回答)的|这(?:个|样|种)?(?:建议|方案|修改|意见|思路|说法|回答|结论)|为什么(?:要)?这样|第[一二三四五六七八九十\d]+点/;
+// 提到教案内容本身的追问需要读教案，走 Agent 车道。
+const lessonVocabularyPattern = /教案|教学|课堂|课时|这节课|本节课|这堂课|本课|课文|导入|环节|活动|过程|目标|重点|难点|作业|板书|评价|练习|学生|时间|步骤|任务|问题链|设计/;
 
 /**
- * Short clarifying chat that can be answered from recent dialogue. Lesson
- * fields, writes, evidence, and presentations stay on the Agent lane.
+ * Short clarifying chat that can be answered from recent dialogue alone. Any
+ * other question — about the lesson, or about facts that need evidence — stays
+ * on the Agent lane, which can read the document and retrieve sources.
  */
 export function isFastFollowUpMessage(message: string) {
   if (isConversationalControlMessage(message)) return false;
@@ -379,11 +406,14 @@ export function isFastFollowUpMessage(message: string) {
   if (attachmentReferencePattern.test(trimmed)) return false;
   if (/联网|搜索|网页|新闻|当前政策/.test(trimmed)) return false;
   if (semesterPlanningContinuityPattern.test(trimmed)) return false;
+  if (requestsExternalEvidence(trimmed)) return false;
+  if (lessonVocabularyPattern.test(trimmed)) return false;
   for (const [, pattern] of documentFieldAliases) {
     pattern.lastIndex = 0;
     if (pattern.test(trimmed)) return false;
   }
-  return fastFollowUpPattern.test(trimmed);
+  return bareFollowUpPattern.test(trimmed)
+    || (conversationReferencePattern.test(trimmed) && fastFollowUpPattern.test(trimmed));
 }
 
 export function isFastChatTurn(message: string) {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.js";
 import { MemoryLessonRepository } from "./repositories/memory-repository.js";
 
@@ -717,5 +717,46 @@ describe("LessonUp API scope", () => {
     expect(payload.aggregateVersion).toEqual(expect.any(String));
     expect(payload.messages).toHaveLength(1);
     expect(JSON.stringify(payload)).not.toContain("encryptedRunState");
+  });
+});
+
+describe("Agent run failures", () => {
+  const userId = "00000000-0000-4000-8000-00000000000a";
+  const startRun = (agent: unknown) => createApp(new MemoryLessonRepository(), { agent: agent as never }).request("/api/agent/threads/thread-1/runs", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-lessonup-user": userId },
+    body: JSON.stringify({ branchId: "branch-1", message: "你好", activeSectionId: "process", documentVersion: 0 }),
+  });
+  const agentThatFails = (error: Error) => ({
+    start: async () => { throw error; },
+    cancel: async () => false,
+    resumeApproval: async () => undefined,
+  });
+
+  it("logs an unexpected start failure for the operator while the browser only receives the public code", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const body = await (await startRun(agentThatFails(new Error("d1_unavailable: connection lost")))).text();
+      expect(body).toContain("agent_run_failed");
+      expect(body).not.toContain("d1_unavailable");
+      const entry = log.mock.calls.find((call) => call[0] === "Agent failure");
+      expect(JSON.parse(String(entry![1]))).toMatchObject({
+        source: "start", threadId: "thread-1", code: "agent_run_failed", error: { message: "d1_unavailable: connection lost" },
+      });
+      expect(String(entry![1])).not.toContain("你好");
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("does not log an ordinary rejection that already carries its own public code", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const body = await (await startRun(agentThatFails(new Error("active_run_exists")))).text();
+      expect(body).toContain("active_run_exists");
+      expect(log.mock.calls.find((call) => call[0] === "Agent failure")).toBeUndefined();
+    } finally {
+      log.mockRestore();
+    }
   });
 });

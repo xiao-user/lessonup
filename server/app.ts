@@ -23,6 +23,7 @@ import {
   TEACHER_THINKING_LEVELS,
 } from "./agent-runtime/pi/thinking-level.js";
 import { publicAgentError } from "./agent/public-error.js";
+import { logAgentFailure } from "./agent/failure-log.js";
 import { publicApproval } from "./conversation/public-approval.js";
 import { handleMcpRequest } from "./mcp/servers.js";
 import type { ImportedNotebook, LessonRepository } from "./repository.js";
@@ -1212,10 +1213,9 @@ export function createApp(
       try {
         await agent.start({ userId, threadId: c.req.param("id"), ...input }, emit);
       } catch (error) {
-        await emit({
-          type: "run.failed", runId: "unknown",
-          error: publicAgentError(error),
-        });
+        const code = publicAgentError(error);
+        logAgentFailure({ source: "start", threadId: c.req.param("id") }, code, error, { onlyUnexpected: true });
+        await emit({ type: "run.failed", runId: "unknown", error: code });
       } finally {
         const failures = await dispatcher.flush();
         if (failures.length) console.error("Agent event delivery failed", failures.length);
@@ -1301,15 +1301,14 @@ export function createApp(
           idempotencyKey, emit,
         });
       } catch (error) {
-        console.error(
-          "Agent approval continuation failed",
-          error instanceof Error ? error.message : "unknown_error",
-        );
+        const code = publicAgentError(error, "approval_resume_failed");
+        logAgentFailure({
+          source: "approval", runId: c.req.param("runId"), approvalId: c.req.param("approvalId"),
+        }, code, error);
         await emit(detachedDecision ? {
-          type: "approval.failed", runId: c.req.param("runId"), approvalId: c.req.param("approvalId"),
-          error: publicAgentError(error, "approval_resume_failed"),
+          type: "approval.failed", runId: c.req.param("runId"), approvalId: c.req.param("approvalId"), error: code,
         } : {
-          type: "run.failed", runId: c.req.param("runId"), error: publicAgentError(error, "approval_resume_failed"),
+          type: "run.failed", runId: c.req.param("runId"), error: code,
         });
       } finally {
         const failures = await dispatcher.flush();

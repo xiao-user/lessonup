@@ -69,7 +69,14 @@ result file.
 
 ## 课程标准检索评测
 
-`npm run eval:curriculum-standards` 直接调用与知识 MCP 相同的已发布课标检索 RPC，使用
+`npm run eval:curriculum-standards` 通过生产使用的 D1 读取仓储检索已发布课标，使用
 `evals/curriculum-standard-cases.jsonl` 检查核心条款排名、共用课程方案召回和跨学科隔离。
-结果写入 `evals/results/curriculum-standards-latest.json`。该命令需要 Supabase service role
-与 BGE-M3 配置，但不调用生成模型，也不会修改教案或课标索引。
+结果默认写入系统暂存目录下的 `lessonup-evals/curriculum-standards-latest.json`（可用
+`LESSONUP_EVAL_OUTPUT_DIR` 指定其他工作区外目录），其中记录评测目标与模式。它不调用生成模型，
+也不会修改教案或课标索引；默认读取本地 Wrangler D1（先按 `data/curriculum/standards/README.md`
+导入课标），`-- --remote` 读取生产库，`-- --persist-to <目录>` 读取独立的本地状态目录。
+
+- 默认模式先用配置的嵌入服务（BGE-M3）为查询生成向量，与原生 Pi 的 `search_curriculum_standards` 工具在
+  配置了嵌入服务时的做法一致，需要 `EMBEDDING_*` 配置。
+- `-- --lexical-only` 不带查询向量，对应工具在未配置嵌入服务或嵌入调用失败时退回的纯文本排序，
+  用来衡量文本排序本身的质量，不需要嵌入配置。

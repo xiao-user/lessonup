@@ -1,5 +1,6 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
+  type AgentRunEvidenceKind,
   type CapabilityPlan,
   type LessonAgentContext,
   type LessonAgentSelection,
@@ -118,8 +119,9 @@ export function semesterTurnContext(
 export function emptyRuntimeTools(): {
   tools: AgentTool<any>[];
   getProposal: () => PiCapturedProposal | null;
+  getEvidenceAttempts: () => ReadonlySet<AgentRunEvidenceKind>;
 } {
-  return { tools: [], getProposal: () => null };
+  return { tools: [], getProposal: () => null, getEvidenceAttempts: () => new Set() };
 }
 
 export function isFastExecution(

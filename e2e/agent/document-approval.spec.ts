@@ -52,11 +52,12 @@ test("streams an isolated A4 draft, keeps chat available, and recovers before ad
   await expect(page.getByText("正在生成草稿…", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "采用修改" })).toBeDisabled();
   await expect(objectivesEditor(page)).toHaveAttribute("contenteditable", "false");
-  const partial = await objectivesEditor(page).innerText();
   const canonicalBefore = await (await page.request.get(`/api/lesson-files/${lessonFileId}`)).json();
   expect(canonicalBefore.document.objectives).toContain(initialObjective);
   await expect(page.getByRole("button", { name: "采用修改" })).toBeEnabled();
-  expect((await objectivesEditor(page).innerText()).length).toBeGreaterThan(partial.length);
+  // Streaming can finish before this assertion runs. Assert the actual draft
+  // instead of assuming the final text must be longer than an earlier frame.
+  await expect(objectivesEditor(page)).toContainText(approvedObjective.replace(/^\d+\.\s*/, ""));
   await expect(page.getByLabel("向备课助手提问")).toBeEnabled();
   await page.screenshot({ path: "/tmp/lessonup-a4-draft-desktop.png" });
   await page.setViewportSize({ width: 390, height: 844 });

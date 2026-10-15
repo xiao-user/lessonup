@@ -553,3 +553,89 @@ describe("enforceRequiredCapabilities", () => {
     );
   });
 });
+
+describe("Fast chat eligibility", () => {
+  it("keeps questions about the lesson on the Agent lane, where the document can be read", () => {
+    for (const message of [
+      "这节课的导入是不是太长了？",
+      "这个环节的时间安排合理吗？",
+      "我的目标写得清楚吗？",
+      "整篇教案有没有前后矛盾的地方？",
+      "小组讨论这一块怎么样？",
+      "学生会不会听不懂第二个活动？",
+      // “上面”“第二条”在教案里多半指文档位置，不是上一条回复。
+      "第二条目标为什么这样写？",
+      "上面的导入是不是太长了？",
+    ]) {
+      expect(isFastFollowUpMessage(message), message).toBe(false);
+      expect(deterministicCapabilityPlan(message).executionLane, message).toBe("agent");
+    }
+  });
+
+  it("does not let a question about facts bypass the evidence policy", () => {
+    for (const message of [
+      "《春》的作者朱自清是哪一年出生的？",
+      "《背影》的写作背景是什么？",
+      "刚才说的他是哪一年出生的？",
+    ]) {
+      expect(deterministicCapabilityPlan(message), message).toMatchObject({
+        executionLane: "agent",
+        evidenceRequired: true,
+        mcpServers: ["knowledge"],
+      });
+    }
+  });
+
+  it("still answers follow-ups that point back at the conversation without tools", () => {
+    for (const message of [
+      "为什么？",
+      "什么意思？",
+      "刚才那句是什么意思？",
+      "为什么这样改？",
+      "再解释一下第二点",
+      "你刚才说的第二点具体怎么做？",
+      "举个例子",
+      "然后呢？",
+    ]) {
+      expect(isFastFollowUpMessage(message), message).toBe(true);
+      expect(deterministicCapabilityPlan(message), message).toMatchObject({
+        executionLane: "fast",
+        toolGroups: [],
+        evidenceRequired: false,
+      });
+    }
+  });
+});
+
+describe("courseware presentation intent", () => {
+  it("recognizes how teachers actually ask for a courseware", () => {
+    for (const message of [
+      "做一个课件",
+      "帮我制作课件",
+      "生成课件",
+      "我要上课用的PPT",
+      "帮我出一份PPT",
+      "来个课件吧",
+      "把教案改成课件",
+      "课件做一下",
+      "帮我做个幻灯片",
+    ]) {
+      expect(deterministicCapabilityPlan(message), message).toMatchObject({
+        presentationRequested: true,
+        skillIds: ["dashi-ppt"],
+        toolGroups: ["presentation-create"],
+      });
+    }
+  });
+
+  it("does not read a reference to an existing courseware as a request to make one", () => {
+    for (const message of [
+      "把课件里的例题补充到教案",
+      "根据课件调整教学过程",
+      "课件里有一处错别字，帮我改一下",
+      "指出课件中的问题",
+    ]) {
+      expect(deterministicCapabilityPlan(message).presentationRequested, message).toBe(false);
+    }
+  });
+});

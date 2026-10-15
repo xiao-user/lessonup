@@ -11,6 +11,7 @@ import { deterministicCapabilityPlan } from "../../agent/capability-router.js";
 import { encodePiAgentMessages } from "./message-codec.js";
 import { PiLessonAgentCoordinator } from "./coordinator.js";
 import { publicApproval } from "../../conversation/public-approval.js";
+import type { QueryEmbedder } from "../../providers/query-embedding.js";
 
 const ownerId = "pi-coordinator-owner";
 const lessonFileId = "11111111-1111-4111-8111-111111111111";
@@ -72,7 +73,7 @@ const presentationProposal = (value: DashiGoal, summary: string) => ({
   slides: value.slides,
 });
 
-async function fixture() {
+async function fixture(options: { embedQuery?: QueryEmbedder | null } = {}) {
   const repository = new MemoryLessonRepository();
   await repository.importNotebookGraph(ownerId, [{
     id: "notebook-a",
@@ -143,6 +144,7 @@ async function fixture() {
     presentations,
     dashi: fakeDashi as never,
     registry: createNodeSkillRegistry(),
+    embedQuery: options.embedQuery,
   });
   return { repository, created, faux, coordinator, presentations, calls };
 }
@@ -1829,5 +1831,133 @@ describe("Pi production coordinator", () => {
     expect(turnContexts[0]).toContain('"sectionId":"process"');
     expect(turnContexts[1]).toContain('"sectionId":"preparation"');
     expect(turnContexts[1]).toContain('"completion":"analysis_only"');
+  });
+});
+
+describe("Pi coordinator lesson questions, retrieval and diagnostics", () => {
+  const start = (
+    fixtureValue: Awaited<ReturnType<typeof fixture>>,
+    message: string,
+    extra: Partial<Parameters<PiLessonAgentCoordinator["start"]>[0]> = {},
+  ) => fixtureValue.coordinator.start({
+    userId: ownerId,
+    threadId: fixtureValue.created.thread.id,
+    branchId: fixtureValue.created.branch.id,
+    message,
+    activeSectionId: "process",
+    documentVersion: 0,
+    attachmentIds: [],
+    ...extra,
+  }, () => undefined);
+
+  it("gives a question about the lesson the Agent lane, where the document can be read", async () => {
+    const value = await fixture();
+    let toolNames: string[] = [];
+    let systemPrompt = "";
+    value.faux.setResponses([(context) => {
+      toolNames = (context.tools ?? []).map((tool) => tool.name);
+      systemPrompt = context.systemPrompt ?? "";
+      return fauxAssistantMessage("导入约占五分钟，偏长，可以压缩到三分钟。");
+    }]);
+    await start(value, "这节课的导入是不是太长了？");
+    // Before, any short question without an exact field name took the tool-free
+    // Fast lane, whose prompt says it cannot read the lesson at all.
+    expect(toolNames).toContain("read_document");
+    expect(systemPrompt).not.toContain("快速对话");
+    const latest = await value.repository.getLatestRun(ownerId, value.created.thread.id, value.created.branch.id);
+    expect(latest?.capabilityPlan).toMatchObject({ executionLane: "agent" });
+  });
+
+  it("embeds a retrieval query with the injected service and ranks with that vector", async () => {
+    const embedded: string[] = [];
+    const value = await fixture({ embedQuery: async (query) => { embedded.push(query); return [0.25, 0.75]; } });
+    const searches: unknown[][] = [];
+    value.repository.searchKnowledge = async (...args) => {
+      searches.push(args);
+      return [{ id: "source-1", title: "我上传的资料", kind: "private", chunkId: "chunk-1", passage: "济南的冬天写于1931年。", score: 1 }];
+    };
+    value.faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("search_knowledge", { query: "济南的冬天 写作背景" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage("资料显示这篇文章写于1931年。"),
+    ]);
+    await start(value, "请根据我上传的文件说明济南的冬天的写作背景");
+    expect(embedded).toEqual(["济南的冬天 写作背景"]);
+    expect(searches[0]?.slice(2)).toEqual(["济南的冬天 写作背景", 6, [0.25, 0.75]]);
+    expect(await value.repository.getLatestRun(ownerId, value.created.thread.id, value.created.branch.id))
+      .toMatchObject({ status: "completed" });
+  });
+
+  it("lets a consultation say honestly that the standards search found nothing", async () => {
+    const value = await fixture();
+    value.repository.searchCurriculumStandards = async () => [];
+    value.faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("search_curriculum_standards", { query: "写作 学段要求" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage("我检索了课标，没有找到与这个问题直接对应的条款，所以不能引用课标原文回答。"),
+    ]);
+    await start(value, "课标对这个学段的写作要求是什么？");
+    const run = await value.repository.getLatestRun(ownerId, value.created.thread.id, value.created.branch.id);
+    // The search ran and came back empty. That used to end the run as
+    // evidence_required, punishing the answer that admits nothing was found.
+    expect(run).toMatchObject({ status: "completed", capabilityPlan: { evidenceRequired: true } });
+    expect(run?.error ?? null).toBeNull();
+    expect(await value.repository.listRunEvidence(ownerId, run!.id)).toEqual([]);
+  });
+
+  it("still fails a consultation that answered a required-evidence question without searching", async () => {
+    const value = await fixture();
+    value.faux.setResponses([fauxAssistantMessage("课标要求学生能写出条理清楚的记叙文。")]);
+    await start(value, "课标对这个学段的写作要求是什么？");
+    expect(await value.repository.getLatestRun(ownerId, value.created.thread.id, value.created.branch.id))
+      .toMatchObject({ status: "failed", error: "evidence_required" });
+  });
+
+  it("does not let a search that found nothing back a lesson change", async () => {
+    const value = await fixture();
+    value.repository.searchCurriculumStandards = async () => [];
+    let afterProposal = "";
+    value.faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("search_curriculum_standards", { query: "评价 课标" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("propose_document_patch", {
+        summary: "让评价练习对照课标",
+        operations: [{ field: "assessment", replacement: "学生提交两处景物描写证据，并说明它们如何表现温晴。" }],
+      }), { stopReason: "toolUse" }),
+      (context) => {
+        afterProposal = JSON.stringify(context.messages ?? []);
+        return fauxAssistantMessage("没有检索到对应的课标条款，我先不改。");
+      },
+      fauxAssistantMessage("没有检索到对应的课标条款，我先不改。"),
+      fauxAssistantMessage("没有检索到对应的课标条款，我先不改。"),
+    ]);
+    await start(value, "请修改评价练习，并对照课标");
+    // A write is only as good as the source behind it: the proposal was
+    // refused with the reads still missing, and no card reached the teacher.
+    expect(afterProposal).toContain("evidence_required");
+    expect(afterProposal).toContain("curriculum_standard_search");
+    expect(await value.repository.listPendingApprovals(ownerId, value.created.thread.id, value.created.branch.id))
+      .toHaveLength(0);
+    expect(await value.repository.getLatestRun(ownerId, value.created.thread.id, value.created.branch.id))
+      .toMatchObject({ status: "failed" });
+  });
+
+  it("logs why a run failed, with ids and the error but never what the teacher wrote", async () => {
+    const value = await fixture();
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      value.faux.setResponses([
+        fauxAssistantMessage(fauxToolCall("read_document", { fields: ["process"] }), { stopReason: "toolUse" }),
+        () => { throw new Error("simulated_provider_crash"); },
+      ]);
+      await start(value, "先判断这份教案的教学过程是否合理");
+      const run = await value.repository.getLatestRun(ownerId, value.created.thread.id, value.created.branch.id);
+      expect(run).toMatchObject({ status: "failed" });
+      const entry = log.mock.calls.find((call) => call[0] === "Agent failure");
+      expect(entry).toBeDefined();
+      const detail = JSON.parse(String(entry![1])) as { source: string; runId: string; threadId: string; code: string; error: { message: string } };
+      expect(detail).toMatchObject({ source: "run", runId: run!.id, threadId: value.created.thread.id, code: run!.error });
+      expect(detail.error.message).toContain("simulated_provider_crash");
+      expect(String(entry![1])).not.toContain("先判断这份教案的教学过程是否合理");
+    } finally {
+      log.mockRestore();
+    }
   });
 });

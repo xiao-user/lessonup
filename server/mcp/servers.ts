@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
@@ -6,90 +5,17 @@ import type { LessonRepository } from "../repository.js";
 import type { McpScope } from "../security/mcp-token.js";
 import type { WebSearchProvider } from "../providers/web-search.js";
 import { ConfiguredEmbeddingProvider } from "../providers/embeddings.js";
+import { searchScopedCurriculumStandards } from "../curriculum/standard-search.js";
 import type { SourceRef } from "../domain.js";
 
 const text = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }] });
 
-const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
-
-// Bump whenever retrieval filtering or ranking semantics change so results
-// produced by an older SQL contract cannot silently bypass the new policy.
-export const CURRICULUM_STANDARD_RETRIEVAL_VERSION = "grade-aware-v2";
-
-export const normalizedCurriculumStandardQuery = (query: string) => query
-  .normalize("NFKC")
-  .trim()
-  .replace(/\s+/g, " ");
-
-export const curriculumStandardSearchCacheIdentity = (input: {
-  releaseFingerprint: string | null;
-  subject: string;
-  stage: string;
-  grade: string;
-  query: string;
-}) => ({
-  contextFingerprint: sha256(JSON.stringify({
-    retrievalVersion: CURRICULUM_STANDARD_RETRIEVAL_VERSION,
-    release: input.releaseFingerprint ?? "unpublished",
-    subject: input.subject,
-    stage: input.stage,
-    grade: input.grade,
-  })),
-  querySha256: sha256(normalizedCurriculumStandardQuery(input.query)),
-});
-
-export async function searchScopedCurriculumStandards(args: {
-  repository: LessonRepository;
-  scope: McpScope;
-  query: string;
-  limit: number;
-  embed: (query: string) => Promise<number[] | undefined>;
-}) {
-  const notebook = await args.repository.getNotebook(args.scope.userId, args.scope.notebookId);
-  if (!notebook) throw new Error("notebook_not_found");
-  const releaseFingerprint = await args.repository.getPublishedCurriculumStandardFingerprint();
-  const cacheIdentity = curriculumStandardSearchCacheIdentity({
-    releaseFingerprint,
-    subject: notebook.subject,
-    stage: notebook.stage,
-    grade: notebook.grade,
-    query: args.query,
-  });
-  const cached = await args.repository.getCurriculumStandardSearchCache({
-    ...cacheIdentity,
-    limit: args.limit,
-  }).catch(() => null);
-  let results: Awaited<ReturnType<LessonRepository["searchCurriculumStandards"]>>;
-  let freshness: "reused" | "retrieved";
-  if (cached) {
-    results = cached.results;
-    freshness = "reused";
-  } else {
-    const normalizedQuery = normalizedCurriculumStandardQuery(args.query);
-    const vector = await args.embed(normalizedQuery);
-    results = await args.repository.searchCurriculumStandards({
-      query: normalizedQuery,
-      subject: notebook.subject,
-      stage: notebook.stage,
-      grade: notebook.grade,
-      limit: args.limit,
-      embedding: vector,
-    });
-    freshness = "retrieved";
-    await args.repository.saveCurriculumStandardSearchCache({
-      ...cacheIdentity,
-      limit: args.limit,
-      results,
-    }).catch(() => undefined);
-  }
-  await args.repository.recordRunEvidence(
-    args.scope.userId,
-    args.scope.runId,
-    "curriculum_standard_search",
-    results,
-  );
-  return { status: results.length ? "available" as const : "unavailable" as const, freshness, results };
-}
+export {
+  CURRICULUM_STANDARD_RETRIEVAL_VERSION,
+  curriculumStandardSearchCacheIdentity,
+  normalizedCurriculumStandardQuery,
+  searchScopedCurriculumStandards,
+} from "../curriculum/standard-search.js";
 
 function createKnowledgeServer(repository: LessonRepository, scope: McpScope) {
   const server = new McpServer({ name: "lessonup-knowledge", version: "1.0.0" });

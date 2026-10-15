@@ -3,6 +3,7 @@ import type { LessonRepository } from "../../repository.js";
 import { SkillRegistry, type PlatformSkill } from "../../agent/skill-registry.js";
 import { type DashiThemeId } from "../../presentations/dashi-theme-catalog.js";
 import type { WebSearchProvider } from "../../providers/web-search.js";
+import type { QueryEmbedder } from "../../providers/query-embedding.js";
 import { UnavailableWebSearchProvider } from "../../providers/unavailable-web-search.js";
 import { createPiDashiPlanningSession } from "./dashi-tools.js";
 import { assertDashiGoalHasCompleteVisibleCopy, indexDashiLayoutContracts, keepOnlyDashiAuthoredContent, type DashiLayoutContract } from "../../presentations/dashi-layout-contract.js";
@@ -12,6 +13,7 @@ import { createPiSemesterReadTools } from "./semester-tools.js";
 import { createPiCurriculumTools } from "./curriculum-tools.js";
 import { createPiDesignBasisReadTools } from "./design-basis-tools.js";
 import { createPiWebTools } from "./web-tools.js";
+import { trackEvidenceAttempts } from "./evidence-attempts.js";
 import { createPiSpecialistTools } from "./specialist-tools.js";
 import { createPiReadSkillTool } from "./skill-tools.js";
 import { type ToolSurface } from "../../conversation/turn-resolver.js";
@@ -24,6 +26,8 @@ export class PiToolSurface {
     private readonly registry: SkillRegistry,
     private readonly webProvider: WebSearchProvider,
     private readonly dashi: PiDashi | null,
+    /** Embeds search queries so retrieval can rank by meaning; absent means lexical only. */
+    private readonly embedQuery?: QueryEmbedder,
   ) {}
   /**
    * Provider prefix is a session asset. The Skill catalog and ordinary lesson
@@ -42,10 +46,10 @@ export class PiToolSurface {
     });
   }
 
-  private sessionWebTools(ownerId: string, runId: string) {
+  private sessionWebTools(repository: LessonRepository, ownerId: string, runId: string) {
     if (this.webProvider instanceof UnavailableWebSearchProvider) return [];
     return createPiWebTools({
-      repository: this.repository,
+      repository,
       provider: this.webProvider,
       ownerId,
       runId,
@@ -60,6 +64,7 @@ export class PiToolSurface {
     presentationSeed?: string,
     presentationLanguage?: "zh" | "en",
   ) {
+    const { repository, attempts } = trackEvidenceAttempts(this.repository);
     const scope = {
       ownerId: context.userId,
       notebookId: context.notebookId,
@@ -77,29 +82,29 @@ export class PiToolSurface {
     // The approval-gated document proposal is part of the stable Agent tool
     // surface. Per-turn policy decides whether it may succeed; removing the
     // schema on consultation turns invalidated the provider's transcript cache.
-    const document = createPiDocumentProposalTool({ repository: this.repository, context, plan });
+    const document = createPiDocumentProposalTool({ repository, context, plan });
     const tools = [
       ...(skills.length ? [createPiReadSkillTool(skills)] : []),
-      ...createPiLessonReadTools(this.repository, scope, {
+      ...createPiLessonReadTools(repository, scope, {
         requireCompleteDocument: plan.presentationRequested && !plan.presentationThemeConfirmationRequired,
       }),
-      ...(needsKnowledge ? createPiLessonKnowledgeTools(this.repository, scope) : []),
-      ...(needsCurriculum ? createPiCurriculumTools(this.repository, context) : []),
-      ...(needsDesignBasis ? createPiDesignBasisReadTools(this.repository, context) : []),
-      ...(plan.mcpServers.includes("web") ? this.sessionWebTools(context.userId, context.runId) : []),
-      ...createPiSpecialistTools(this.repository, context, plan),
+      ...(needsKnowledge ? createPiLessonKnowledgeTools(repository, scope, this.embedQuery) : []),
+      ...(needsCurriculum ? createPiCurriculumTools(repository, context, this.embedQuery) : []),
+      ...(needsDesignBasis ? createPiDesignBasisReadTools(repository, context) : []),
+      ...(plan.mcpServers.includes("web") ? this.sessionWebTools(repository, context.userId, context.runId) : []),
+      ...createPiSpecialistTools(repository, context, plan),
       document.tool,
     ];
     const captured: Array<() => PiCapturedProposal | null> = [document.getProposal];
     if (writing && plan.designBasisWriteRequested) {
-      const basis = createPiDesignBasisPatchProposalTool({ repository: this.repository, context });
+      const basis = createPiDesignBasisPatchProposalTool({ repository, context });
       const combined = createPiLessonDesignChangeProposalTool({
-        repository: this.repository,
+        repository,
         context,
         plan,
       });
       const projection = createPiDesignBasisProjectionProposalTool({
-        repository: this.repository,
+        repository,
         context,
         plan,
       });
@@ -119,7 +124,7 @@ export class PiToolSurface {
         },
       });
       const proposal = createPiPresentationProposalTool({
-        repository: this.repository,
+        repository,
         context,
         getTheme: planning.getTheme,
         language: presentationLanguage,
@@ -139,6 +144,7 @@ export class PiToolSurface {
         (found, read) => found ?? read(),
         null,
       ),
+      getEvidenceAttempts: () => attempts,
     };
   }
 
@@ -147,22 +153,24 @@ export class PiToolSurface {
     plan: CapabilityPlan,
     surface: ToolSurface,
   ) {
+    const { repository, attempts } = trackEvidenceAttempts(this.repository);
     const proposal = surface === "write"
-      ? createPiSemesterProposalTool({ repository: this.repository, context, plan })
+      ? createPiSemesterProposalTool({ repository, context, plan })
       : null;
     return {
       tools: [
-        ...createPiSemesterReadTools(this.repository, {
+        ...createPiSemesterReadTools(repository, {
           ownerId: context.userId,
           notebookId: context.notebookId,
           semesterFrameworkId: context.semesterFrameworkId,
         }),
-        ...(plan.curriculumRequested ? createPiCurriculumTools(this.repository, context) : []),
-        ...(plan.mcpServers.includes("web") ? this.sessionWebTools(context.userId, context.runId) : []),
-        ...createPiSpecialistTools(this.repository, context, plan),
+        ...(plan.curriculumRequested ? createPiCurriculumTools(repository, context, this.embedQuery) : []),
+        ...(plan.mcpServers.includes("web") ? this.sessionWebTools(repository, context.userId, context.runId) : []),
+        ...createPiSpecialistTools(repository, context, plan),
         ...(proposal ? [proposal.tool] : []),
       ],
       getProposal: proposal?.getProposal ?? (() => null),
+      getEvidenceAttempts: () => attempts,
     };
   }
 

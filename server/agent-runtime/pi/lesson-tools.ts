@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import type { LessonField } from "../../domain.js";
 import type { LessonRepository } from "../../repository.js";
 import { lessonFieldLabels } from "../../agent/tool-presentation.js";
+import { tryEmbedQuery, type QueryEmbedder } from "../../providers/query-embedding.js";
 
 const lessonFields: LessonField[] = [
   "unit",
@@ -40,7 +41,7 @@ export type PiLessonToolScope = {
 function createPiLessonTools(
   repository: LessonRepository,
   scope: PiLessonToolScope,
-  options: { requireCompleteDocument?: boolean } = {},
+  options: { requireCompleteDocument?: boolean; embedQuery?: QueryEmbedder } = {},
 ): AgentTool<any>[] {
   const readDocument: AgentTool<any> = {
     name: "read_document",
@@ -124,13 +125,15 @@ function createPiLessonTools(
       query: Type.String({ minLength: 1, maxLength: 500 }),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 8, default: 6 })),
     }, { additionalProperties: false }),
-    execute: async (_toolCallId, input) => {
+    execute: async (_toolCallId, input, signal) => {
       const parameters = input as { query: string; limit?: number };
+      const { vector } = await tryEmbedQuery(options.embedQuery, parameters.query, signal);
       const results = await repository.searchKnowledge(
         scope.ownerId,
         scope.allowedKnowledgeScopes,
         parameters.query,
         parameters.limit ?? 6,
+        vector,
       );
       await repository.recordRunEvidence(scope.ownerId, scope.runId, "knowledge_search", results);
       return textResult(results);
@@ -243,8 +246,9 @@ export function createPiLessonReadTools(
 export function createPiLessonKnowledgeTools(
   repository: LessonRepository,
   scope: PiLessonToolScope,
+  embedQuery?: QueryEmbedder,
 ): AgentTool<any>[] {
-  const tools = createPiLessonTools(repository, scope);
+  const tools = createPiLessonTools(repository, scope, { embedQuery });
   return tools.filter((tool) => [
     "search_knowledge",
     "read_attached_source",

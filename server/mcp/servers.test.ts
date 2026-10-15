@@ -10,7 +10,7 @@ import type { McpScope } from "../security/mcp-token.js";
 
 describe("curriculum standard search cache identity", () => {
   it("pins the current grade-aware retrieval contract", () => {
-    expect(CURRICULUM_STANDARD_RETRIEVAL_VERSION).toBe("grade-aware-v2");
+    expect(CURRICULUM_STANDARD_RETRIEVAL_VERSION).toBe("grade-aware-v3");
   });
 
   it("reuses whitespace-equivalent queries in the same published scope", () => {
@@ -107,5 +107,26 @@ describe("curriculum standard search cache identity", () => {
       expect(embedCalls).toBe(1);
       expect(searchCalls).toBe(1);
     });
+  });
+
+  it("does not reuse a lexical fallback as a semantic result when embedding returns no vector", async () => {
+    const repository = new MemoryLessonRepository();
+    const userId = "00000000-0000-4000-8000-00000000000a";
+    const notebook = await repository.createNotebook(userId, {
+      title: "七年级数学", className: "一班", year: "2026", subject: "数学", stage: "初中", grade: "七年级", edition: "人教版", tone: "teal",
+    });
+    let searches = 0;
+    repository.searchCurriculumStandards = async () => {
+      searches += 1;
+      return [{ id: "standard-1", title: "数学课标", kind: "public", passage: "理解负数", score: 1 }];
+    };
+    repository.recordRunEvidence = async () => undefined;
+    const scope: McpScope = {
+      userId, runId: "00000000-0000-4000-8000-00000000000b", notebookId: notebook.id,
+      lessonFileId: "file-1", allowedKnowledgeScopes: ["public"], attachmentSourceIds: [],
+    };
+    await searchScopedCurriculumStandards({ repository, scope, query: "负数", limit: 6, embed: async () => undefined });
+    await searchScopedCurriculumStandards({ repository, scope, query: "负数", limit: 6, embed: async () => [1, 0] });
+    expect(searches).toBe(2);
   });
 });

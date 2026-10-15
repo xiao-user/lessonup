@@ -49,14 +49,19 @@ export function evidenceRequiredToolError(missingKinds: AgentRunEvidenceKind[]) 
 export function validateObservedEvidence(args: {
   plan: CapabilityPlan;
   evidence: AgentRunEvidenceRecord[];
+  /**
+   * Kinds a tool ran a retrieval for even when it found nothing. Only a
+   * consult-only answer passes these: it may honestly say no source was found.
+   * A write must still be backed by stored records.
+   */
+  attemptedKinds?: ReadonlySet<AgentRunEvidenceKind>;
 }) {
   if (!args.plan.evidenceRequired) {
     return { tripwireTriggered: false, outputInfo: { code: "ok", missingKinds: [] as AgentRunEvidenceKind[] } };
   }
 
   const observedKinds = new Set(
-    args.evidence
-      .map((record) => record.kind)
+    [...args.evidence.map((record) => record.kind), ...(args.attemptedKinds ?? [])]
       .filter((kind) => directlyObservedKinds.has(kind)),
   );
   const requiredKinds = args.plan.requiredEvidenceKinds ?? [];

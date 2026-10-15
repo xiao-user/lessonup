@@ -1,6 +1,17 @@
 import type { KnowledgeResult, SourceRef } from "../domain.js";
 import type { SqlDatabase } from "../platform/sql-database.js";
 import type { LessonRepository } from "../repository.js";
+import { lexicalScore } from "./lexical-score.js";
+
+/**
+ * Upper bound on chunks ranked per search. The whole scoped corpus is ranked
+ * (the largest subject plus the shared plan is about 450 chunks); this only
+ * guards against an unexpectedly large import. A smaller cut-off silently drops
+ * the tail of a subject before any relevance is computed.
+ */
+const STANDARD_SCAN_LIMIT = 1_000;
+/** The corpus is curated and subject scoped, and sections carry their own priors. */
+const STANDARD_MINIMUM_PAIR_COVERAGE = 0.15;
 
 type StandardChunkRow = {
   document_id: string; title: string; source_url: string | null; document_kind: string;
@@ -22,17 +33,23 @@ export class D1CurriculumStandardReadRepository implements D1CurriculumStandardR
   constructor(private readonly database: SqlDatabase) {}
 
   async searchCurriculumStandards(input: { query: string; subject: string; stage?: string; grade?: string; limit: number; embedding?: number[] }): Promise<KnowledgeResult[]> {
+    // Vectors are ~10 KB per row; only ship them when there is a query vector to compare against.
+    const vectors = input.embedding ? "c.embedding_json" : "NULL AS embedding_json";
     const rows = await this.database.query<StandardChunkRow>({ sql: `SELECT d.id AS document_id, d.title, d.source_url, d.document_kind, d.stage_scope_json, d.grade_scope_json,
-      c.page, c.stable_chunk_id, c.passage, c.section, c.curriculum_stage, c.grade_start, c.grade_end, c.curriculum_domain, c.embedding_json
+      c.page, c.stable_chunk_id, c.passage, c.section, c.curriculum_stage, c.grade_start, c.grade_end, c.curriculum_domain, ${vectors}
       FROM curriculum_standard_chunks c
       JOIN curriculum_standard_documents d ON d.id = c.document_id
       JOIN curriculum_standard_releases r ON r.id = d.release_id
       WHERE r.status = 'published' AND (d.subject = ? OR d.document_kind = 'curriculum_plan')
-      ORDER BY c.created_at DESC, c.stable_chunk_id LIMIT 300`, params: [input.subject] });
+      ORDER BY c.created_at DESC, c.stable_chunk_id LIMIT ${STANDARD_SCAN_LIMIT}`, params: [input.subject] });
     const gradeNumber = parseGrade(input.grade);
-    return rows.rows
-      .filter((row) => documentMatches(row, input.stage, input.grade) && chunkMatches(row, input.stage, gradeNumber))
-      .map((row) => standardResult(row, input.query, input.embedding, gradeNumber))
+    const scoped = rows.rows.filter((row) => documentMatches(row, input.stage, input.grade) && chunkMatches(row, input.stage, gradeNumber));
+    // Scores are only comparable when every candidate has a vector of the same
+    // dimension. A partly embedded release otherwise buries exact lexical hits
+    // beneath unrelated chunks that happen to have vectors.
+    const vectorReady = !!input.embedding?.length && scoped.every((row) => parseNumbers(row.embedding_json).length === input.embedding!.length);
+    return scoped
+      .map((row) => standardResult(row, input.query, vectorReady ? input.embedding : undefined, gradeNumber))
       .filter((result) => result.score > 0)
       .sort((left, right) => right.score - left.score || (left.chunkId ?? "").localeCompare(right.chunkId ?? ""))
       .slice(0, Math.max(1, Math.min(input.limit, 8)));
@@ -60,13 +77,18 @@ function documentMatches(row: StandardChunkRow, stage?: string, grade?: string) 
   return (!stage || stages.includes(stage)) && (!grade || !grades.length || grades.includes(grade));
 }
 function chunkMatches(row: StandardChunkRow, stage: string | undefined, grade: number | null) {
-  return (!stage || !row.curriculum_stage || row.curriculum_stage === stage)
-    && (grade === null || row.grade_start === null || row.grade_end === null || (grade >= row.grade_start && grade <= row.grade_end));
+  // Notebook stages (小学/初中) and curriculum labels (第一～第四学段)
+  // are different taxonomies. The imported section already states its actual
+  // grade span, so use that instead of comparing their names.
+  if (stage && row.curriculum_stage && !/^第.+学段$/.test(row.curriculum_stage) && row.curriculum_stage !== stage) return false;
+  if (grade === null) return true;
+  if (row.grade_start !== null && row.grade_end !== null) return grade >= row.grade_start && grade <= row.grade_end;
+  const span = row.section?.match(/[（(](\d{1,2})[～~—-](\d{1,2})年级[）)]/);
+  return !span || (grade >= Number(span[1]) && grade <= Number(span[2]));
 }
 function standardResult(row: StandardChunkRow, query: string, embedding: number[] | undefined, grade: number | null): KnowledgeResult {
-  const searchable = `${row.title}\n${row.section ?? ""}\n${row.passage}`.toLocaleLowerCase();
-  const terms = query.toLocaleLowerCase().split(/[\s,，。；;、]+/).filter(Boolean);
-  const lexical = terms.length ? terms.reduce((score, term) => score + (searchable.includes(term) ? 1 : 0), 0) / terms.length : 0.01;
+  const searchable = `${row.title}\n${row.section ?? ""}\n${row.passage}`;
+  const lexical = lexicalScore(query, searchable, STANDARD_MINIMUM_PAIR_COVERAGE);
   const vector = embedding ? cosine(embedding, parseNumbers(row.embedding_json)) : 0;
   const section = sectionBoost(row.section, query);
   const scope = grade !== null && row.grade_start !== null && row.grade_end !== null ? 0.02 : 0;

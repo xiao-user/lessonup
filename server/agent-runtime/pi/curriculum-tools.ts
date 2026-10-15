@@ -9,6 +9,8 @@ import type {
 } from "../../domain.js";
 import type { LessonRepository } from "../../repository.js";
 import { withoutInternalCurriculumAssetUrl } from "../../agent/source-policy.js";
+import { searchScopedCurriculumStandards } from "../../curriculum/standard-search.js";
+import { tryEmbedQuery, type QueryEmbedder } from "../../providers/query-embedding.js";
 
 const textResult = (value: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(value) }],
@@ -30,9 +32,10 @@ const textbookSource = (book: CurriculumTextbookRecord, page?: number | null, su
 export function createPiCurriculumTools(
   repository: LessonRepository,
   context: PreparationAgentContext,
+  embedQuery?: QueryEmbedder,
 ): AgentTool<any>[] {
   const record = async (kind: Parameters<LessonRepository["recordRunEvidence"]>[2], sources: SourceRef[]) => {
-    if (sources.length) await repository.recordRunEvidence(context.userId, context.runId, kind, sources);
+    await repository.recordRunEvidence(context.userId, context.runId, kind, sources);
   };
 
   const lookup: AgentTool<any> = {
@@ -63,18 +66,15 @@ export function createPiCurriculumTools(
       query: Type.String({ minLength: 1, maxLength: 300 }),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
     }, { additionalProperties: false }),
-    execute: async (_toolCallId, input) => {
+    execute: async (_toolCallId, input, signal) => {
       const args = input as { query: string; limit?: number };
-      const notebook = await repository.getNotebook(context.userId, context.notebookId);
-      if (!notebook) throw new Error("notebook_not_found");
-      const results = await repository.searchCurriculumStandards({
+      const { results } = await searchScopedCurriculumStandards({
+        repository,
+        scope: { userId: context.userId, notebookId: context.notebookId, runId: context.runId },
         query: args.query,
-        subject: notebook.subject,
-        stage: notebook.stage,
-        grade: notebook.grade,
         limit: args.limit ?? 6,
+        embed: embedQuery ? (query) => embedQuery(query, signal) : undefined,
       });
-      await record("curriculum_standard_search", results);
       return textResult(results);
     },
   };
@@ -185,8 +185,10 @@ export function createPiCurriculumTools(
       query: Type.String({ minLength: 1, maxLength: 200 }),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
     }, { additionalProperties: false }),
-    execute: async (_toolCallId, input) => {
-      const result = await repository.searchCurriculumKnowledgePoints(input as any);
+    execute: async (_toolCallId, input, signal) => {
+      const args = input as { textbookId: string; query: string; limit?: number };
+      const { vector } = await tryEmbedQuery(embedQuery, args.query, signal);
+      const result = await repository.searchCurriculumKnowledgePoints({ ...args, embedding: vector });
       const sources = uniqueSources(result.flatMap((item) => item.point.sources));
       await record("curriculum_knowledge", sources);
       return textResult({ results: result, sources, inferenceBoundary: "仅为候选关联。" });
