@@ -1,7 +1,7 @@
 import { expect, test } from "./fixtures.js";
 import { lessonFileId } from "./test-data.js";
 
-test.use({ reducedMotion: "no-preference" });
+test.use({ contextOptions: { reducedMotion: "no-preference" } });
 
 test("navigation remains bounded with motion enabled and a slower CPU", async ({ collectionPage: page }, testInfo) => {
   const cdp = await page.context().newCDPSession(page);
@@ -42,12 +42,12 @@ test("navigation remains bounded with motion enabled and a slower CPU", async ({
   await page.screenshot({ path: testInfo.outputPath("notebook.png") });
   await measure("openDetail", () => page.getByRole("button", { name: "打开备课文件春日的第一声鸟鸣", exact: true }).click(), async () => {
     await expect(page.locator(".lesson-file-workspace")).toBeVisible();
-    await expect(page.locator(".lesson-file-workspace")).toHaveCSS("opacity", "1");
+    await expect(page.locator(".lesson-file-workspace")).toHaveAttribute("data-motion", "idle");
     await expect(page.locator(".lesson-sheet-content").first()).toHaveCSS("opacity", "1");
     await expect(page.locator(".lesson-side-rail").last()).toHaveCSS("opacity", "1");
   });
   await page.screenshot({ path: testInfo.outputPath("detail.png") });
-  // Returning from a scrolled document must not wait for a scroll-to-top movie.
+  // Preserve the scroll-back and reverse paper transition from a scrolled document.
   await page.locator(".lesson-document-scroll").evaluate((element) => { element.scrollTop = element.scrollHeight; });
   await measure("closeDetail", () => page.getByRole("button", { name: /返回备课本/ }).click(), async () => {
     await expect(page.locator(".lesson-file-workspace")).toHaveCount(0);
@@ -58,10 +58,19 @@ test("navigation remains bounded with motion enabled and a slower CPU", async ({
   });
   console.log("Navigation measurements", JSON.stringify(samples));
   await testInfo.attach("navigation-measurements", { body: JSON.stringify(samples, null, 2), contentType: "application/json" });
-  // Broad budgets include assertion polling/transport; the animation itself is shorter.
-  expect((samples.openNotebook as { elapsed: number }).elapsed).toBeLessThan(900);
-  expect((samples.closeNotebook as { elapsed: number }).elapsed).toBeLessThan(800);
-  expect((samples.closeDetail as { elapsed: number }).elapsed).toBeLessThan(500);
+  // Choreography lasts 0.9s / 1.02s / up to 1.12s. Bound overhead and
+  // main-thread stalls instead of treating deleted animation as an optimization.
+  for (const name of ["openNotebook", "closeNotebook", "closeDetail"]) {
+    expect((samples[name] as { blocking: number }).blocking).toBeLessThan(200);
+  }
+  // Detail entry includes the one-time editor mount (measured the same with
+  // reduced motion and no paper transition), so bound it separately from the
+  // compositor-only choreography while still catching mount regressions.
+  expect((samples.openDetail as { blocking: number }).blocking).toBeLessThan(600);
+  expect((samples.openNotebook as { elapsed: number }).elapsed).toBeLessThan(1800);
+  expect((samples.closeNotebook as { elapsed: number }).elapsed).toBeLessThan(1800);
+  expect((samples.openDetail as { elapsed: number }).elapsed).toBeLessThan(3200);
+  expect((samples.closeDetail as { elapsed: number }).elapsed).toBeLessThan(2200);
   await cdp.detach();
 });
 
@@ -72,6 +81,7 @@ test("return flushes the last edit and retains the editor when saving fails", as
       await route.fulfill({ status: 503, json: { error: "temporary_failure" } });
     } else await route.continue();
   });
+  await expect(page.locator(".lesson-file-workspace")).toHaveAttribute("data-motion", "idle");
   const assessment = page.locator('.lesson-tiptap-field[aria-label="评价练习"]:visible').first();
   await assessment.fill("导航保存验收：最后一次编辑不能丢失。");
   await page.goBack();

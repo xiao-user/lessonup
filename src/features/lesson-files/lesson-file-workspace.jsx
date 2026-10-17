@@ -1,3 +1,4 @@
+import { useLessonPaperTransition } from "./use-lesson-paper-transition";
 import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
@@ -184,7 +185,7 @@ function pageContentSignature(pages) {
   )).join("\u001e");
 }
 
-export function LessonFileWorkspace({ notebook, file, closeSignal = 0, onSave, onAgentVersionCommitted, onClose, onCloseBlocked }) {
+export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal = 0, onSave, onAgentVersionCommitted, onClose, onCloseBlocked }) {
   const rootRef = useRef(null);
   const scrollRef = useRef(null);
   const documentPagesRef = useRef(null);
@@ -607,6 +608,7 @@ export function LessonFileWorkspace({ notebook, file, closeSignal = 0, onSave, o
   }, []);
 
   const { contextSafe } = useGSAP(() => {}, { scope: rootRef });
+  const closePaper = useLessonPaperTransition({ rootRef, scrollRef, sourceElement });
 
   const updateHistoryAvailability = (history) => {
     setHistoryAvailability({
@@ -748,7 +750,7 @@ export function LessonFileWorkspace({ notebook, file, closeSignal = 0, onSave, o
       } else {
         await saveInFlightRef.current;
       }
-      onClose();
+      if (await closePaper()) onClose();
     } catch {
       // Retain the editor and its retryable save if delivery failed.
       closingRef.current = false;
@@ -779,6 +781,7 @@ export function LessonFileWorkspace({ notebook, file, closeSignal = 0, onSave, o
       aria-label={`${file.title}备课文件`}
       tabIndex={-1}
     >
+      <div className="lesson-workspace-backdrop" aria-hidden="true" />
       <PaginationMeasure plan={plan} presentationMaterial={presentationMaterial} measureRef={measureRef} />
       {displayingDraft ? <PaginationMeasure plan={draftPlan} presentationMaterial={presentationMaterial} measureRef={draftMeasureRef} /> : null}
       <div className="lesson-mobile-switcher" aria-label="详情页工具">

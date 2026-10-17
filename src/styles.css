@@ -558,6 +558,17 @@
   pointer-events: none;
 }
 
+/* Per-element motion values must not invalidate every descendant each frame. */
+@property --book-y { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@property --book-scale { syntax: "<number>"; inherits: false; initial-value: 1; }
+@property --book-rotation { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+@property --cover-angle { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+@property --book-spread-x { syntax: "<length-percentage>"; inherits: false; initial-value: 0%; }
+@property --leaf-angle { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+@property --name-x { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@property --name-y { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@property --name-proximity { syntax: "<number>"; inherits: false; initial-value: 0; }
+
 .book-volume {
   --book-rest-height: 38cqh;
   --book-open-scale: 1;
@@ -565,8 +576,6 @@
   --book-y: 47.57cqh;
   --book-scale: 0.757575;
   --book-rotation: 0deg;
-  --cover-angle: 0deg;
-  --book-spread-x: 0%;
   position: absolute;
   top: 0;
   left: 49.44cqw;
@@ -597,6 +606,7 @@
 }
 
 .book-volume-unit {
+  --book-spread-x: 0%;
   z-index: 1;
   transform: translateX(var(--book-spread-x));
 }
@@ -613,6 +623,7 @@
 .book-volume-leaf {
   --leaf-angle: 0deg;
   --leaf-layer: 0;
+  pointer-events: none;
   position: absolute;
   inset: 1%;
   border-radius: 0.45cqh;
@@ -653,6 +664,7 @@
 }
 
 .book-volume-leaf-back { transform: rotateY(180deg); }
+.book-volume.is-open .book-volume-leaf.is-turned .book-volume-leaf-back { pointer-events: auto; }
 
 .book-volume .folder-paper.is-file-source {
   pointer-events: none !important;
@@ -794,6 +806,7 @@
 }
 
 .book-volume-cover {
+  --cover-angle: 0deg;
   --cover-layer: 0;
   position: absolute;
   inset: 0;
@@ -1737,15 +1750,16 @@
   color: var(--gray-1000);
 }
 
-/* One compositor fade; document geometry and mobile drawer state stay stable. */
-@media (prefers-reduced-motion: no-preference) {
-  .lesson-file-workspace { animation: lesson-workspace-enter 160ms ease-out; }
+.lesson-file-workspace { background: transparent; isolation: isolate; }
+.lesson-workspace-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--app-background);
+  pointer-events: none;
 }
-
-@keyframes lesson-workspace-enter {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
+.lesson-file-workspace[data-motion="entering"] .lesson-document-scroll,
+.lesson-file-workspace[data-motion="exiting"] .lesson-document-scroll { overflow: hidden; pointer-events: none; }
 
 .lesson-side-rail {
   position: relative;

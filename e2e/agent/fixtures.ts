@@ -30,6 +30,7 @@ export const test = base.extend<AgentFixtures>({
     const page = collectionPage;
     await openLessonFile(page);
     await expect(page.getByLabel("向备课助手提问")).toBeEnabled();
+    await expect(page.locator(".lesson-file-workspace")).toHaveAttribute("data-motion", "idle");
     await use(page);
   },
 });

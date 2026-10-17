@@ -15,6 +15,7 @@ export function BookVolume({
   onPageChange,
   pageAnimating,
   bookAnimating,
+  closing,
   renderPages,
   registerBook,
 }) {
@@ -69,7 +70,7 @@ export function BookVolume({
                 aria-hidden={index !== activePageIndex}
                 key={page.id}
               >
-                {Math.abs(index - activePageIndex) <= 1 && (page.kind === "file" ? (
+                {(index === 0 || Math.abs(index - activePageIndex) <= 2 || (closing && index < activePageIndex)) && (page.kind === "file" ? (
                   <button
                     className={`folder-paper book-volume-file book-volume-leaf-front ${activeFileId === page.id ? "is-file-source" : ""}`}
                     data-file-id={page.id}
@@ -92,7 +93,7 @@ export function BookVolume({
                   </div>
                 ))}
                 <div className="book-volume-leaf-back" aria-hidden="true">
-                  {Math.abs(index - activePageIndex) <= 1 && (page.kind === "title" ? (
+                  {(index === 0 || Math.abs(index - activePageIndex) <= 2 || (closing && index < activePageIndex)) && (page.kind === "title" ? (
                     <NotebookTitlePageSummary notebook={notebook} />
                   ) : (
                     <LessonFilePageBackSummary file={page} />

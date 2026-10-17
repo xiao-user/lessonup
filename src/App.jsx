@@ -761,6 +761,7 @@ function CollectionApp() {
           <LessonFileWorkspace
             notebook={activeNotebook}
             file={activeFileData}
+            sourceElement={activeFile.sourceElement}
             closeSignal={routeCloseRequest}
             onSave={updateLessonPlan}
             onAgentVersionCommitted={async (lessonPlan, documentVersion, pageCount) => {

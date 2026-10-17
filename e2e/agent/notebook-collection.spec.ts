@@ -3,6 +3,10 @@ import { initialDocument, lessonFileId, notebookId } from "./test-data.js";
 
 const temporaryTitle = "端到端临时备课本";
 
+// This file verifies inertial scrolling, page turns and mid-flight close poses,
+// so it must run with the real choreography instead of the suite's reduced motion.
+test.use({ contextOptions: { reducedMotion: "no-preference" } });
+
 test("creates once, scrolls across the full collection and targets the active notebook", async ({ collectionPage: page }) => {
   let temporaryNotebookId: string | null = null;
   try {
@@ -622,7 +626,7 @@ test("rewinds every turned leaf before an outside-click close settles", async ({
     await page.getByRole("button", { name: "返回全部备课本", exact: true }).click();
     await page.waitForTimeout(160);
     const closingTransforms = await openBook.evaluate((book) => ({
-      cover: (book as HTMLElement).style.getPropertyValue("--cover-angle"),
+      cover: (book.querySelector(".book-volume-cover") as HTMLElement).style.getPropertyValue("--cover-angle"),
       leaves: [...book.querySelectorAll(".book-volume-leaf")]
         .slice(0, 3)
         .map((leaf) => (leaf as HTMLElement).style.getPropertyValue("--leaf-angle")),
