@@ -17,6 +17,7 @@ const notFound = new Set([
   "curriculum_node_not_found",
   "curriculum_semantic_entity_not_found",
   "presentation_not_found",
+  "decision_not_found",
 ]);
 
 const conflicts = new Set([
@@ -38,6 +39,8 @@ const conflicts = new Set([
   "duplicate_lesson_blueprint_position",
   "duplicate_lesson_blueprint_identity",
   "lesson_blueprint_lesson_exists",
+  "stale_decision",
+  "decision_transition_forbidden",
 ]);
 
 const forbidden = new Set([
@@ -50,6 +53,8 @@ const forbidden = new Set([
   "notebook_scope_invalid",
   "fork_message_scope_invalid",
   "presentation_source_scope_invalid",
+  "decision_scope_invalid",
+  "decision_teacher_identity_required",
 ]);
 
 const unavailable = new Set([
@@ -84,6 +89,17 @@ const badRequest = new Set([
   "invalid_blueprint_difficulties",
   "invalid_design_basis_projection",
   "presentation_markup_not_allowed",
+  "decision_command_key_invalid",
+  "decision_agent_origin_required",
+  "decision_chosen_option_invalid",
+  "decision_confidence_required",
+  "decision_implementation_time_invalid",
+  "decision_implementation_required",
+  "decision_review_evidence_not_found",
+  "decision_review_evidence_before_implementation",
+  "decision_review_evidence_duplicated",
+  "decision_action_unsupported",
+  "decision_limit_invalid",
 ]);
 
 export function publicApiError(error: unknown) {
@@ -108,6 +124,7 @@ export function publicApiError(error: unknown) {
   // Keep native Dashi diagnostics on the server, while allowing the classroom
   // presentation UI to give a truthful retry message instead of a generic
   // internal error.
+  if (code === "decision_invalid") return { code, status: 422 as const };
   if (code === "dashi_goal_visible_slots_missing") {
     return { code: "dashi_visible_content_missing", status: 422 as const };
   }

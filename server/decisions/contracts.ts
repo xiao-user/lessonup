@@ -43,6 +43,43 @@ export type EvidenceLevel = (typeof EVIDENCE_LEVELS)[number];
 
 export type DecisionActor = "agent" | "teacher" | "system";
 
+export type DecisionRejectionReason = "insufficient_evidence" | "not_applicable" | "student_mismatch" | "other";
+export type DecisionReviewOutcome = "supported" | "not_supported" | "inconclusive";
+
+export interface DecisionRejection {
+  reasonCode: DecisionRejectionReason;
+  rationale: string;
+  at: string;
+}
+
+export interface DecisionImplementation {
+  implementedAt: string;
+  note: string;
+  documentVersion: number;
+  at: string;
+}
+
+export interface DecisionReview {
+  outcome: DecisionReviewOutcome;
+  rationale: string;
+  limitations: string;
+  evidenceIds: string[];
+  reviewedAt: string;
+  at: string;
+}
+
+export interface DecisionCommand {
+  idempotencyKey: string;
+  fingerprint: string;
+  documentVersion?: number;
+  expectedVersion?: number;
+}
+
+export interface DecisionCursor {
+  at: string;
+  id: string;
+}
+
 export interface EvidenceSource {
   system: string;
   uri: string;
@@ -112,6 +149,10 @@ export interface DecisionRecord {
   falsifier: string;
   reviewAt: string | null;
   status: DecisionStatus;
+  version: number;
+  rejection: DecisionRejection | null;
+  implementation: DecisionImplementation | null;
+  review: DecisionReview | null;
   provenance: DecisionProvenance;
   createdAt: string;
   updatedAt: string;

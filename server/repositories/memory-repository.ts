@@ -1,4 +1,5 @@
 import type { LearningCommand, LearningCursor, LearningEvidence, LearningInquiry, LearningRecord } from "../learning/domain.js";
+import type { DecisionCommand, DecisionCursor, DecisionRecord, EvidenceCard } from "../decisions/contracts.js";
 import { learningReviewContext } from "../learning/review-context.js";
 import type { AgentSessionItem as AgentInputItem } from "../repository.js";
 import {
@@ -104,6 +105,10 @@ export class MemoryLessonRepository implements LessonRepository {
   private learningEvidence = new Map<string, LearningEvidence>();
   private learningInquiries = new Map<string, LearningInquiry>();
   private learningReceipts = new Map<string, { fingerprint: string; record: LearningRecord }>();
+  private decisions = new Map<string, DecisionRecord>();
+  private decisionVersions = new Map<string, DecisionRecord[]>();
+  private decisionEvidenceCards = new Map<string, EvidenceCard>();
+  private decisionReceipts = new Map<string, { fingerprint: string; record: DecisionRecord }>();
   async listLearningReviews(ownerId: string, scope: { lessonFileId?: string; lessonBlueprintId?: string; limit: number }) {
     if ((!scope.lessonFileId && !scope.lessonBlueprintId) || !Number.isInteger(scope.limit) || scope.limit < 1 || scope.limit > 100) throw new Error("learning_scope_invalid");
     return structuredClone([...this.learningInquiries.values()].filter((item) => {
@@ -170,6 +175,57 @@ export class MemoryLessonRepository implements LessonRepository {
     if (expectedVersion === null ? Boolean(current) : !current || current.version !== expectedVersion) throw new Error("stale_learning_inquiry");
     this.learningInquiries.set(key(record.ownerId, record.id), structuredClone(record));
     this.learningReceipts.set(key(record.ownerId, command.idempotencyKey), { fingerprint: command.fingerprint, record: structuredClone(record) });
+    return structuredClone(record);
+  }
+
+  private replayDecisionNow(ownerId: string, command: DecisionCommand) {
+    const receipt = this.decisionReceipts.get(key(ownerId, command.idempotencyKey));
+    if (!receipt) return null;
+    if (receipt.fingerprint !== command.fingerprint) throw new Error("idempotency_conflict");
+    return structuredClone(receipt.record);
+  }
+  async getDecisionCommandResult(ownerId: string, idempotencyKey: string) {
+    return structuredClone(this.decisionReceipts.get(key(ownerId, idempotencyKey))?.record ?? null);
+  }
+  async replayDecisionCommand(ownerId: string, command: DecisionCommand) { return this.replayDecisionNow(ownerId, command); }
+  async listDecisions(ownerId: string, fileId: string, limit: number, before?: DecisionCursor) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("decision_limit_invalid");
+    return structuredClone([...this.decisions.values()]
+      .filter((item) => item.ownerId === ownerId && item.lessonFileId === fileId && this.files.has(key(ownerId, fileId)))
+      .filter((item) => !before || item.updatedAt < before.at || (item.updatedAt === before.at && item.id < before.id))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.id.localeCompare(a.id)).slice(0, limit));
+  }
+  async getDecision(ownerId: string, id: string) {
+    const value = this.decisions.get(key(ownerId, id));
+    return value && this.files.has(key(ownerId, value.lessonFileId)) ? structuredClone(value) : null;
+  }
+  async listDecisionVersions(ownerId: string, decisionId: string) {
+    return structuredClone(this.decisionVersions.get(key(ownerId, decisionId)) ?? []);
+  }
+  async listDecisionEvidenceCards(ownerId: string, fileId: string, evidenceIds?: string[]) {
+    const wanted = evidenceIds ? new Set(evidenceIds) : null;
+    return structuredClone([...this.decisionEvidenceCards.entries()]
+      .filter(([cardKey, card]) => cardKey.startsWith(`${key(ownerId, fileId)}:`) && (!wanted || wanted.has(card.id)))
+      .map(([, card]) => card));
+  }
+  async saveDecision(record: DecisionRecord, expectedVersion: number | null, command: DecisionCommand, evidenceCards: EvidenceCard[]) {
+    const replay = this.replayDecisionNow(record.ownerId, command);
+    if (replay) return replay;
+    const file = this.files.get(key(record.ownerId, record.lessonFileId));
+    if (!file || file.notebookId !== record.notebookId) throw new Error("stale_decision");
+    if (command.documentVersion !== undefined && file.documentVersion !== command.documentVersion) throw new Error("stale_document");
+    const current = this.decisions.get(key(record.ownerId, record.id));
+    if (expectedVersion === null ? Boolean(current) : !current || current.version !== expectedVersion) {
+      throw new Error("stale_decision");
+    }
+    for (const card of evidenceCards) {
+      this.decisionEvidenceCards.set(key(record.ownerId, record.lessonFileId, card.id), structuredClone(card));
+    }
+    this.decisions.set(key(record.ownerId, record.id), structuredClone(record));
+    const versions = this.decisionVersions.get(key(record.ownerId, record.id)) ?? [];
+    versions.push(structuredClone(record));
+    this.decisionVersions.set(key(record.ownerId, record.id), versions);
+    this.decisionReceipts.set(key(record.ownerId, command.idempotencyKey), { fingerprint: command.fingerprint, record: structuredClone(record) });
     return structuredClone(record);
   }
 

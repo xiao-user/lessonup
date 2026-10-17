@@ -58,6 +58,10 @@ function baseDecision(overrides: Partial<DecisionRecord> = {}): DecisionRecord {
     falsifier: "若新段落独立解释比例未上升，或延迟后回落，则本决策不成立。",
     reviewAt: null,
     status: "proposed",
+    version: 1,
+    rejection: null,
+    implementation: null,
+    review: null,
     provenance: { createdBy: "agent", modelRunId: "run_1", toolCallId: "tool_1", confirmedBy: null },
     createdAt: "2026-10-18T00:40:00Z",
     updatedAt: "2026-10-18T00:40:00Z",
@@ -135,6 +139,25 @@ describe("decision records", () => {
   it("rejects duplicated evidence ids", () => {
     expect(validateDecisionRecord(baseDecision({ evidenceCardIds: ["ev_1", "ev_1"] })))
       .toContain("decision.evidence_duplicated");
+  });
+
+  it("requires rejection, implementation and review facts for their states", () => {
+    expect(validateDecisionRecord(baseDecision({ status: "teacher_rejected" })))
+      .toContain("decision.rejection_required");
+    expect(validateDecisionRecord(baseDecision({ status: "implemented" })))
+      .toContain("decision.implementation_required");
+    expect(validateDecisionRecord(baseDecision({ status: "reviewed" })))
+      .toContain("decision.review_required");
+  });
+
+  it("does not allow outcomes before confirmation", () => {
+    const implementation = {
+      implementedAt: "2026-10-18T02:00:00Z", note: "", documentVersion: 7, at: "2026-10-18T02:00:00Z",
+    };
+    expect(validateDecisionRecord(baseDecision({
+      status: "teacher_confirmed",
+      implementation,
+    }))).toContain("decision.premature_outcome");
   });
 });
 

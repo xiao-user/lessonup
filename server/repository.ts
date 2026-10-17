@@ -1,4 +1,5 @@
 import type { LearningRepository } from "./learning/domain.js";
+import type { DecisionRepository } from "./decisions/repository.js";
 export type AgentSessionItem = Record<string, unknown>;
 type AgentInputItem = AgentSessionItem;
 interface Session {
@@ -124,7 +125,7 @@ export type AgentRuntimeSessionSnapshot = {
   updatedAt: string;
 };
 
-export interface LessonRepository extends LearningRepository {
+export interface LessonRepository extends LearningRepository, DecisionRepository {
   importNotebookGraph(ownerId: string, notebooks: ImportedNotebook[]): Promise<{ imported: number }>;
   listNotebooks(ownerId: string): Promise<NotebookGraphRecord[]>;
   createNotebook(ownerId: string, input: {

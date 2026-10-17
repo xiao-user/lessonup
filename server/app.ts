@@ -1,4 +1,5 @@
 import { registerLearningRoutes } from "./learning/routes.js";
+import { registerDecisionRoutes } from "./decisions/routes.js";
 import { Hono } from "hono";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { cors } from "hono/cors";
@@ -829,6 +830,7 @@ export function createApp(
   });
 
   registerLearningRoutes(app, repository);
+  registerDecisionRoutes(app, repository);
 
   app.get("/api/lesson-files/:id/class-feedback", async (c) => {
     const lessonFileId = c.req.param("id");

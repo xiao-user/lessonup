@@ -12,6 +12,8 @@ const DECISION_STATUS_SET = new Set<string>(DECISION_STATUSES);
 const EVIDENCE_KIND_SET = new Set<string>(EVIDENCE_KINDS);
 const EVIDENCE_LEVEL_SET = new Set<string>(EVIDENCE_LEVELS);
 const PII_LEVELS = new Set(["none", "teacher", "student"]);
+const REJECTION_REASONS = new Set(["insufficient_evidence", "not_applicable", "student_mismatch", "other"]);
+const REVIEW_OUTCOMES = new Set(["supported", "not_supported", "inconclusive"]);
 const CONFIRMED_STATUSES = new Set(["teacher_confirmed", "no_change", "implemented", "reviewed"]);
 const OPTIONLESS_TYPES = new Set(["no_change"]);
 
@@ -61,6 +63,7 @@ export function validateDecisionRecord(record: DecisionRecord): string[] {
     errors.push("decision.context_version_invalid");
   }
   if (!isoDate(record.createdAt) || !isoDate(record.updatedAt)) errors.push("decision.timestamps_invalid");
+  if (!Number.isInteger(record.version) || record.version < 0) errors.push("decision.version_invalid");
 
   const options = Array.isArray(record.options) ? record.options : [];
   if (!OPTIONLESS_TYPES.has(record.decisionType) && options.length < 2) errors.push("decision.options_required");
@@ -73,7 +76,9 @@ export function validateDecisionRecord(record: DecisionRecord): string[] {
   }
 
   const evidenceIds = Array.isArray(record.evidenceCardIds) ? record.evidenceCardIds : [];
-  if (record.status !== "insufficient_evidence" && evidenceIds.length === 0) errors.push("decision.evidence_required");
+  if (!["draft", "insufficient_evidence"].includes(record.status) && evidenceIds.length === 0) {
+    errors.push("decision.evidence_required");
+  }
   if (new Set(evidenceIds).size !== evidenceIds.length) errors.push("decision.evidence_duplicated");
 
   if (record.status !== "draft" && !filled(record.rationale)) errors.push("decision.rationale_required");
@@ -103,6 +108,40 @@ export function validateDecisionRecord(record: DecisionRecord): string[] {
   }
 
   if (record.reviewAt !== null && !isoDate(record.reviewAt)) errors.push("decision.review_at_invalid");
+
+  if (record.status === "teacher_rejected") {
+    if (!record.rejection) errors.push("decision.rejection_required");
+    else {
+      if (!REJECTION_REASONS.has(record.rejection.reasonCode)) errors.push("decision.rejection_reason_invalid");
+      if (!filled(record.rejection.rationale)) errors.push("decision.rejection_rationale_required");
+      if (!isoDate(record.rejection.at)) errors.push("decision.rejection_at_invalid");
+    }
+  }
+  if (record.status === "implemented" || record.status === "reviewed") {
+    if (!record.implementation) errors.push("decision.implementation_required");
+    else {
+      if (!isoDate(record.implementation.implementedAt)) errors.push("decision.implemented_at_invalid");
+      if (!Number.isInteger(record.implementation.documentVersion) || record.implementation.documentVersion < 0) {
+        errors.push("decision.implementation_version_invalid");
+      }
+      if (!isoDate(record.implementation.at)) errors.push("decision.implementation_recorded_at_invalid");
+    }
+  }
+  if (record.status === "reviewed") {
+    if (!record.review) errors.push("decision.review_required");
+    else {
+      if (!REVIEW_OUTCOMES.has(record.review.outcome)) errors.push("decision.review_outcome_invalid");
+      if (!filled(record.review.rationale)) errors.push("decision.review_rationale_required");
+      if (!filled(record.review.limitations)) errors.push("decision.review_limitations_required");
+      if (!Array.isArray(record.review.evidenceIds) || record.review.evidenceIds.length === 0) {
+        errors.push("decision.review_evidence_required");
+      }
+      if (!isoDate(record.review.reviewedAt) || !isoDate(record.review.at)) errors.push("decision.review_time_invalid");
+    }
+  }
+  if (record.status === "teacher_confirmed" && (record.implementation || record.review)) {
+    errors.push("decision.premature_outcome");
+  }
   if (!["agent", "teacher"].includes(record.provenance?.createdBy)) errors.push("decision.provenance_invalid");
   for (const field of ["counterevidence", "assumptions", "uncertainties"] as const) {
     if (!Array.isArray(record[field])) errors.push(`decision.${field}_invalid`);

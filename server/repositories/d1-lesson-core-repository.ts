@@ -1,4 +1,5 @@
 import { D1LearningRepository } from "./d1-learning-repository.js";
+import { D1DecisionRepository } from "./d1-decision-repository.js";
 import type { LessonRepository } from "../repository.js";
 import type { SqlDatabase } from "../platform/sql-database.js";
 import { D1AgentApprovalStore, type AgentApprovalStore } from "./d1-agent-approval-store.js";
@@ -32,6 +33,7 @@ export function createD1LessonCoreRepository(
   clock = () => new Date().toISOString(),
 ): D1LessonCoreRepository {
   const learning = new D1LearningRepository(database);
+  const decisions = new D1DecisionRepository(database);
   const workspace = new D1LessonWorkspaceStore(database, clock);
   const runtime = new D1AgentRuntimeStore(database, clock);
   const approvals = new D1AgentApprovalStore(database, clock);
@@ -53,6 +55,7 @@ export function createD1LessonCoreRepository(
 
   return {
     ...bind(learning, ["listLearningReviews", "listLearningEvidence", "getLearningEvidence", "listLearningInquiries", "getLearningInquiry", "replayLearningCommand", "getLearningCommandResult", "saveLearningEvidence", "saveLearningInquiry"]),
+    ...bind(decisions, decisionMethods),
     ...bind(workspace, workspaceMethods),
     ...bind(runtime, runtimeMethods),
     ...bind(approvals, approvalMethods),
@@ -77,6 +80,11 @@ export function createD1LessonCoreRepository(
 function bind<T extends object, K extends keyof T>(source: T, names: readonly K[]): Pick<T, K> {
   return Object.fromEntries(names.map((name) => [name, (source[name] as Function).bind(source)])) as Pick<T, K>;
 }
+
+const decisionMethods = [
+  "listDecisions", "getDecision", "listDecisionVersions", "listDecisionEvidenceCards",
+  "getDecisionCommandResult", "replayDecisionCommand", "saveDecision",
+] as const;
 
 const workspaceMethods = [
   "importNotebookGraph", "listNotebooks", "createNotebook", "updateNotebook", "deleteNotebook",

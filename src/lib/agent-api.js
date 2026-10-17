@@ -47,6 +47,18 @@ export const agentApi = {
   actOnLearningInquiry: (fileId, inquiryId, input, commandId) => request(`/api/lesson-files/${encodeURIComponent(fileId)}/learning/inquiries/${encodeURIComponent(inquiryId)}`, {
     method: "PATCH", headers: { "idempotency-key": commandId }, body: JSON.stringify(input),
   }),
+  getDecisions: (fileId, cursors = {}) => {
+    const query = new URLSearchParams(Object.entries(cursors).filter(([, value]) => value).map(([key, value]) => [key, JSON.stringify(value)]));
+    return request(`/api/lesson-files/${encodeURIComponent(fileId)}/decisions${query.size ? `?${query}` : ""}`);
+  },
+  getDecisionContext: (fileId, decisionId) => request(`/api/lesson-files/${encodeURIComponent(fileId)}/decisions/${encodeURIComponent(decisionId)}`),
+  getDecisionCommandResult: (fileId, key) => request(`/api/lesson-files/${encodeURIComponent(fileId)}/decisions/commands/${encodeURIComponent(key)}`),
+  proposeDecision: (fileId, input, commandId) => request(`/api/lesson-files/${encodeURIComponent(fileId)}/decisions`, {
+    method: "POST", headers: { "idempotency-key": commandId }, body: JSON.stringify(input),
+  }),
+  actOnDecision: (fileId, decisionId, input, commandId) => request(`/api/lesson-files/${encodeURIComponent(fileId)}/decisions/${encodeURIComponent(decisionId)}`, {
+    method: "PATCH", headers: { "idempotency-key": commandId }, body: JSON.stringify(input),
+  }),
 
   runtime: () => request("/api/runtime"),
   listNotebooks: () => request("/api/notebooks"),
