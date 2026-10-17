@@ -26,7 +26,7 @@ export default defineConfig({
       timeout: 60_000,
     },
     {
-      command: "VITE_SUPABASE_URL= VITE_SUPABASE_ANON_KEY= LESSONUP_API_ORIGIN=http://127.0.0.1:8790 npx vite --host 127.0.0.1 --port 5176 --strictPort",
+      command: "LESSONUP_API_ORIGIN=http://127.0.0.1:8790 npx vite --host 127.0.0.1 --port 5176 --strictPort",
       url: "http://127.0.0.1:5176",
       reuseExistingServer: false,
       timeout: 60_000,

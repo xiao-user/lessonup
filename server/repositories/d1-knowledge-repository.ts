@@ -2,6 +2,19 @@ import type { AgentRunEvidenceKind, AgentRunEvidenceRecord, KnowledgeResult, Sou
 import { runEvidenceIdentity, uniqueRunEvidenceSources } from "../run-evidence.js";
 import type { LessonRepository } from "../repository.js";
 import type { SqlDatabase, SqlValue } from "../platform/sql-database.js";
+import { lexicalScore } from "./lexical-score.js";
+
+/**
+ * Chunks ranked per search. Only text is read for these; vectors (about 10 KB
+ * each) are fetched afterwards for the best candidates alone, so a large
+ * library costs one text scan instead of a full vector transfer. Retain the
+ * former recent-vector window as well, so semantic-only matches are not lost.
+ */
+const KNOWLEDGE_SCAN_LIMIT = 1_500;
+const KNOWLEDGE_VECTOR_CANDIDATES = 120;
+const KNOWLEDGE_RECENT_VECTOR_CANDIDATES = 300;
+/** Leaves room for the scope predicates under D1's 100 bound-parameter limit. */
+const VECTOR_FETCH_BATCH = 80;
 
 type ChunkRow = { source_id: string; title: string; scope: string; page: number | null; stable_chunk_id: string; passage: string; section: string | null; embedding_json: string | null };
 
@@ -22,32 +35,64 @@ export class D1KnowledgeReadRepository implements D1KnowledgeRepository {
   async searchKnowledge(ownerId: string, scopes: string[], query: string, limit: number, embedding?: number[]) {
     const { clause, params } = scopeClause(ownerId, scopes, "k");
     if (!clause) return [];
-    const result = await this.database.query<ChunkRow>({ sql: `SELECT k.source_id, s.title, k.scope, k.page, k.stable_chunk_id, k.passage, k.section, k.embedding_json
+    const scanned = await this.database.query<ChunkRow & { id: string }>({ sql: `SELECT k.id, k.source_id, s.title, k.scope, k.page, k.stable_chunk_id, k.passage, k.section, NULL AS embedding_json
       FROM knowledge_chunks k JOIN knowledge_sources s ON s.id = k.source_id
       WHERE s.status = 'ready' AND (s.scope = 'public' OR s.attached_message_id IS NOT NULL)
-        AND ${clause} ORDER BY k.created_at DESC LIMIT 300`, params });
-    return result.rows.map((row) => knowledgeResult(row, query, embedding))
-      .filter((row) => row.score > 0)
-      .sort((left, right) => right.score - left.score || left.id.localeCompare(right.id))
-      .slice(0, Math.max(1, Math.min(limit, 32)));
+        AND ${clause} ORDER BY k.created_at DESC, k.id LIMIT ${KNOWLEDGE_SCAN_LIMIT}`, params });
+    const size = Math.max(1, Math.min(limit, 32));
+    // Sorting is stable, so equal scores keep the newest-first order of the scan.
+    const ranked = scanned.rows
+      .map((row) => ({ row, lexical: lexicalScore(query, `${row.title}\n${row.section ?? ""}\n${row.passage}`) }))
+      .sort((left, right) => right.lexical - left.lexical);
+    if (!embedding) {
+      return ranked.map(({ row, lexical }) => knowledgeResult(row, lexical, 0))
+        .filter((result) => result.score > 0)
+        .sort(byScore)
+        .slice(0, size);
+    }
+    const candidateIds = new Set([
+      ...ranked.slice(0, KNOWLEDGE_VECTOR_CANDIDATES).map(({ row }) => row.id),
+      ...scanned.rows.slice(0, KNOWLEDGE_RECENT_VECTOR_CANDIDATES).map((row) => row.id),
+    ]);
+    const candidates = ranked.filter(({ row }) => candidateIds.has(row.id));
+    const vectors = await this.vectors(ownerId, scopes, candidates.map(({ row }) => row.id));
+    return candidates.map(({ row, lexical }) => knowledgeResult(row, lexical, cosine(embedding, vectors.get(row.id) ?? [])))
+      .filter((result) => result.score > 0)
+      .sort(byScore)
+      .slice(0, size);
+  }
+
+  /** Vectors for already-selected chunk ids, re-checked against the caller's scope. */
+  private async vectors(ownerId: string, scopes: string[], ids: string[]) {
+    const { clause, params } = scopeClause(ownerId, scopes, "k");
+    const vectors = new Map<string, number[]>();
+    if (!clause) return vectors;
+    const batches: string[][] = [];
+    for (let start = 0; start < ids.length; start += VECTOR_FETCH_BATCH) batches.push(ids.slice(start, start + VECTOR_FETCH_BATCH));
+    const results = await Promise.all(batches.map((batch) => this.database.query<{ id: string; embedding_json: string | null }>({
+      sql: `SELECT k.id, k.embedding_json FROM knowledge_chunks k WHERE k.id IN (${batch.map(() => "?").join(",")}) AND ${clause}`,
+      params: [...batch, ...params],
+    })));
+    for (const result of results) for (const row of result.rows) vectors.set(row.id, parseEmbedding(row.embedding_json));
+    return vectors;
   }
 
   async getKnowledgePassage(ownerId: string, scopes: string[], chunkId: string) {
     const { clause, params } = scopeClause(ownerId, scopes, "k"); if (!clause) return null;
-    const result = await this.database.query<ChunkRow>({ sql: `SELECT k.source_id, s.title, k.scope, k.page, k.stable_chunk_id, k.passage, k.section, k.embedding_json
+    const result = await this.database.query<ChunkRow>({ sql: `SELECT k.source_id, s.title, k.scope, k.page, k.stable_chunk_id, k.passage, k.section, NULL AS embedding_json
       FROM knowledge_chunks k JOIN knowledge_sources s ON s.id = k.source_id
       WHERE s.status = 'ready' AND (s.scope = 'public' OR s.attached_message_id IS NOT NULL)
         AND k.stable_chunk_id = ? AND ${clause} LIMIT 1`, params: [chunkId, ...params] });
-    return result.rows[0] ? knowledgeResult(result.rows[0], "", undefined) : null;
+    return result.rows[0] ? knowledgeResult(result.rows[0], 0.01, 0) : null;
   }
 
   async getKnowledgeSourcePassages(ownerId: string, scopes: string[], sourceId: string, limit: number) {
     const { clause, params } = scopeClause(ownerId, scopes, "k"); if (!clause) return [];
-    const result = await this.database.query<ChunkRow>({ sql: `SELECT k.source_id, s.title, k.scope, k.page, k.stable_chunk_id, k.passage, k.section, k.embedding_json
+    const result = await this.database.query<ChunkRow>({ sql: `SELECT k.source_id, s.title, k.scope, k.page, k.stable_chunk_id, k.passage, k.section, NULL AS embedding_json
       FROM knowledge_chunks k JOIN knowledge_sources s ON s.id = k.source_id
       WHERE s.status = 'ready' AND (s.scope = 'public' OR s.attached_message_id IS NOT NULL)
         AND k.source_id = ? AND ${clause} ORDER BY k.created_at, k.id LIMIT ?`, params: [sourceId, ...params, Math.max(1, Math.min(limit, 32))] });
-    return result.rows.map((row) => knowledgeResult(row, "", undefined));
+    return result.rows.map((row) => knowledgeResult(row, 0.01, 0));
   }
 
   async listProjectSources(ownerId: string, scopes: string[]): Promise<SourceRef[]> {
@@ -95,12 +140,9 @@ function scopeClause(ownerId: string, scopes: string[], alias: "k" | "s") {
   return { clause: clauses.length ? `(${clauses.join(" OR ")})` : "", params };
 }
 
-function knowledgeResult(row: ChunkRow, query: string, embedding?: number[]): KnowledgeResult {
-  const text = `${row.title}\n${row.section ?? ""}\n${row.passage}`.toLocaleLowerCase();
-  const terms = query.toLocaleLowerCase().split(/[\s,，。；;、]+/).filter(Boolean);
-  const lexical = terms.length ? terms.reduce((score, term) => score + (text.includes(term) ? 1 : 0), 0) / terms.length : 0.01;
-  const vector = embedding ? cosine(embedding, parseEmbedding(row.embedding_json)) : 0;
+function knowledgeResult(row: ChunkRow, lexical: number, vector: number): KnowledgeResult {
   return { id: row.source_id, title: row.title, kind: row.scope === "public" ? "public" : "private", page: row.page ?? undefined, chunkId: row.stable_chunk_id, passage: row.passage, section: row.section ?? undefined, score: lexical * 0.35 + Math.max(0, vector) * 0.65 };
 }
+const byScore = (left: KnowledgeResult, right: KnowledgeResult) => right.score - left.score || left.id.localeCompare(right.id);
 function parseEmbedding(value: string | null) { try { const parsed = JSON.parse(value ?? "[]"); return Array.isArray(parsed) && parsed.every((item) => typeof item === "number") ? parsed : []; } catch { return []; } }
 function cosine(left: number[], right: number[]) { if (!left.length || left.length !== right.length) return 0; let dot = 0; let a = 0; let b = 0; for (let index = 0; index < left.length; index += 1) { dot += left[index]! * right[index]!; a += left[index]! ** 2; b += right[index]! ** 2; } return a && b ? dot / Math.sqrt(a * b) : 0; }

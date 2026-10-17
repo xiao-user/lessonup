@@ -1,6 +1,7 @@
 import type { CurriculumKnowledgeContinuityRecord, CurriculumKnowledgeSearchResult, CurriculumNodeKnowledgeRecord, CurriculumNodeKnowledgePoint, CurriculumPeriodRecommendation, CurriculumSemanticEntityRecord, CurriculumSemanticReleaseRecord, CurriculumSemanticSource } from "../domain.js";
 import type { LessonRepository } from "../repository.js";
 import type { SqlDatabase } from "../platform/sql-database.js";
+import { lexicalScore } from "./lexical-score.js";
 
 type ReleaseRow = { id: string; scope_key: string; catalog_generation_id: string; subject: string; stage: string; edition: string; grade: string; volume: string; schema_version: number; published_at: string };
 type PointRow = { id: string; semantic_entity_id: string; sequence_no: number | null; printed_pages: string | null; recommended_period: number | null; payload_json: string; priority: number; external_id: string | null; canonical_name: string; definition: string; entity_payload_json: string; confidence: number; kind: CurriculumSemanticEntityRecord["kind"]; embedding_json: string | null; search_text: string };
@@ -34,7 +35,7 @@ export class D1CurriculumKnowledgeReadRepository implements D1CurriculumKnowledg
     const occurrences = await this.occurrences(release.id, args.textbookId, rows.map((row) => row.semantic_entity_id));
     return rows.flatMap((row) => {
       const point = entities.get(row.semantic_entity_id); if (!point) return [];
-      const lexical = scoreText(args.query, `${row.search_text}\n${row.canonical_name}\n${row.definition}`);
+      const lexical = lexicalScore(args.query, `${row.search_text}\n${row.canonical_name}\n${row.definition}`);
       const vector = args.embedding ? cosine(args.embedding, numbers(row.embedding_json)) : 0;
       const score = args.embedding && numbers(row.embedding_json).length ? Math.max(0, vector) : lexical;
       return [{ point, score, retrievalMethod: args.embedding && numbers(row.embedding_json).length ? "embedding" as const : "lexical" as const, occurrences: occurrences.get(row.semantic_entity_id) ?? [] }];
@@ -90,6 +91,5 @@ const unavailable = (): CurriculumKnowledgeContinuityRecord => ({ status: "unava
 function object(value: string) { try { const result = JSON.parse(value); return result && typeof result === "object" && !Array.isArray(result) ? result as Record<string, unknown> : {}; } catch { return {}; } }
 function numbers(value: string | null) { try { const result = JSON.parse(value ?? "[]"); return Array.isArray(result) && result.every((item) => typeof item === "number") ? result : []; } catch { return []; } }
 function cosine(left: number[], right: number[]) { if (!left.length || left.length !== right.length) return 0; let dot = 0; let a = 0; let b = 0; for (let i = 0; i < left.length; i += 1) { dot += left[i]! * right[i]!; a += left[i]! ** 2; b += right[i]! ** 2; } return a && b ? dot / Math.sqrt(a * b) : 0; }
-function scoreText(query: string, text: string) { const terms = query.toLocaleLowerCase().split(/[\s,，。；;、]+/).filter(Boolean); const value = text.toLocaleLowerCase(); return terms.length ? terms.reduce((score, term) => score + (value.includes(term) ? 1 : 0), 0) / terms.length : 0; }
 function position(sequence: number, current: number | null) { return !current || sequence === current ? "current" as const : sequence < current ? "before" as const : "after" as const; }
 function firstByEntity(rows: PointRow[]) { const unique = new Map<string, PointRow>(); for (const row of rows) unique.set(row.semantic_entity_id, unique.get(row.semantic_entity_id) ?? row); return [...unique.values()]; }

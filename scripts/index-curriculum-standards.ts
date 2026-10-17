@@ -1,12 +1,31 @@
+/**
+ * Indexes the normalized national curriculum standards into D1.
+ *
+ *   npm run curriculum:standards:validate
+ *   npm run curriculum:standards:import [-- --only 数学] [--publish] [--remote]
+ *   npm run curriculum:standards:status [-- --remote]
+ *   npm run curriculum:standards:publish [-- --remote]
+ *
+ * Targets the local Wrangler D1 unless --remote is given. `import` on a
+ * release that is already published only backfills missing embeddings and
+ * derived scope columns; published passages are never rewritten.
+ */
 import "dotenv/config";
-import crypto from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { deterministicUuid } from "../server/curriculum/knowledge-sample.js";
 import { ConfiguredEmbeddingProvider } from "../server/providers/embeddings.js";
 import { config, hasEmbeddingProvider } from "../server/config.js";
+import {
+  ensureCurriculumStandardRelease,
+  indexCurriculumStandardDocument,
+  publishCurriculumStandardRelease,
+  readCurriculumStandardReleaseStatus,
+  type CurriculumStandardReleaseStatus,
+} from "../server/repositories/d1-curriculum-import.js";
+import type { SqlDatabase } from "../server/platform/sql-database.js";
+import { d1TargetFromArguments, describeD1Target, openD1 } from "./lib/wrangler-d1.js";
 
 const chunkSchema = z.object({
   stableChunkId: z.string().min(1),
@@ -129,15 +148,6 @@ function documentScope(document: NormalizedDocument) {
   };
 }
 
-function serviceClient() {
-  if (!config.SUPABASE_URL || !config.SUPABASE_SERVICE_ROLE_KEY) {
-    throw new Error("curriculum_standard_supabase_not_configured");
-  }
-  return createClient(config.SUPABASE_URL, config.SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
-}
-
 async function embedWithRetry(provider: ConfiguredEmbeddingProvider, texts: string[]) {
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -151,140 +161,73 @@ async function embedWithRetry(provider: ConfiguredEmbeddingProvider, texts: stri
   throw lastError;
 }
 
+const indexVersionFor = (document: NormalizedDocument) => (
+  `embedding:${config.EMBEDDING_MODEL}:${normalizerVersion}:${document.document.parsedSha256.slice(0, 16)}`
+);
+
 async function indexDocument(
-  client: SupabaseClient,
+  db: SqlDatabase,
   provider: ConfiguredEmbeddingProvider,
-  release: ReturnType<typeof releaseFor>,
+  releaseState: { id: string; status: CurriculumStandardReleaseStatus },
   normalized: NormalizedDocument,
   position: number,
   total: number,
 ) {
-  const scope = documentScope(normalized);
-  const sourceId = deterministicUuid(release.id, `${normalized.document.sourceFilename}:${normalized.document.parsedSha256}`);
-  const workerId = crypto.randomUUID();
-  const indexVersion = `embedding:${config.EMBEDDING_MODEL}:${normalizerVersion}:${normalized.document.parsedSha256.slice(0, 16)}`;
-  const document = {
-    filename: normalized.document.sourceFilename,
-    title: normalized.document.title,
-    kind: normalized.document.kind,
-    subject: normalized.document.subject,
-    ...scope,
-    standardCode: "",
-    sourceUrl: "",
-  };
-  const begun = await client.rpc("upsert_parsed_curriculum_standard_document", {
-    p_release: release,
-    p_document: document,
-    p_source_id: sourceId,
-    p_parsed_sha256: normalized.document.parsedSha256,
-    p_worker_id: workerId,
-    p_index_version: indexVersion,
+  const outcome = await indexCurriculumStandardDocument(db, {
+    release: releaseState,
+    document: {
+      filename: normalized.document.sourceFilename,
+      title: normalized.document.title,
+      kind: normalized.document.kind,
+      subject: normalized.document.subject,
+      ...documentScope(normalized),
+      parsedSha256: normalized.document.parsedSha256,
+    },
+    chunks: normalized.chunks,
+    indexVersion: indexVersionFor(normalized),
+    embed: (texts) => embedWithRetry(provider, texts),
+    batchSize,
+    onProgress: (done, count) => {
+      process.stdout.write(`\r[${position}/${total}] ${normalized.document.title} ${done}/${count}`);
+    },
   });
-  if (begun.error) throw new Error(`curriculum_standard_begin_failed:${normalized.document.title}:${begun.error.message}`);
-  const source = (Array.isArray(begun.data) ? begun.data[0] : begun.data) as {
-    status?: string; index_version?: string; metadata?: Record<string, unknown>;
-  } | null;
-  if (source?.status === "ready" && source.index_version === indexVersion) {
-    console.log(`[${position}/${total}] 已是最新索引 ${normalized.document.title}`);
-    return;
-  }
+  if (outcome === "skipped") console.log(`[${position}/${total}] 已是最新索引 ${normalized.document.title}`);
+  else console.log(outcome === "backfilled" ? "  已补全向量与学段范围" : "");
+}
 
-  try {
-    for (let index = 0; index < normalized.chunks.length; index += batchSize) {
-      const batch = normalized.chunks.slice(index, index + batchSize);
-      const heartbeat = await client.rpc("heartbeat_knowledge_source", {
-        p_source_id: sourceId,
-        p_worker_id: workerId,
-      });
-      if (heartbeat.error) throw new Error(heartbeat.error.message);
-      const vectors = await embedWithRetry(provider, batch.map((chunk) => chunk.embeddingText));
-      const rows = batch.map((chunk, batchIndex) => {
-        const absoluteIndex = index + batchIndex;
-        return {
-          stable_chunk_id: chunk.stableChunkId,
-          section: chunk.section,
-          page: chunk.pageStart,
-          page_end: chunk.pageEnd,
-          passage: chunk.passage,
-          adjacent_before: normalized.chunks[absoluteIndex - 1]?.passage.slice(-400),
-          adjacent_after: normalized.chunks[absoluteIndex + 1]?.passage.slice(0, 400),
-          embedding: vectors[batchIndex],
-          metadata: {
-            headingPath: chunk.headingPath,
-            blockRefs: chunk.blockRefs,
-            labels: chunk.labels,
-            averageConfidence: chunk.averageConfidence,
-            contentSha256: chunk.contentSha256,
-          },
-        };
-      });
-      const staged = await client.rpc("stage_knowledge_chunk_batch", {
-        p_source_id: sourceId,
-        p_worker_id: workerId,
-        p_index_version: indexVersion,
-        p_chunks: rows,
-      });
-      if (staged.error) throw new Error(staged.error.message);
-      process.stdout.write(`\r[${position}/${total}] ${normalized.document.title} ${Math.min(index + batch.length, normalized.chunks.length)}/${normalized.chunks.length}`);
-    }
-    process.stdout.write("\n");
-    const published = await client.rpc("publish_staged_knowledge_index", {
-      p_source_id: sourceId,
-      p_worker_id: workerId,
-      p_index_version: indexVersion,
-      p_expected_count: normalized.chunks.length,
-      p_metadata: {
-        ...(source?.metadata ?? {}),
-        chunkCount: normalized.chunks.length,
-        pageCount: normalized.document.pageCount,
-        parserVersion: normalized.parser.engine,
-        normalizerVersion,
-        parserWarnings: normalized.quality.warnings,
-        quality: normalized.quality,
-        indexedAt: new Date().toISOString(),
-        rawArtifactStored: false,
-      },
-    });
-    if (published.error) throw new Error(published.error.message);
-  } catch (error) {
-    await client.rpc("fail_knowledge_source", {
-      p_source_id: sourceId,
-      p_worker_id: workerId,
-      p_error: (error instanceof Error ? error.message : "curriculum_standard_index_failed").slice(0, 500),
-    });
-    throw error;
+function documentState(
+  stored: { indexVersion: string; chunkCount: number; embeddedCount: number } | undefined,
+  normalized: NormalizedDocument,
+) {
+  if (!stored) return "missing";
+  if (stored.indexVersion.startsWith("indexing:")) return "indexing";
+  if (stored.chunkCount !== normalized.chunks.length) return "incomplete";
+  if (stored.embeddedCount < stored.chunkCount) return "no_embeddings";
+  if (config.EMBEDDING_MODEL && stored.indexVersion !== indexVersionFor(normalized)) return "stale";
+  return "ready";
+}
+
+async function status(db: SqlDatabase, release: ReturnType<typeof releaseFor>, documents: NormalizedDocument[]) {
+  const stored = await readCurriculumStandardReleaseStatus(db, release.releaseKey);
+  if (!stored) throw new Error("curriculum_standard_release_not_imported");
+  console.log(`${stored.title} · ${stored.status} · ${stored.documents.length}/${stored.expectedDocumentCount}`);
+  const byFilename = new Map(stored.documents.map((document) => [document.filename, document]));
+  for (const normalized of documents) {
+    console.log(`${documentState(byFilename.get(normalized.document.sourceFilename), normalized)}\t${normalized.document.subject ?? "共用课程方案"}\t${normalized.document.title}`);
   }
 }
 
-async function status(client: SupabaseClient, release: ReturnType<typeof releaseFor>) {
-  const releaseResult = await client.from("curriculum_standard_releases")
-    .select("id,title,status,expected_document_count,published_at")
-    .eq("release_key", release.releaseKey)
-    .maybeSingle();
-  if (releaseResult.error) throw new Error(releaseResult.error.message);
-  if (!releaseResult.data) throw new Error("curriculum_standard_release_not_imported");
-  const documentsResult = await client.from("curriculum_standard_documents")
-    .select("title,subject,document_kind,knowledge_source_id")
-    .eq("release_id", releaseResult.data.id)
-    .order("title");
-  if (documentsResult.error) throw new Error(documentsResult.error.message);
-  const sourceIds = (documentsResult.data ?? []).map((document) => document.knowledge_source_id);
-  const sourcesResult = sourceIds.length
-    ? await client.from("knowledge_sources").select("id,status,index_version,last_error,metadata").in("id", sourceIds)
-    : { data: [], error: null };
-  if (sourcesResult.error) throw new Error(sourcesResult.error.message);
-  const sourceById = new Map((sourcesResult.data ?? []).map((source) => [source.id, source]));
-  console.log(`${releaseResult.data.title} · ${releaseResult.data.status} · ${(documentsResult.data ?? []).length}/${releaseResult.data.expected_document_count}`);
-  for (const document of documentsResult.data ?? []) {
-    const source = sourceById.get(document.knowledge_source_id);
-    console.log(`${source?.status ?? "missing"}\t${document.subject ?? "共用课程方案"}\t${document.title}${source?.last_error ? `\t${source.last_error}` : ""}`);
-  }
-}
-
-async function publish(client: SupabaseClient, release: ReturnType<typeof releaseFor>) {
-  const result = await client.rpc("publish_curriculum_standard_release", { p_release_key: release.releaseKey });
-  if (result.error) throw new Error(`curriculum_standard_publish_failed:${result.error.message}`);
-  console.log(`已原子发布：${release.title}`);
+async function publish(db: SqlDatabase, release: ReturnType<typeof releaseFor>, documents: NormalizedDocument[]) {
+  if (!config.EMBEDDING_MODEL) throw new Error("embedding_not_configured");
+  const result = await publishCurriculumStandardRelease(db, {
+    releaseKey: release.releaseKey,
+    expected: documents.map((document) => ({
+      filename: document.document.sourceFilename,
+      indexVersion: indexVersionFor(document),
+      chunkCount: document.chunks.length,
+    })),
+  });
+  console.log(result === "already_published" ? `已是发布状态：${release.title}` : `已发布：${release.title}`);
 }
 
 const allDocuments = await loadDocuments();
@@ -293,22 +236,33 @@ if (action === "validate") {
   const chunks = allDocuments.reduce((sum, document) => sum + document.chunks.length, 0);
   console.log(`校验通过：${allDocuments.length} 份文档，${chunks} 个切片，发布键 ${release.releaseKey}`);
 } else {
-  const client = serviceClient();
-  if (action === "status") {
-    await status(client, release);
-  } else if (action === "publish") {
-    await publish(client, release);
-  } else {
-    if (!hasEmbeddingProvider) throw new Error("embedding_not_configured");
-    const selected = only
-      ? allDocuments.filter((document) => document.document.subject === only || document.document.kind === only)
-      : allDocuments;
-    if (!selected.length) throw new Error(`curriculum_standard_only_not_found:${only}`);
-    const provider = new ConfiguredEmbeddingProvider();
-    for (const [index, document] of selected.entries()) {
-      await indexDocument(client, provider, release, document, index + 1, selected.length);
+  const target = d1TargetFromArguments(process.argv.slice(3));
+  console.log(`目标：${describeD1Target(target)}`);
+  const { db, close } = await openD1(target);
+  try {
+    if (action === "status") {
+      await status(db, release, allDocuments);
+    } else if (action === "publish") {
+      await publish(db, release, allDocuments);
+    } else {
+      if (!hasEmbeddingProvider) throw new Error("embedding_not_configured");
+      const selected = only
+        ? allDocuments.filter((document) => document.document.subject === only || document.document.kind === only)
+        : allDocuments;
+      if (!selected.length) throw new Error(`curriculum_standard_only_not_found:${only}`);
+      const { id, seriesKey, releaseKey, title, versionLabel, authority, issuedYear, expectedDocumentCount, ...metadata } = release;
+      const releaseState = await ensureCurriculumStandardRelease(db, {
+        id, seriesKey, releaseKey, title, versionLabel, authority, issuedYear, expectedDocumentCount, metadata,
+      });
+      const provider = new ConfiguredEmbeddingProvider();
+      for (const [index, document] of selected.entries()) {
+        await indexDocument(db, provider, releaseState, document, index + 1, selected.length);
+      }
+      if (releaseState.status !== "draft") console.log(`发布 ${releaseKey} 已是 ${releaseState.status}：只补全了向量与学段范围。`);
+      else if (shouldPublish) await publish(db, release, allDocuments);
+      else console.log("索引已写入草稿版本；全部文档就绪后运行 curriculum:standards:publish 发布。");
     }
-    if (shouldPublish) await publish(client, release);
-    else console.log("索引已写入草稿版本；全部文档就绪后运行 curriculum:standards:publish 原子发布。");
+  } finally {
+    await close();
   }
 }

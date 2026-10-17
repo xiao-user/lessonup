@@ -236,7 +236,7 @@ async function wranglerJson(command: string) {
       return JSON.parse(output) as Array<{ results?: unknown[] }>;
     } catch (error) {
       if (attempt === maxAttempts || !isCloudflareFetchFailure(error)) {
-        throw new Error(`D1 import batch ${table}/${index} failed: ${wranglerFailureSummary(error)}`);
+        throw new Error(`D1 query failed: ${wranglerFailureSummary(error)}`);
       }
       console.warn(`Cloudflare request failed; retrying (${attempt}/${maxAttempts}).`);
       await new Promise<void>((resolve) => setTimeout(resolve, attempt * 2_000));

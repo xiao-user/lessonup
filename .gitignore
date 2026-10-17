@@ -24,9 +24,8 @@ supabase/.temp/
 public/dashi/**
 !public/dashi/README.txt
 
-# Local curriculum-standard source/OCR artifacts stay outside Git and Supabase Storage.
+# Local curriculum-standard source/OCR artifacts stay outside Git.
 data/curriculum/standards/inbox/*.pdf
-data/curriculum/standards/manifest.local.json
 data/curriculum/standards/parsed/*
 !data/curriculum/standards/parsed/.gitkeep
 data/curriculum/standards/normalized/*

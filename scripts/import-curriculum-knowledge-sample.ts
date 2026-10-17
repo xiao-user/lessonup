@@ -1,3 +1,9 @@
+/**
+ * Validates a knowledge-point sample against the textbook catalog and loads it into D1 as a
+ * semantic release. Without --apply-draft or --publish it only prints a dry-run report.
+ *
+ *   npm run curriculum:knowledge:import -- --source <file> [--apply-draft | --publish] [--embed] [--remote]
+ */
 import "dotenv/config";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
@@ -6,13 +12,14 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { createGunzip } from "node:zlib";
-import { createClient } from "@supabase/supabase-js";
 import type { CurriculumNodeRecord, CurriculumTextbookRecord } from "../server/domain.js";
 import {
   deterministicUuid,
   splitKnowledgePointIds,
   validateCurriculumKnowledgeSample,
 } from "../server/curriculum/knowledge-sample.js";
+import { importCurriculumKnowledgeRelease } from "../server/repositories/d1-curriculum-import.js";
+import { d1TargetFromArguments, describeD1Target, openD1 } from "./lib/wrangler-d1.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataDir = path.join(root, "data", "curriculum");
@@ -151,6 +158,11 @@ const embeddingInput = sample.knowledge_points.map((point) => (
 const embedded = embed ? await createEmbeddings(embeddingInput) : null;
 const entityIdByExternalId = new Map<string, string>();
 const sourceIdByExternalId = new Map<string, string>();
+const entityIdFor = (externalId: string) => {
+  const entityId = entityIdByExternalId.get(externalId);
+  if (!entityId) throw new Error(`curriculum_knowledge_point_unknown:${externalId}`);
+  return entityId;
+};
 const entities = sample.knowledge_points.map((point, index) => {
   const externalId = point["知识点ID"];
   const entityId = deterministicUuid(namespace, `entity:${externalId}`);
@@ -190,8 +202,8 @@ const occurrences = sample.knowledge_points.map((point) => {
   occurrencePriority.set(matched.node.nodeId, priority);
   return {
     id: deterministicUuid(releaseId, `occurrence:${point["知识点ID"]}:${matched.node.nodeId}`),
-    entityId: entityIdByExternalId.get(point["知识点ID"]),
-    sourceId: sourceIdByExternalId.get(point["知识点ID"]),
+    entityId: entityIdFor(point["知识点ID"]),
+    sourceId: sourceIdByExternalId.get(point["知识点ID"])!,
     textbookId,
     nodeId: matched.node.nodeId,
     sequenceNo: matched.moduleIndex + 1,
@@ -227,7 +239,7 @@ const periodRecommendations = sample.period_mapping.map((period) => {
     isOfficial: period["官方课时"] === "是",
     note: period["说明"],
     points: splitKnowledgePointIds(period["知识点ID"]).map((externalId, index) => ({
-      entityId: entityIdByExternalId.get(externalId),
+      entityId: entityIdFor(externalId),
       sortNo: index + 1,
     })),
   };
@@ -279,15 +291,15 @@ if (!publish && !applyDraft) {
   process.exit(0);
 }
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-if (!supabaseUrl || !serviceRoleKey) throw new Error("supabase_credentials_missing");
-const client = createClient(supabaseUrl, serviceRoleKey, {
-  auth: { autoRefreshToken: false, persistSession: false },
-});
-const { data, error } = await client.rpc("import_curriculum_knowledge_release", {
-  p_payload: payload,
-  p_publish: publish,
-});
-if (error) throw new Error(`curriculum_knowledge_import_failed:${error.message}`);
-console.log(JSON.stringify({ ...report, result: data }, null, 2));
+const target = d1TargetFromArguments(args);
+console.log(`Importing knowledge release ${releaseId} into ${describeD1Target(target)} (${publish ? "publish" : "draft"}).`);
+const { db, close } = await openD1(target);
+try {
+  const result = await importCurriculumKnowledgeRelease(db, payload, {
+    publish,
+    onProgress: (message) => console.log(message),
+  });
+  console.log(JSON.stringify({ ...report, result }, null, 2));
+} finally {
+  await close();
+}

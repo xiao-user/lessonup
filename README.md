@@ -85,6 +85,21 @@ npm run dev
 
 六项 `MODEL_*` 配置须一起提供；四项 `EMBEDDING_*` 配置同样须成组提供。生产环境要求 D1、关闭测试身份、配置 MCP 密钥；启用 Agent 时还须配置状态加密密钥。任何服务密钥都不得写入 `VITE_*` 变量或提交到仓库。
 
+## 教材与课标数据
+
+教材目录、知识点网络和国家课标是平台数据，由脚本直接导入 D1，不依赖 Supabase。命令默认写入**本地** Wrangler D1；写入生产库必须显式追加 `-- --remote`。`-- --persist-to <目录>` 使用独立的本地状态目录，不影响日常开发库。先执行 `npm run db:migrate:local`，再按顺序导入：
+
+```bash
+npm run curriculum:import            # 教材目录，约 1 分钟
+npm run curriculum:knowledge:seed    # 知识点网络样本，依赖已导入的目录
+npm run curriculum:standards:import  # 课标切片与向量，需要 EMBEDDING_* 配置
+npm run curriculum:standards:publish
+```
+
+- 同一教材目录版本可重复导入；生产库若要更换目录版本，需单独设计数据迁移，不能通过远程导入直接覆盖（已有学期框架会引用旧版本）。课标导入可中断后重跑，并会复用已保存的向量。完整流程和文档状态见 [data/curriculum/standards/README.md](data/curriculum/standards/README.md)。
+- 对已发布的课标版本重复执行 `import` 只补全缺失的向量和由标题路径派生的学段、年级范围，不改写正文。从旧 Supabase 环境迁入的生产库这两项为空：先用 `npm run curriculum:standards:status -- --remote` 查看，再用 `npm run curriculum:standards:import -- --remote` 补全。补全学段与年级范围后，按学段和年级的过滤才会生效；补全向量后，配置了嵌入服务的检索会用查询向量参与排序，嵌入失败或未配置时退回文本排序。
+- `d1:import-supabase` 和 `r2:import-supabase-storage` 是从旧 Supabase 环境一次性迁移业务数据和私有文件的入口；它们连同 `supabase/` 目录，是仓库里主要剩下的 Supabase 相关部分。
+
 ## 验证
 
 ```bash
@@ -98,6 +113,7 @@ npm run build
 - `npm test` 包含业务单元测试、React 状态/组件测试和原生 Pi 集成测试；不等同于真实供应商在线评测。
 - `npm run test:e2e:agent` 使用 Playwright Chromium 和确定性测试服务，自动启动独立端口；运行前需安装相应浏览器。
 - `npm run eval:agent` 用于配置真实模型后的评测；`eval:agent:release` 额外执行配置的性能预算检查。
+- `npm run eval:curriculum-standards` 用已导入的 D1 课标数据评测检索；`-- --lexical-only` 只看文本排序（未配置嵌入服务或嵌入失败时的行为）。
 - `npm run check` 依次运行类型检查、Vitest、编辑器回归、Playwright 和前端构建；Cloudflare 类型检查需单独执行。
 
 临时构建和 QA 输出不要提交或长期保留在项目目录。
@@ -128,4 +144,5 @@ npm run cloudflare:deploy
 - `server/knowledge/`、`server/mcp/`、`server/curriculum/`：资料处理、检索和教材目录。
 - `src/features/`：备课本、教案、学期框架、助手、演示等前端功能。
 - `d1/migrations/`、`data/curriculum/`：数据库迁移与教材平台数据。
+- `scripts/`：课程数据导入、Dashi 资源准备和 D1 运维脚本；`scripts/lib/wrangler-d1.ts` 提供本地（进程内 binding）和远程（Wrangler CLI）D1 访问。
 - [AGENTS.md](AGENTS.md)：编码 Agent 的工作指南，包含常用命令、验证要求、代码位置和项目特有约束；不存放实现日志。

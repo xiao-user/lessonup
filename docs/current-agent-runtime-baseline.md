@@ -3,6 +3,7 @@
 > 记录日期：2026-08-18  
 > 状态：**迁移前归档基线，不代表当前生产实现。**  
 > 目的：固定被 Pi 替换前的 `@openai/agents` 业务语义，供迁移回归审计。当前实现见 `pi-agent-harness-migration.md`。
+> 说明：文中的 Supabase、进程内 Harness 和文件路径都属于当时的实现，也早于 2026-08 的 Cloudflare D1/R2 迁移；现行平台见 README。
 
 ## 1. 当前系统的职责边界
 
