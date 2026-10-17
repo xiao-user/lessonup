@@ -106,6 +106,7 @@ describe("DecisionService", () => {
     const context = await service.readContext({ ownerId, lessonFileId }, decision.id);
     expect(context.decision.id).toBe(decision.id);
     expect(context.versions).toHaveLength(1);
+    expect(context.diff).toBeNull();
   });
 
   it("replays the same proposal idempotently", async () => {
@@ -139,6 +140,10 @@ describe("DecisionService", () => {
     expect(confirmed.status).toBe("teacher_confirmed");
     expect(confirmed.provenance.confirmedBy).toBe(ownerId);
     expect(confirmed.version).toBe(2);
+    const context = await service.readContext({ ownerId, lessonFileId }, decision.id);
+    expect(context.diff?.statusFrom).toBe("proposed");
+    expect(context.diff?.statusTo).toBe("teacher_confirmed");
+    expect(context.diff?.changed).toContain("status");
 
     const implemented = await service.act({ ownerId, lessonFileId }, decision.id, {
       action: "implement", expectedVersion: 2, implementedAt: "2026-10-18T01:00:00Z", note: "第二课时使用",

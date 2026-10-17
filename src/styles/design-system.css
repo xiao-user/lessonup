@@ -524,3 +524,6 @@
 .decision-empty { padding: 12px 0; color: var(--secondary); }
 .decision-notice { padding: 10px; background: var(--gray-100); border-radius: 6px; }
 .decision-error { padding: 10px; border: 1px solid var(--red-500); border-radius: 6px; color: var(--red-900); }
+.decision-diff { margin-top: 12px; padding: 10px; border: 1px solid var(--gray-300); border-radius: 6px; background: var(--gray-100); }
+.decision-diff h4 { margin: 0 0 4px; }
+.decision-diff p { margin: 2px 0; font-size: 12px; }

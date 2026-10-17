@@ -29,6 +29,11 @@ const statuses = {
   superseded: "已替代",
 };
 const outcomes = { supported: "符合预期", not_supported: "未见预期", inconclusive: "证据不足" };
+const changedLabels = {
+  decisionType: "类型", question: "问题", options: "选项", chosenOptionId: "采用选项", rationale: "理由",
+  counterevidence: "反例", assumptions: "假设", uncertainties: "不确定性", confidence: "置信度",
+  expectedSignal: "预期信号", falsifier: "证伪条件", reviewAt: "复测时间",
+};
 const rejectionReasons = {
   insufficient_evidence: "证据不足",
   not_applicable: "不适用本班",
@@ -59,6 +64,7 @@ function TextControl({ label: text, textarea = false, ...props }) {
 
 export function DecisionWorkbench({ file, onAgentRequest }) {
   const [progress, setProgress] = useState({ decisions: [], evidenceCards: [], loading: true });
+  const [context, setContext] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
   const [mode, setMode] = useState(null);
   const [form, setForm] = useState({});
@@ -103,6 +109,14 @@ export function DecisionWorkbench({ file, onAgentRequest }) {
   useEffect(() => {
     if (selected) emit("decision_viewed", { decisionId: selected.id, decisionType: selected.decisionType });
   }, [selected?.id, selected?.decisionType, emit]);
+  useEffect(() => {
+    if (!selected) { setContext(null); return undefined; }
+    let active = true;
+    void agentApi.getDecisionContext(file.id, selected.id)
+      .then((value) => { if (active) setContext(value); })
+      .catch(() => { if (active) setContext(null); });
+    return () => { active = false; };
+  }, [file.id, selected?.id, selected?.version]);
   const cards = new Map(progress.evidenceCards.map((card) => [card.id, card]));
   const revisionLabel = selected ? `v${selected.version}` : "";
 
@@ -219,6 +233,15 @@ export function DecisionWorkbench({ file, onAgentRequest }) {
       <p className="decision-question">{selected.question}</p>
       <p>{selected.rationale}</p>
 
+      {context?.diff && context.versions?.length > 1 ? <div className="decision-diff">
+        <h4>本次变化（v{context.versions.length - 1} → v{context.versions.length}）</h4>
+        {context.diff.statusFrom !== context.diff.statusTo ? <p>状态：{label(statuses, context.diff.statusFrom)} → {label(statuses, context.diff.statusTo)}</p> : null}
+        {context.diff.confidenceDelta ? <p>置信度变化：{context.diff.confidenceDelta > 0 ? "+" : ""}{Math.round(context.diff.confidenceDelta * 100)}%</p> : null}
+        {context.diff.addedEvidence.length ? <p>新增证据：{context.diff.addedEvidence.length} 条</p> : null}
+        {context.diff.removedEvidence.length ? <p>移除证据：{context.diff.removedEvidence.length} 条</p> : null}
+        {context.diff.changed.some((field) => changedLabels[field]) ? <p>字段变化：{context.diff.changed.filter((field) => changedLabels[field]).map((field) => changedLabels[field]).join("、")}</p> : null}
+      </div> : null}
+
       {selected.options?.length ? <div className="decision-options">
         <h4>选项与取舍</h4>
         {selected.options.map((option) => <div key={option.id} className={`decision-option ${selected.chosenOptionId === option.id ? "is-chosen" : ""}`}>
@@ -262,6 +285,7 @@ export function DecisionWorkbench({ file, onAgentRequest }) {
             : <>
               <Button size="sm" type="button" disabled={busy} onClick={() => openMode("confirm")}>确认采用</Button>
               <Button size="sm" variant="outline" type="button" disabled={busy} onClick={() => openMode("reject")}>拒绝</Button>
+              <Button size="sm" variant="outline" type="button" disabled={busy} onClick={() => openMode("reject")}>证据不足</Button>
             </>}
         </> : null}
         {selected.status === "teacher_confirmed" ? <Button size="sm" type="button" disabled={busy} onClick={() => openMode("implement")}>登记实施</Button> : null}

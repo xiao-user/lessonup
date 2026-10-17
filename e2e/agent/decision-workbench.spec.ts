@@ -58,6 +58,7 @@ test("records a decision, its evidence and a post-implementation review", async 
   await page.getByLabel("置信度 0–1").fill("0.8");
   await page.getByRole("button", { name: "保存确认", exact: true }).click();
   await expect(page.getByText("已确认", { exact: false }).first()).toBeVisible();
+  await expect(page.getByText("状态：待确认 → 已确认")).toBeVisible();
 
   await page.getByRole("button", { name: "登记实施", exact: true }).click();
   await page.getByLabel("实施时间").fill("2026-10-18T00:30");

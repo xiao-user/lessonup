@@ -9,6 +9,7 @@ import type {
   DecisionStatus,
   EvidenceCard,
 } from "./contracts.js";
+import { diffDecisions } from "./diff.js";
 import { transitionDecision } from "./lifecycle.js";
 import { validateDecisionRecord, validateEvidenceCard } from "./validation.js";
 
@@ -73,7 +74,12 @@ export class DecisionService {
         ? this.repository.listDecisionEvidenceCards(scope.ownerId, file.id, decision.evidenceCardIds)
         : Promise.resolve([]),
     ]);
-    return { decision, versions, evidenceCards };
+    return {
+      decision,
+      versions,
+      evidenceCards,
+      diff: versions.length > 1 ? diffDecisions(versions[versions.length - 2], versions[versions.length - 1]) : null,
+    };
   }
 
   async propose(scope: Scope, rawInput: unknown, idempotencyKey: string, origin?: Origin) {
