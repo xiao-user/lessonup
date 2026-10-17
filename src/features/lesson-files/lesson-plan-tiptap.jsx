@@ -363,6 +363,10 @@ export function PresentationMaterialRow({
  * isolated Tiptap instance. Rich-text transactions therefore cannot rewrite
  * sibling modules, while pagination remains a pure projection of the plan.
  */
+const EDITABLE_ENTRY_HEAD_START = 2;
+const EDITABLE_ENTRY_BATCH = 2;
+const EDITABLE_ENTRY_BATCH_DELAY_MS = 16;
+
 export const LessonPlanTiptapEditor = memo(function LessonPlanTiptapEditor({
   plan,
   pages,
@@ -379,6 +383,26 @@ export const LessonPlanTiptapEditor = memo(function LessonPlanTiptapEditor({
 }) {
   const editorsRef = useRef(new Map());
   const caretRef = useRef(null);
+  // Mounting a dozen Tiptap instances in one commit is the detail view's only
+  // long task. Fields beyond the first screen start as identical static HTML and
+  // upgrade in small slices so the paper transition keeps its frames.
+  const [editableEntries, setEditableEntries] = useState(EDITABLE_ENTRY_HEAD_START);
+  const totalEntries = useMemo(() => pages.reduce((sum, entries) => sum + entries.length, 0), [pages]);
+  const entryOrder = useMemo(() => {
+    const order = new Map();
+    let index = 0;
+    for (const entries of pages) {
+      for (const entry of entries) order.set(entry, index++);
+    }
+    return order;
+  }, [pages]);
+  useEffect(() => {
+    if (readOnly || editableEntries >= totalEntries) return undefined;
+    const timer = window.setTimeout(() => {
+      setEditableEntries((current) => Math.min(totalEntries, current + EDITABLE_ENTRY_BATCH));
+    }, EDITABLE_ENTRY_BATCH_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [editableEntries, readOnly, totalEntries]);
   const revision = `${externalRevision ?? 0}:${layoutRevision ?? 0}:${displayRevision ?? "canonical"}`;
   const registerEditor = useMemo(() => (key, registration) => {
     if (registration) editorsRef.current.set(key, registration);
@@ -437,7 +461,9 @@ export const LessonPlanTiptapEditor = memo(function LessonPlanTiptapEditor({
                   <LessonTableColumns />
                   <tbody>
                     {entries.map((entry) => {
-                      const entryCommonProps = commonProps;
+                      const entryCommonProps = (entryOrder.get(entry) ?? 0) < editableEntries
+                        ? commonProps
+                        : { ...commonProps, readOnly: true };
                       if (entry.kind === "basics") {
                         return <BasicsRow plan={plan} commonProps={entryCommonProps} key={entry.key} />;
                       }

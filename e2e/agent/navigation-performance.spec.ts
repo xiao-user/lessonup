@@ -58,8 +58,9 @@ test("navigation remains bounded with motion enabled and a slower CPU", async ({
   });
   console.log("Navigation measurements", JSON.stringify(samples));
   await testInfo.attach("navigation-measurements", { body: JSON.stringify(samples, null, 2), contentType: "application/json" });
-  // Choreography lasts 0.9s / 1.02s / up to 1.12s. Bound overhead and
-  // main-thread stalls instead of treating deleted animation as an optimization.
+  // Opening takes 0.9 s; closing rewinds the turned leaves before a 0.42-1.02 s
+  // cover swing (about 1.22 s with a deep stack). Bound overhead and main-thread
+  // stalls instead of treating deleted animation as an optimization.
   for (const name of ["openNotebook", "closeNotebook", "closeDetail"]) {
     expect((samples[name] as { blocking: number }).blocking).toBeLessThan(200);
   }

@@ -19,7 +19,8 @@ import {
   addPageTurn,
   applyOpenBookPose,
   baseRotation,
-  CLOSE_DURATION,
+  CLOSE_REWIND_DURATION,
+  closeRewindPlan,
   EASE,
   OPEN_DURATION,
   OPEN_FIRST_PAGE_DELAY,
@@ -593,6 +594,7 @@ export const BookCarousel = forwardRef(function BookCarousel({
       .filter(({ rotation }) => rotation < -0.5)
       .sort((left, right) => right.index - left.index);
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const rewind = closeRewindPlan(turnedLeaves.length, reduceMotion);
 
     const timeline = gsap.timeline({
       onComplete: () => {
@@ -617,11 +619,10 @@ export const BookCarousel = forwardRef(function BookCarousel({
     });
 
     turnedLeaves.forEach(({ leaf }, order) => {
-      const start = reduceMotion ? 0 : Math.min(order * 0.075, 0.45);
       addPageTurn(timeline, leaf, {
         rotationY: 0,
-        duration: reduceMotion ? 0 : 0.54,
-        position: start,
+        duration: reduceMotion ? 0 : CLOSE_REWIND_DURATION,
+        position: rewind.starts[order] ?? 0,
         ease: "power3.inOut",
       });
     });
@@ -635,13 +636,13 @@ export const BookCarousel = forwardRef(function BookCarousel({
       }, 0);
     }
     timeline
-      .to(book.querySelector(".book-volume-cover"), { "--cover-angle": "0deg", duration: reduceMotion ? 0 : CLOSE_DURATION, ease: "power3.inOut" }, 0)
-      .to(book.querySelector(".book-volume-unit"), { "--book-spread-x": "0%", duration: reduceMotion ? 0 : CLOSE_DURATION, ease: "power3.inOut" }, 0)
-      .to(book, { "--book-scale": slot.scale, duration: reduceMotion ? 0 : CLOSE_DURATION, ease: "power3.inOut" }, 0)
-      .to(book, { "--book-rotation": `${restingRotation}deg`, duration: reduceMotion ? 0 : CLOSE_DURATION * 0.66, ease: "power2.inOut" }, (reduceMotion ? 0 : CLOSE_DURATION * 0.34))
-      .to(pages, { borderRadius: outer, duration: reduceMotion ? 0 : CLOSE_DURATION * 0.74, ease: EASE.soft }, 0)
-      .to(page, { borderRadius: inner, duration: reduceMotion ? 0 : CLOSE_DURATION * 0.74, ease: EASE.soft }, 0)
-      .to(coverBack, { borderRadius: outer, duration: reduceMotion ? 0 : CLOSE_DURATION * 0.74, ease: EASE.soft }, 0);
+      .to(book.querySelector(".book-volume-cover"), { "--cover-angle": "0deg", duration: rewind.coverDuration, ease: "power3.inOut" }, rewind.coverStart)
+      .to(book.querySelector(".book-volume-unit"), { "--book-spread-x": "0%", duration: reduceMotion ? 0 : rewind.coverDuration * 0.88, ease: "power3.inOut" }, rewind.coverStart)
+      .to(book, { "--book-scale": slot.scale, duration: reduceMotion ? 0 : rewind.coverDuration, ease: "power3.inOut" }, rewind.coverStart)
+      .to(book, { "--book-rotation": `${restingRotation}deg`, duration: reduceMotion ? 0 : rewind.coverDuration * 0.66, ease: "power2.inOut" }, (reduceMotion ? 0 : rewind.coverStart + rewind.coverDuration * 0.34))
+      .to(pages, { borderRadius: outer, duration: reduceMotion ? 0 : rewind.coverDuration * 0.74, ease: EASE.soft }, rewind.coverStart)
+      .to(page, { borderRadius: inner, duration: reduceMotion ? 0 : rewind.coverDuration * 0.74, ease: EASE.soft }, rewind.coverStart)
+      .to(coverBack, { borderRadius: outer, duration: reduceMotion ? 0 : rewind.coverDuration * 0.74, ease: EASE.soft }, rewind.coverStart);
   });
 
   useEffect(() => {

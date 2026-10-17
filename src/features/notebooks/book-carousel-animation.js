@@ -13,7 +13,42 @@ export const EASE = {
 export const OPEN_DURATION = 0.9;
 export const OPEN_FIRST_PAGE_DELAY = 0.28;
 export const CLOSE_DURATION = 1.02;
+export const CLOSE_REWIND_DURATION = 0.4;
+export const CLOSE_REWIND_STAGGER = 0.05;
+export const CLOSE_REWIND_START_LIMIT = 0.36;
+export const CLOSE_COVER_GAP = 0.04;
+export const CLOSE_COVER_MIN_DURATION = 0.42;
 const BASE_ROTATIONS = [-3, -2.8, 3.1, -7.5, 2, -4];
+
+/**
+ * Turning the cover back while leaves are still sweeping makes their planes
+ * cross at the spine. Rewind every turned leaf first, then close the cover.
+ */
+export function closeRewindPlan(turnedCount, reduceMotion = false) {
+  if (reduceMotion) {
+    return { starts: [], rewindEnd: 0, coverStart: 0, coverDuration: 0 };
+  }
+  if (turnedCount <= 0) {
+    return { starts: [], rewindEnd: 0, coverStart: 0, coverDuration: CLOSE_DURATION };
+  }
+  const starts = Array.from({ length: turnedCount }, (_, order) => (
+    Math.min(order * CLOSE_REWIND_STAGGER, CLOSE_REWIND_START_LIMIT)
+  ));
+  const rewindEnd = starts[starts.length - 1] + CLOSE_REWIND_DURATION;
+  const coverStart = rewindEnd + CLOSE_COVER_GAP;
+  return {
+    starts,
+    rewindEnd,
+    coverStart,
+    coverDuration: Math.max(CLOSE_COVER_MIN_DURATION, CLOSE_DURATION - coverStart),
+  };
+}
+
+/** Longest close for the current leaf stack, including the cover swing. */
+export function closeDurationFor(turnedCount) {
+  const { coverStart, coverDuration } = closeRewindPlan(turnedCount);
+  return coverStart + coverDuration;
+}
 
 const bookPoseWriters = new WeakMap();
 const namePoseWriters = new WeakMap();

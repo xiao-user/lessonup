@@ -624,7 +624,21 @@ test("rewinds every turned leaf before an outside-click close settles", async ({
     });
 
     await page.getByRole("button", { name: "返回全部备课本", exact: true }).click();
-    await page.waitForTimeout(160);
+    // Pages rewind first; the cover must stay open until they land. Otherwise the
+    // cover plane and the leaf planes cross at the spine during the close.
+    await page.waitForFunction(() => {
+      const book = document.querySelector(".book-volume.is-open");
+      const leaves = [...(book?.querySelectorAll(".book-volume-leaf") ?? [])].slice(0, 3);
+      return leaves.every((leaf) => (leaf as HTMLElement).style.getPropertyValue("--leaf-angle").includes("deg"));
+    });
+    const coverWhileRewinding = await openBook.evaluate((book) => (
+      book.querySelector(".book-volume-cover") as HTMLElement
+    ).style.getPropertyValue("--cover-angle"));
+    expect(coverWhileRewinding).toBe("-180deg");
+    await page.waitForFunction(() => {
+      const cover = document.querySelector(".book-volume.is-open .book-volume-cover") as HTMLElement | null;
+      return cover ? cover.style.getPropertyValue("--cover-angle") !== "-180deg" : true;
+    });
     const closingTransforms = await openBook.evaluate((book) => ({
       cover: (book.querySelector(".book-volume-cover") as HTMLElement).style.getPropertyValue("--cover-angle"),
       leaves: [...book.querySelectorAll(".book-volume-leaf")]
@@ -633,7 +647,7 @@ test("rewinds every turned leaf before an outside-click close settles", async ({
     }));
     expect(closingTransforms.cover).toContain("deg");
     expect(closingTransforms.cover).not.toBe("-180deg");
-    expect(closingTransforms.leaves.every((angle) => angle.includes("deg"))).toBeTruthy();
+    expect(closingTransforms.leaves.every((angle) => angle === "0deg")).toBeTruthy();
     await expect(page.locator(".book-volume.is-open")).toHaveCount(0);
     await expect(page.locator(".book-volume-leaf.is-turned")).toHaveCount(0);
     const remainingInlineTransforms = await page
