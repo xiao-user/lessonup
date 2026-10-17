@@ -80,6 +80,33 @@ export interface DecisionCursor {
   id: string;
 }
 
+export const DECISION_EVENT_TYPES = [
+  "decision_viewed",
+  "evidence_opened",
+  "option_compared",
+  "proposal_requested",
+  "decision_confirmed",
+  "decision_rejected",
+  "no_change_confirmed",
+  "implementation_recorded",
+  "review_recorded",
+] as const;
+export type DecisionEventType = (typeof DECISION_EVENT_TYPES)[number];
+
+/** Telemetry carries no free text and no student identifiers. */
+export interface DecisionEvent {
+  id: string;
+  ownerId: string;
+  lessonFileId: string;
+  type: DecisionEventType;
+  decisionId: string | null;
+  decisionType: DecisionType | null;
+  evidenceId: string | null;
+  durationMs: number | null;
+  count: number | null;
+  createdAt: string;
+}
+
 export interface EvidenceSource {
   system: string;
   uri: string;

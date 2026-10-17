@@ -7,6 +7,7 @@
 - **备课工作区**：备课本、学期框架、教材与单元关联，Tiptap 教案编辑、A4 自动分页和撤销/重做。
 - **上下文助手**：独立线程与分支、流式回复、工具活动、资料引用、附件和写入审批。
 - **学习验证**：真实学习证据、改进假设与替代解释、教师采用和实施、后续复测与审议；复测可作为下一轮诊断起点。
+- **教学决策**：把关键教学判断记录为带证据、选项、反例、不确定性和证伪条件的决策；Agent 只提议，教师确认、实施并记录复测审议。
 - **资料库**：私有文件上传、异步解析与索引、按权限检索。
 - **课堂演示**：确认 Dashi 演示方案后生成并保存，支持浏览器预览、编辑及 HTML/PDF/PPTX 导出。
 
@@ -42,6 +43,14 @@ Agent 生成或修改教案时，Pi 工具参数中的正文增量实时投影�
 复测绑定具体实施记录，核对目标、判据和群体；不一致时只能作“证据不足”判断。已审议的基线与后测会进入本课及同单元相邻课时的反馈读取，支持下一轮设计。前后变化不能直接证明因果效果，也不能用采用次数替代学习成效。记录按索引分页读取，写入使用版本校验、幂等请求和保存回执恢复。
 
 产品动作携带结构化 `taskIntent`，避免由按钮提示词猜测写入授权。现稿已足够或证据不足时，Agent 可在读取规范内容后明确完成而不制造修改提案。
+
+### 教学决策
+
+课时右侧“教学决策”把关键取舍写成可检查的记录：问题、至少两个选项与代价、可定位证据、反例、假设、不确定性、置信度、预期信号与证伪条件。教师可以确认采用、拒绝、保留现稿或判定证据不足；实施后必须引用晚于实施时间的真实学习证据完成复测审议。
+
+Agent 只能读取决策上下文并提交候选，不能替教师确认、实施或审议；证据不足时提交 `insufficient_evidence`。决策与教案写入相互独立，采用决策不会自动改写 A4。每次变更保留版本并使用幂等命令；遥测只记录事件类型、决策/证据标识与耗时，不记录自由文本或学生标识。
+
+无教师条件下可运行 `npm run eval:decision-quality` 生成匿名的 baseline/treatment 盲评包，汇总六维评分、配对差值、bootstrap 区间和二次加权 kappa；结果标注为内部专家代理，不代表外部专家共识或课堂学习效果。设计、边界与验证记录见 [决策工作台](docs/decision-workspace/README.md)。
 
 ### Dashi
 
@@ -127,6 +136,7 @@ npm run build
 - `npm run test:e2e:agent` 使用 Playwright Chromium 和确定性测试服务，自动启动独立端口；运行前需安装相应浏览器。
 - `npm run eval:agent` 用于配置真实模型后的评测；`eval:agent:release` 额外执行配置的性能预算检查。
 - `npm run eval:curriculum-standards` 用已导入的 D1 课标数据评测检索；`-- --lexical-only` 只看文本排序（未配置嵌入服务或嵌入失败时的行为）。
+- `npm run eval:decision-quality` 导出/汇总教学决策盲评包；需要 baseline/treatment JSON 简报，结果仅作内部代理证据。
 - `npm run check` 依次运行类型检查、Vitest、编辑器回归、Playwright 和前端构建；Cloudflare 类型检查需单独执行。
 
 临时构建和 QA 输出不要提交或长期保留在项目目录。
@@ -154,8 +164,9 @@ npm run cloudflare:deploy
 - `server/conversation/`：会话业务规则与公共审批投影。
 - `server/presentations/`、`src/lib/dashi-browser/`：作品交付及浏览器适配。
 - `server/repositories/`、`server/platform/`：持久化、认证和存储适配器。
+- `server/decisions/`：教学决策领域、证据卡、生命周期、持久化端口与 API。
 - `server/knowledge/`、`server/mcp/`、`server/curriculum/`：资料处理、检索和教材目录。
-- `src/features/`：备课本、教案、学期框架、助手、演示等前端功能。
+- `src/features/`：备课本、教案、学期框架、助手、决策、学习验证与演示等前端功能。
 - `d1/migrations/`、`data/curriculum/`：数据库迁移与教材平台数据。
 - `scripts/`：课程数据导入、Dashi 资源准备和 D1 运维脚本；`scripts/lib/wrangler-d1.ts` 提供本地（进程内 binding）和远程（Wrangler CLI）D1 访问。
 - [AGENTS.md](AGENTS.md)：编码 Agent 的工作指南，包含常用命令、验证要求、代码位置和项目特有约束；不存放实现日志。

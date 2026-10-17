@@ -1,4 +1,4 @@
-import type { DecisionCommand, DecisionCursor, DecisionRecord, EvidenceCard } from "./contracts.js";
+import type { DecisionCommand, DecisionCursor, DecisionEvent, DecisionRecord, EvidenceCard } from "./contracts.js";
 
 /** Durable decision facts; business rules live in DecisionService, not in SQL. */
 export interface DecisionRepository {
@@ -14,4 +14,6 @@ export interface DecisionRepository {
     command: DecisionCommand,
     evidenceCards: EvidenceCard[],
   ): Promise<DecisionRecord>;
+  saveDecisionEvent(event: DecisionEvent): Promise<DecisionEvent>;
+  listDecisionEvents(ownerId: string, lessonFileId: string, limit: number): Promise<DecisionEvent[]>;
 }

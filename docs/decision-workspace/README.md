@@ -1,16 +1,17 @@
-# 决策工作台（Phase 0）
+# 决策工作台（Phase 0 + v1 实现）
 
-这一组文档把 LessonUp 的下一步从“材料生成”收敛为“推动教学决策”。Phase 0 只做审计、模型与验证协议，不扩功能、不宣称效果。
+这一组文档把 LessonUp 的下一步从“材料生成”收敛为“推动教学决策”。Phase 0 完成审计、模型与验证协议；v1 已落地可运行的决策记录、教师确认/实施/审议与无教师盲评工具。真实课堂效果仍未验证。
 
 ## 文档索引
 
 | 文档 | 作用 | 状态 |
 | --- | --- | --- |
 | [00-charter.md](00-charter.md) | 目标、范围、约束、退出标准 | 待评审 |
+| [05-implementation.md](05-implementation.md) | v1 实现、验证、回退与边界 | 已落地 |
 | [01-current-state-audit.md](01-current-state-audit.md) | 现有能力、Agent 流、失败模式、性能基线 | 待评审 |
-| [02-decision-model.md](02-decision-model.md) | 决策对象、证据卡、生命周期、数据模型草案 | 待评审 |
-| [03-evaluation-protocol.md](03-evaluation-protocol.md) | 证据阶梯、当前替代验证、真实教师 pilot 预案 | 待评审 |
-| [04-instrumentation-and-slo.md](04-instrumentation-and-slo.md) | 指标、事件、性能 SLO、测量方式 | 待评审 |
+| [02-decision-model.md](02-decision-model.md) | 决策对象、证据卡、生命周期、数据模型 | v1 已实现 |
+| [03-evaluation-protocol.md](03-evaluation-protocol.md) | 证据阶梯、当前替代验证、真实教师 pilot 预案 | 工具已备，pilot 待启动 |
+| [04-instrumentation-and-slo.md](04-instrumentation-and-slo.md) | 指标、事件、性能 SLO、测量方式 | 事件已落地，指标待分析 |
 
 ## 当前约束
 

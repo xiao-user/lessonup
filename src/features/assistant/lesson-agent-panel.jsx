@@ -48,6 +48,8 @@ export function LessonAgentPanel({
   onNavigateToSection,
   learningRequest,
   onLearningRequestHandled,
+  decisionRequest,
+  onDecisionRequestHandled,
 }) {
   const [generationIntent, setGenerationIntent] = useState(null);
   const [generationIntentLoaded, setGenerationIntentLoaded] = useState(false);
@@ -121,6 +123,19 @@ export function LessonAgentPanel({
     }
     void chat.send(learningRequest.prompt, { taskIntent: learningRequest.taskIntent });
   }, [chat.send, chat.status, generationIntent, generationIntentLoaded, learningRequest, onLearningRequestHandled]);
+
+  const handledDecisionRequest = useRef(null);
+  useEffect(() => {
+    if (!decisionRequest || handledDecisionRequest.current === decisionRequest.id
+      || chat.status === "loading" || !generationIntentLoaded) return;
+    handledDecisionRequest.current = decisionRequest.id;
+    onDecisionRequestHandled?.(decisionRequest.id);
+    if (chat.status !== "ready" || (generationIntent && generationIntentDispatchRef.current !== generationIntent.id)) {
+      toast.info(chat.status === "unconfigured" ? "AI 服务尚未配置，可先在教学决策中手动记录。" : "请先完成或恢复当前请求，再准备教学决策。");
+      return;
+    }
+    void chat.send(decisionRequest.prompt, { taskIntent: decisionRequest.taskIntent });
+  }, [chat.send, chat.status, decisionRequest, generationIntent, generationIntentLoaded, onDecisionRequestHandled]);
 
   useEffect(() => {
     const requestDashiPresentation = (event) => {

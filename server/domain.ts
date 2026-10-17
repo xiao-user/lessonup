@@ -896,6 +896,7 @@ export const agentTaskIntentSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("document_write"), fields: z.array(lessonFieldSchema).min(1).max(14).optional() }).strict(),
   z.object({ type: z.literal("learning_inquiry"), evidenceId: z.string().uuid() }).strict(),
   z.object({ type: z.literal("learning_review"), inquiryId: z.string().uuid(), evidenceId: z.string().uuid(), expectedVersion: z.number().int().nonnegative() }).strict(),
+  z.object({ type: z.literal("decision_proposal") }).strict(),
 ]);
 export type AgentTaskIntent = z.infer<typeof agentTaskIntentSchema>;
 

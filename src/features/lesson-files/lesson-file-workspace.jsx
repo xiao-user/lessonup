@@ -28,6 +28,7 @@ import { previewDocumentDraft } from "@/features/assistant/document-draft.js";
 gsap.registerPlugin(useGSAP);
 
 const LearningWorkbench = lazy(() => import("@/features/learning/learning-workbench").then((module) => ({ default: module.LearningWorkbench })));
+const DecisionWorkbench = lazy(() => import("@/features/decisions/decision-workbench").then((module) => ({ default: module.DecisionWorkbench })));
 
 const LessonAgentPanel = lazy(() => import("@/features/assistant/lesson-agent-panel").then((module) => ({
   default: module.LessonAgentPanel,
@@ -767,9 +768,16 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
     onGenerate: generatePresentationMaterial, onPreview: previewPresentationMaterial, onDelete: deletePresentationMaterial,
   }), [presentationMaterial, generatePresentationMaterial, previewPresentationMaterial, deletePresentationMaterial]);
   const [learningRequest, setLearningRequest] = useState(null);
+  const [decisionRequest, setDecisionRequest] = useState(null);
   const handleLearningRequest = useCallback((id) => setLearningRequest((current) => current?.id === id ? null : current), []);
   const requestLearningAgent = useCallback((request) => {
     setLearningRequest({ ...request, id: crypto.randomUUID() });
+    setSidecarView("assistant");
+    setMobileRail("assistant");
+  }, []);
+  const handleDecisionRequest = useCallback((id) => setDecisionRequest((current) => current?.id === id ? null : current), []);
+  const requestDecisionAgent = useCallback((request) => {
+    setDecisionRequest({ ...request, id: crypto.randomUUID() });
     setSidecarView("assistant");
     setMobileRail("assistant");
   }, []);
@@ -944,14 +952,22 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
       </div>
 
       <aside id="lesson-assistant-panel" className={`lesson-side-rail lesson-assistant-rail ${mobileRail === "assistant" ? "is-mobile-open" : ""}`}>
-        <div className="lesson-sidecar-tabs" role="tablist" aria-label="备课与学习验证" onKeyDown={(event) => {
+        <div className="lesson-sidecar-tabs" role="tablist" aria-label="备课、学习验证与教学决策" onKeyDown={(event) => {
           if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
           event.preventDefault();
-          const view = event.key === "Home" ? "assistant" : event.key === "End" ? "learning" : sidecarView === "assistant" ? "learning" : "assistant";
+          const views = ["assistant", "learning", "decisions"];
+          const index = Math.max(0, views.indexOf(sidecarView));
+          const view = event.key === "Home" ? views[0]
+            : event.key === "End" ? views[views.length - 1]
+              : views[(index + (event.key === "ArrowRight" ? 1 : views.length - 1)) % views.length];
           setSidecarView(view); document.getElementById(`${view}-tab`)?.focus();
         }}>
           <Button id="assistant-tab" role="tab" tabIndex={sidecarView === "assistant" ? 0 : -1} aria-selected={sidecarView === "assistant"} aria-controls="assistant-tab-panel" size="sm" variant="ghost" onClick={() => setSidecarView("assistant")}>备课助手</Button>
           <Button id="learning-tab" role="tab" tabIndex={sidecarView === "learning" ? 0 : -1} aria-selected={sidecarView === "learning"} aria-controls="learning-tab-panel" size="sm" variant="ghost" onClick={() => setSidecarView("learning")}>学习验证</Button>
+          <Button id="decisions-tab" role="tab" tabIndex={sidecarView === "decisions" ? 0 : -1} aria-selected={sidecarView === "decisions"} aria-controls="decisions-tab-panel" size="sm" variant="ghost" onClick={() => setSidecarView("decisions")}>教学决策</Button>
+        </div>
+        <div id="decisions-tab-panel" role="tabpanel" aria-labelledby="decisions-tab" hidden={sidecarView !== "decisions"} className="lesson-sidecar-content">
+          {sidecarView === "decisions" ? <Suspense fallback={<p role="status">正在读取教学决策…</p>}><DecisionWorkbench file={{ ...file, documentVersion }} onAgentRequest={requestDecisionAgent} /></Suspense> : null}
         </div>
         <div id="learning-tab-panel" role="tabpanel" aria-labelledby="learning-tab" hidden={sidecarView !== "learning"} className="lesson-sidecar-content">
           {sidecarView === "learning" ? <Suspense fallback={<p role="status">正在读取学习记录…</p>}><LearningWorkbench file={{ ...file, documentVersion }} notebook={notebook} plan={plan} onBeforeWrite={flushDocumentBeforeAgentRun} onAgentRequest={requestLearningAgent} /></Suspense> : null}
@@ -971,6 +987,8 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
             onNavigateToSection={scrollToSection}
             learningRequest={learningRequest}
             onLearningRequestHandled={handleLearningRequest}
+            decisionRequest={decisionRequest}
+            onDecisionRequestHandled={handleDecisionRequest}
           />
         </Suspense>
         </div>

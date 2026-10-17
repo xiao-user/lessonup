@@ -66,6 +66,7 @@ export function resolveTurn(args: {
     plan.writeMode !== "consultative"
     || plan.presentationRequested
     || plan.designBasisWriteRequested
+    || plan.taskIntent?.type === "decision_proposal"
   ) {
     return { kind: "agent_write", contextProfile: "agent_write", toolSurface: "write" };
   }

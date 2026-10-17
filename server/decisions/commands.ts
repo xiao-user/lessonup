@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { DECISION_TYPES, EVIDENCE_KINDS, EVIDENCE_LEVELS } from "./contracts.js";
+import { DECISION_EVENT_TYPES, DECISION_TYPES, EVIDENCE_KINDS, EVIDENCE_LEVELS } from "./contracts.js";
 
 const text = (max = 2_000) => z.string().trim().min(1).max(max);
 const optionalText = (max = 2_000) => z.string().trim().max(max).optional();
@@ -98,6 +98,16 @@ export const decisionActionSchema = z.discriminatedUnion("action", [
   }).strict(),
 ]);
 export type DecisionActionInput = z.infer<typeof decisionActionSchema>;
+
+export const decisionEventInputSchema = z.object({
+  type: z.enum(DECISION_EVENT_TYPES),
+  decisionId: uuid.optional(),
+  decisionType: z.enum(DECISION_TYPES).optional(),
+  evidenceId: uuid.optional(),
+  durationMs: z.number().int().min(0).max(600_000).optional(),
+  count: z.number().int().min(0).max(1_000).optional(),
+}).strict();
+export type DecisionEventInput = z.infer<typeof decisionEventInputSchema>;
 
 export const decisionReadQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),

@@ -1,5 +1,6 @@
 import { withTeachingCompletion } from "./teaching-completion.js";
 import { createPiLearningTools } from "./learning-tools.js";
+import { createPiDecisionTools } from "./decision-tools.js";
 import { type CapabilityPlan, type LessonAgentContext, type SemesterFrameworkAgentContext } from "../../domain.js";
 import type { LessonRepository } from "../../repository.js";
 import { SkillRegistry, type PlatformSkill } from "../../agent/skill-registry.js";
@@ -71,6 +72,7 @@ export class PiToolSurface {
     // surface. Per-turn policy decides whether it may succeed; removing the
     // schema on consultation turns invalidated the provider's transcript cache.
     const learning = createPiLearningTools(repository, context, plan);
+    const decisions = createPiDecisionTools(repository, context, plan);
     const document = createPiDocumentProposalTool({ repository, context, plan });
     const tools = [
       ...(skills.length ? [createPiReadSkillTool(skills)] : []),
@@ -82,6 +84,7 @@ export class PiToolSurface {
       ...(teaching ? createPiDesignBasisReadTools(repository, context) : []),
       ...(teaching ? this.sessionWebTools(repository, context.userId, context.runId) : []),
       ...(teaching ? learning.tools : []),
+      ...(teaching ? decisions.tools : []),
       document.tool,
     ];
     const captured: Array<() => PiCapturedProposal | null> = [document.getProposal];
@@ -128,11 +131,14 @@ export class PiToolSurface {
       captured.push(proposal.getProposal);
     }
     const getProposal = () => captured.reduce<PiCapturedProposal | null>((found, read) => found ?? read(), null);
-    const completion = teaching ? withTeachingCompletion(tools, () => Boolean(getProposal() || learning.getLearningProposal())) : null;
+    const completion = teaching
+      ? withTeachingCompletion(tools, () => Boolean(getProposal() || learning.getLearningProposal() || decisions.getDecisionProposal()))
+      : null;
     return {
       tools: completion?.tools ?? tools,
       getProposal,
       getLearningProposal: learning.getLearningProposal,
+      getDecisionProposal: decisions.getDecisionProposal,
       getNoChange: completion?.getNoChange ?? (() => null),
       getEvidenceAttempts: () => attempts,
     };
@@ -161,6 +167,7 @@ export class PiToolSurface {
     return {
       ...completion,
       getLearningProposal: () => null,
+      getDecisionProposal: () => null,
       getProposal: proposal.getProposal,
       getEvidenceAttempts: () => attempts,
     };

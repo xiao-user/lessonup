@@ -1,5 +1,5 @@
 import type { LearningCommand, LearningCursor, LearningEvidence, LearningInquiry, LearningRecord } from "../learning/domain.js";
-import type { DecisionCommand, DecisionCursor, DecisionRecord, EvidenceCard } from "../decisions/contracts.js";
+import type { DecisionCommand, DecisionCursor, DecisionEvent, DecisionRecord, EvidenceCard } from "../decisions/contracts.js";
 import { learningReviewContext } from "../learning/review-context.js";
 import type { AgentSessionItem as AgentInputItem } from "../repository.js";
 import {
@@ -109,6 +109,7 @@ export class MemoryLessonRepository implements LessonRepository {
   private decisionVersions = new Map<string, DecisionRecord[]>();
   private decisionEvidenceCards = new Map<string, EvidenceCard>();
   private decisionReceipts = new Map<string, { fingerprint: string; record: DecisionRecord }>();
+  private decisionEvents = new Map<string, DecisionEvent>();
   async listLearningReviews(ownerId: string, scope: { lessonFileId?: string; lessonBlueprintId?: string; limit: number }) {
     if ((!scope.lessonFileId && !scope.lessonBlueprintId) || !Number.isInteger(scope.limit) || scope.limit < 1 || scope.limit > 100) throw new Error("learning_scope_invalid");
     return structuredClone([...this.learningInquiries.values()].filter((item) => {
@@ -207,6 +208,19 @@ export class MemoryLessonRepository implements LessonRepository {
     return structuredClone([...this.decisionEvidenceCards.entries()]
       .filter(([cardKey, card]) => cardKey.startsWith(`${key(ownerId, fileId)}:`) && (!wanted || wanted.has(card.id)))
       .map(([, card]) => card));
+  }
+  async saveDecisionEvent(event: DecisionEvent) {
+    if (!this.files.has(key(event.ownerId, event.lessonFileId))) throw new Error("lesson_file_not_found");
+    this.decisionEvents.set(key(event.ownerId, event.lessonFileId, event.id), structuredClone(event));
+    return structuredClone(event);
+  }
+  async listDecisionEvents(ownerId: string, lessonFileId: string, limit: number) {
+    const wanted = `${key(ownerId, lessonFileId)}:`;
+    return structuredClone([...this.decisionEvents.entries()]
+      .filter(([eventKey]) => eventKey.startsWith(wanted))
+      .map(([, event]) => event)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
+      .slice(0, limit));
   }
   async saveDecision(record: DecisionRecord, expectedVersion: number | null, command: DecisionCommand, evidenceCards: EvidenceCard[]) {
     const replay = this.replayDecisionNow(record.ownerId, command);

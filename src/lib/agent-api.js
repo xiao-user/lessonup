@@ -59,6 +59,10 @@ export const agentApi = {
   actOnDecision: (fileId, decisionId, input, commandId) => request(`/api/lesson-files/${encodeURIComponent(fileId)}/decisions/${encodeURIComponent(decisionId)}`, {
     method: "PATCH", headers: { "idempotency-key": commandId }, body: JSON.stringify(input),
   }),
+  recordDecisionEvent: (fileId, event) => request(`/api/lesson-files/${encodeURIComponent(fileId)}/decisions/events`, {
+    method: "POST", body: JSON.stringify(event),
+  }),
+  getDecisionEvents: (fileId, limit = 200) => request(`/api/lesson-files/${encodeURIComponent(fileId)}/decisions/events?limit=${limit}`),
 
   runtime: () => request("/api/runtime"),
   listNotebooks: () => request("/api/notebooks"),

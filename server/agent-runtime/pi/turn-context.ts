@@ -60,8 +60,14 @@ export function lessonTurnContext(
         instruction: "Required evidence must be retrieved before drafting a proposal. An empty search is not evidence for a write. If required sources are unavailable, read the canonical document and call complete_without_change with kind insufficient_evidence and the specific missing sources; do not repeat the same empty searches or submit unsupported proposals.",
       },
       taskIntent: plan.taskIntent,
+      ...(plan.taskIntent?.type === "decision_proposal" ? {
+        decision: {
+          instruction: "先读取当前教案与 read_decision_context；提出决策候选时必须给出问题、选项与取舍、可定位证据、反例、假设、不确定性、置信度、预期信号与证伪条件。证据不足时提交 insufficient_evidence。不得替教师确认、实施或审议，也不得把生成文本当作效果证明。",
+        },
+      } : {}),
       alternativeCompletion: "complete_without_change after reading canonical content when no change is justified or evidence is insufficient",
-      completion: plan.taskIntent?.type === "learning_inquiry" ? "propose_learning_inquiry_or_explain_gap"
+      completion: plan.taskIntent?.type === "decision_proposal" ? "propose_decision_or_explain_gap"
+        : plan.taskIntent?.type === "learning_inquiry" ? "propose_learning_inquiry_or_explain_gap"
         : plan.taskIntent?.type === "learning_review" ? "propose_learning_review_or_explain_gap"
         : plan.lightweightConversation
         ? plan.presentationThemeDismissed ? "dismiss_presentation_theme" : "brief_reply_only"
@@ -131,8 +137,10 @@ export function emptyRuntimeTools(): {
   getEvidenceAttempts: () => ReadonlySet<AgentRunEvidenceKind>;
   getNoChange: () => null;
   getLearningProposal: () => null;
+  getDecisionProposal: () => null;
 } {
-  return { tools: [], getProposal: () => null, getNoChange: () => null, getLearningProposal: () => null, getEvidenceAttempts: () => new Set() };
+  return { tools: [], getProposal: () => null, getNoChange: () => null, getLearningProposal: () => null,
+    getDecisionProposal: () => null, getEvidenceAttempts: () => new Set() };
 }
 
 export function isFastExecution(

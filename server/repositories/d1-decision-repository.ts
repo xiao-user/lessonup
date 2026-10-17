@@ -1,5 +1,5 @@
 import type { SqlDatabase, SqlStatement } from "../platform/sql-database.js";
-import type { DecisionCommand, DecisionCursor, DecisionRecord, EvidenceCard } from "../decisions/contracts.js";
+import type { DecisionCommand, DecisionCursor, DecisionEvent, DecisionRecord, EvidenceCard } from "../decisions/contracts.js";
 import type { DecisionRepository } from "../decisions/repository.js";
 
 export class D1DecisionRepository implements DecisionRepository {
@@ -66,6 +66,27 @@ export class D1DecisionRepository implements DecisionRepository {
     if (!row) return null;
     if (row.request_fingerprint !== command.fingerprint) throw new Error("idempotency_conflict");
     return JSON.parse(row.response_json) as DecisionRecord;
+  }
+
+  async saveDecisionEvent(event: DecisionEvent) {
+    const result = await this.database.query<{ id: string }>({
+      sql: `INSERT INTO lesson_decision_events (id, owner_id, lesson_file_id, event_type, record_json, created_at)
+        SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM lesson_files WHERE owner_id = ? AND id = ?)`,
+      params: [event.id, event.ownerId, event.lessonFileId, event.type, JSON.stringify(event), event.createdAt,
+        event.ownerId, event.lessonFileId],
+    });
+    if (result.rowsAffected !== 1) throw new Error("lesson_file_not_found");
+    return event;
+  }
+
+  async listDecisionEvents(ownerId: string, lessonFileId: string, limit: number) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error("decision_limit_invalid");
+    const result = await this.database.query<{ record_json: string }>({
+      sql: `SELECT record_json FROM lesson_decision_events WHERE owner_id = ? AND lesson_file_id = ?
+        ORDER BY created_at DESC, id DESC LIMIT ?`,
+      params: [ownerId, lessonFileId, limit],
+    });
+    return result.rows.map((row) => JSON.parse(row.record_json) as DecisionEvent);
   }
 
   async saveDecision(

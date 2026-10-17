@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import type { LessonRepository } from "../repository.js";
-import { decisionActionSchema, decisionReadQuerySchema, proposeDecisionSchema } from "./commands.js";
+import { decisionActionSchema, decisionEventInputSchema, decisionReadQuerySchema, proposeDecisionSchema } from "./commands.js";
 import type {
   DecisionCommand,
+  DecisionEvent,
   DecisionRecord,
   DecisionStatus,
   EvidenceCard,
@@ -23,11 +24,12 @@ export class DecisionService {
     private readonly clock = () => new Date().toISOString(),
   ) {}
 
-  private command(scope: Scope, operation: string, input: unknown, idempotencyKey: string): DecisionCommand {
+  private command(scope: Scope, operation: string, input: unknown, idempotencyKey: string, documentVersion?: number): DecisionCommand {
     if (!idempotencyKey || idempotencyKey.length > 200) throw new Error("decision_command_key_invalid");
     return {
       idempotencyKey,
       fingerprint: createHash("sha256").update(JSON.stringify({ scope, operation, input })).digest("hex"),
+      ...(documentVersion === undefined ? {} : { documentVersion }),
     };
   }
 
@@ -137,7 +139,7 @@ export class DecisionService {
     return this.repository.saveDecision(
       record,
       null,
-      this.command(scope, "propose", input, idempotencyKey),
+      this.command(scope, "propose", input, idempotencyKey, file.documentVersion),
       evidenceCards,
     );
   }
@@ -241,6 +243,28 @@ export class DecisionService {
 
   async commandResult(scope: Scope, idempotencyKey: string) {
     return this.repository.getDecisionCommandResult(scope.ownerId, idempotencyKey);
+  }
+
+  async recordEvent(scope: Scope, rawInput: unknown) {
+    const input = decisionEventInputSchema.parse(rawInput);
+    const file = await this.file(scope);
+    return this.repository.saveDecisionEvent({
+      id: randomUUID(),
+      ownerId: scope.ownerId,
+      lessonFileId: file.id,
+      type: input.type,
+      decisionId: input.decisionId ?? null,
+      decisionType: input.decisionType ?? null,
+      evidenceId: input.evidenceId ?? null,
+      durationMs: input.durationMs ?? null,
+      count: input.count ?? null,
+      createdAt: this.clock(),
+    });
+  }
+
+  async events(scope: Scope, limit = 200) {
+    const file = await this.file(scope);
+    return this.repository.listDecisionEvents(scope.ownerId, file.id, Math.min(Math.max(limit, 1), 500));
   }
 }
 

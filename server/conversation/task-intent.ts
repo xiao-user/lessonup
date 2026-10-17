@@ -8,5 +8,6 @@ export function applyTaskIntent(plan: CapabilityPlan, taskIntent?: AgentTaskInte
     presentationRequested: false, skillIds: [], toolGroups: ["document-read", "document-write"],
     writeMode: taskIntent.type === "document_write" ? "explicit" : "consultative",
     requestedDocumentFields: taskIntent.type === "document_write" ? taskIntent.fields : undefined,
+    curriculumRequested: taskIntent.type === "decision_proposal" ? true : plan.curriculumRequested,
   };
 }

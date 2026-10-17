@@ -83,7 +83,7 @@ function bind<T extends object, K extends keyof T>(source: T, names: readonly K[
 
 const decisionMethods = [
   "listDecisions", "getDecision", "listDecisionVersions", "listDecisionEvidenceCards",
-  "getDecisionCommandResult", "replayDecisionCommand", "saveDecision",
+  "getDecisionCommandResult", "replayDecisionCommand", "saveDecision", "saveDecisionEvent", "listDecisionEvents",
 ] as const;
 
 const workspaceMethods = [

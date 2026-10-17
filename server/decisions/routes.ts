@@ -17,6 +17,13 @@ export function registerDecisionRoutes(app: Hono<AppBindings>, repository: Lesso
   app.get("/api/lesson-files/:id/decisions/commands/:key", async (c) => c.json(await service.commandResult(
     { ownerId: c.get("userId"), lessonFileId: c.req.param("id") }, c.req.param("key"),
   )));
+  app.get("/api/lesson-files/:id/decisions/events", async (c) => c.json({ events: await service.events(
+    { ownerId: c.get("userId"), lessonFileId: c.req.param("id") },
+    Number(c.req.query("limit") ?? 200),
+  ) }));
+  app.post("/api/lesson-files/:id/decisions/events", async (c) => c.json(await service.recordEvent(
+    { ownerId: c.get("userId"), lessonFileId: c.req.param("id") }, await c.req.json(),
+  ), 201));
   app.get("/api/lesson-files/:id/decisions/:decisionId", async (c) => c.json(await service.readContext(
     { ownerId: c.get("userId"), lessonFileId: c.req.param("id") }, c.req.param("decisionId"),
   )));

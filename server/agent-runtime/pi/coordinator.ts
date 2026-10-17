@@ -476,6 +476,12 @@ export class PiLessonAgentCoordinator {
             "调用 propose_document_patch；如果上一次提案被工具拒绝，按返回的结构化错误修正，不要用文字宣称已完成。",
           ].join("\n");
       const learningTask = plan.taskIntent?.type === "learning_inquiry" || plan.taskIntent?.type === "learning_review";
+      const decisionTask = plan.taskIntent?.type === "decision_proposal";
+      const decisionCompletionPrompt = [
+        "你还没有完成教学决策候选。",
+        "先调用 read_decision_context 读取当前教案、已有决策与学习证据，再调用 propose_decision 提交一个可检查的候选：明确问题、至少两个选项（保留现稿除外）、可定位证据、反例、假设、不确定性、置信度、预期信号与证伪条件。",
+        "证据不足时提交 status=insufficient_evidence 的候选，不要编造课标条款、学生表现或效果数据。不得替教师确认、实施或审议。",
+      ].join("\n");
       const requiredCompletion = fastLane
         ? undefined
         : plan.presentationRequested && !plan.presentationThemeConfirmationRequired
@@ -484,6 +490,12 @@ export class PiLessonAgentCoordinator {
             followUp: presentationCompletionPrompt,
             maxFollowUps: 2,
           }
+        : decisionTask
+          ? {
+              isComplete: () => Boolean(runtimeTools.getDecisionProposal()),
+              followUp: decisionCompletionPrompt,
+              maxFollowUps: 2,
+            }
         : plan.writeMode === "explicit" || learningTask
           ? {
               isComplete: () => {
@@ -564,14 +576,16 @@ export class PiLessonAgentCoordinator {
       }
       const noChange = runtimeTools.getNoChange();
       const learningProposal = runtimeTools.getLearningProposal();
+      const decisionProposal = runtimeTools.getDecisionProposal();
       if (((plan.writeMode === "explicit" && (!proposal || proposal.patchKind === "presentation_storyboard")) || (learningTask && !learningProposal)) && !noChange) {
         throw new Error("write_proposal_missing");
       }
+      if (decisionTask && !decisionProposal) throw new Error("decision_proposal_missing");
       const evidence = await this.repository.listRunEvidence(input.userId, runId);
       // A grounded no-op is based on canonical reads and makes no mutation.
       // Retrieval gates for new claims/writes must not force needless searches
       // merely to preserve an already sufficient lesson.
-      if (!proposal && !learningProposal && !noChange && validateObservedEvidence({
+      if (!proposal && !learningProposal && !decisionProposal && !noChange && validateObservedEvidence({
         plan,
         evidence,
         attemptedKinds: runtimeTools.getEvidenceAttempts(),
@@ -586,7 +600,9 @@ export class PiLessonAgentCoordinator {
         && plan.presentationRequested
         && !plan.presentationThemeConfirmationRequired;
       content = hidePresentationProse ? "" : noChange?.reason
-        ?? (learningProposal ? (learningProposal.proposedReview ? "复测审议建议已准备，请在学习验证中核对证据与限制后确认。" : "学习改进方案已准备，请在学习验证中审阅并决定是否采用。") : result.content || content || "");
+        ?? (decisionProposal ? "教学决策候选已准备，请在右侧“教学决策”中核对证据、替代方案与不确定性后确认。"
+          : learningProposal ? (learningProposal.proposedReview ? "复测审议建议已准备，请在学习验证中核对证据与限制后确认。" : "学习改进方案已准备，请在学习验证中审阅并决定是否采用。")
+            : result.content || content || "");
       if (proposal) {
         await this.approvals.commit({
           userId: input.userId,

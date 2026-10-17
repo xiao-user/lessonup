@@ -1,4 +1,6 @@
-# 02 决策模型（草案，待评审后实现）
+# 02 决策模型（v1 已实现）
+
+> 实现状态：决策表、证据卡与教师动作已按本模型落地（迁移 `0024`/`0025`）。落地时补充了 `version`、`rejection`、`implementation`、`review` 与聚合事件；细节见 [05-implementation.md](05-implementation.md)。
 
 ## 1. 原则
 
