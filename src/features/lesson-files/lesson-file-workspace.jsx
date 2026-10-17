@@ -184,13 +184,11 @@ function pageContentSignature(pages) {
   )).join("\u001e");
 }
 
-export function LessonFileWorkspace({ notebook, file, sourceElement, originRect, closeSignal = 0, onSave, onAgentVersionCommitted, onClose }) {
+export function LessonFileWorkspace({ notebook, file, closeSignal = 0, onSave, onAgentVersionCommitted, onClose, onCloseBlocked }) {
   const rootRef = useRef(null);
   const scrollRef = useRef(null);
   const documentPagesRef = useRef(null);
-  const firstSheetRef = useRef(null);
   const closingRef = useRef(false);
-  const openingTimelineRef = useRef(null);
   const sectionScrollRef = useRef(null);
   const anchorScrollActiveRef = useRef(false);
   const syncActiveSectionRef = useRef(() => {});
@@ -260,12 +258,6 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
   const pageLayoutSignatureRef = useRef(pageLayoutSignature(pages));
   const pageContentSignatureRef = useRef(pageContentSignature(pages));
   const [pageLayoutRevision, setPageLayoutRevision] = useState(0);
-  const hasSpatialOrigin = Boolean(
-    originRect?.width
-    && originRect?.height
-    && !window.matchMedia("(prefers-reduced-motion: reduce)").matches
-  );
-  const [entryPending, setEntryPending] = useState(hasSpatialOrigin);
   onSaveRef.current = onSave;
   onAgentVersionCommittedRef.current = onAgentVersionCommitted;
   planRef.current = plan;
@@ -279,7 +271,6 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
 
   const setDocumentPagesRef = useCallback((element) => {
     documentPagesRef.current = element;
-    firstSheetRef.current = element?.querySelector(".lesson-sheet-frame") ?? null;
   }, []);
 
   useLayoutEffect(() => {
@@ -615,126 +606,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     persistPendingSaveRef.current().catch(() => null);
   }, []);
 
-  const { contextSafe } = useGSAP(() => {
-    const root = rootRef.current;
-    const firstSheet = firstSheetRef.current;
-    if (!root || !firstSheet) return undefined;
-    // CSS owns mobile drawers; entry animation must not override their state.
-    const rails = window.matchMedia("(min-width: 681px)").matches
-      ? root.querySelectorAll(".lesson-side-rail")
-      : [];
-    const pageContent = root.querySelectorAll(".lesson-sheet-content");
-    const secondarySheets = [...root.querySelectorAll(".lesson-sheet-frame")].slice(1);
-    const finalRect = firstSheet.getBoundingClientRect();
-    const currentSource = sourceElement?.isConnected
-      ? sourceElement
-      : [...document.querySelectorAll(".book-volume-file")]
-        .find((element) => element.dataset.fileId === file.id);
-    const sourceRect = originRect ?? currentSource?.getBoundingClientRect();
-    const canMorph = Boolean(
-      sourceRect?.width
-      && sourceRect?.height
-      && finalRect.width
-      && finalRect.height,
-    );
-    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const duration = reduceMotion ? 0 : 0.82;
-    const styles = getComputedStyle(document.documentElement);
-    const background = styles.getPropertyValue("--app-background").trim();
-    const clearBackground = styles.getPropertyValue("--app-background-clear").trim();
-    const finalSheetStyle = getComputedStyle(firstSheet);
-    const finalShadow = finalSheetStyle.boxShadow;
-    const finalRadius = finalSheetStyle.borderRadius;
-    const finalPaper = finalSheetStyle.backgroundColor;
-    const sourcePaper = getComputedStyle(currentSource ?? firstSheet).backgroundColor;
-    const sourceShadow = styles.getPropertyValue("--book-paper-shadow-clear").trim();
-
-    if (rails.length) gsap.set(rails, { autoAlpha: 0 });
-    if (pageContent.length) gsap.set(pageContent, { autoAlpha: 0 });
-    if (secondarySheets.length) gsap.set(secondarySheets, { autoAlpha: 0, y: 24 });
-
-    if (!canMorph || reduceMotion) {
-      root.classList.remove("is-entering");
-      setEntryPending(false);
-      gsap.set(root, { clearProps: "backgroundColor" });
-      if (pageContent.length) gsap.set(pageContent, { autoAlpha: 1 });
-      if (secondarySheets.length) gsap.set(secondarySheets, { autoAlpha: 1, clearProps: "transform" });
-      if (rails.length) gsap.set(rails, { clearProps: "opacity,visibility,transform" });
-      return undefined;
-    }
-
-    gsap.set(root, { backgroundColor: clearBackground });
-    gsap.set(firstSheet, {
-      position: "fixed",
-      top: finalRect.top,
-      left: finalRect.left,
-      width: finalRect.width,
-      height: finalRect.height,
-      zIndex: 6,
-      x: sourceRect.left - finalRect.left,
-      y: sourceRect.top - finalRect.top,
-      scaleX: sourceRect.width / finalRect.width,
-      scaleY: sourceRect.height / finalRect.height,
-      transformOrigin: "top left",
-      boxShadow: sourceShadow,
-      backgroundColor: sourcePaper,
-      borderRadius: 3,
-      willChange: "transform, box-shadow",
-    });
-    // useGSAP runs in the layout phase. Revealing here exposes the already
-    // transformed start pose in the first paint, never the full workspace.
-    root.classList.remove("is-entering");
-    setEntryPending(false);
-
-    const timeline = gsap.timeline({
-      defaults: { ease: "power2.inOut" },
-      onComplete: () => {
-        root.classList.remove("is-entering");
-        setEntryPending(false);
-        openingTimelineRef.current = null;
-        if (rails.length) gsap.set(rails, { clearProps: "opacity,visibility,transform" });
-      },
-    });
-    openingTimelineRef.current = timeline;
-    timeline
-      .addLabel("open", 0)
-      .to(root, {
-        backgroundColor: background,
-        duration: 0.58,
-      }, "open")
-      .to(firstSheet, {
-        x: 0,
-        y: 0,
-        scaleX: 1,
-        scaleY: 1,
-        boxShadow: finalShadow,
-        backgroundColor: finalPaper,
-        borderRadius: finalRadius,
-        duration,
-        clearProps: "position,top,left,width,height,zIndex,transform,transformOrigin,boxShadow,backgroundColor,borderRadius,willChange",
-      }, "open");
-    if (pageContent.length) timeline.to(pageContent, {
-      autoAlpha: 1,
-      duration: 0.32,
-      ease: "sine.inOut",
-    }, duration * 0.58);
-    if (secondarySheets.length) timeline.to(secondarySheets, {
-        y: 0,
-        autoAlpha: 1,
-        stagger: 0.05,
-        duration: 0.34,
-      }, duration * 0.66);
-    if (rails.length) timeline.fromTo(rails, {
-        x: (index) => index === 0 ? -16 : 16,
-        autoAlpha: 0,
-      }, {
-        x: 0,
-        autoAlpha: 1,
-        stagger: 0.05,
-        duration: 0.34,
-      }, duration * 0.7);
-    return () => timeline.kill();
-  }, { scope: rootRef });
+  const { contextSafe } = useGSAP(() => {}, { scope: rootRef });
 
   const updateHistoryAvailability = (history) => {
     setHistoryAvailability({
@@ -865,100 +737,24 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     );
   }, [file.id]);
 
-  const closeWorkspace = contextSafe(() => {
+  const closeWorkspace = async () => {
     if (closingRef.current) return;
     closingRef.current = true;
-    openingTimelineRef.current?.kill();
-    openingTimelineRef.current = null;
-    const scrollRoot = scrollRef.current;
-    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-    const finishClose = () => {
-      const root = rootRef.current;
-      const firstSheet = root?.querySelector(".lesson-sheet-frame") ?? firstSheetRef.current;
-      if (!root || !firstSheet) {
-        onClose();
-        return;
+    sectionScrollRef.current?.kill();
+    try {
+      tiptapBridgeRef.current?.flush();
+      if (dirtyPlanRef.current || pendingSaveDataRef.current || failedSaveDataRef.current) {
+        await flushDocumentBeforeAgentRun();
+      } else {
+        await saveInFlightRef.current;
       }
-      const rails = root.querySelectorAll(".lesson-side-rail");
-      const pageContent = root.querySelectorAll(".lesson-sheet-content");
-      const secondarySheets = [...root.querySelectorAll(".lesson-sheet-frame")].slice(1);
-      const currentRect = firstSheet.getBoundingClientRect();
-      const source = document.querySelector(`.folder-paper[data-file-id="${file.id}"]`);
-      const targetRect = source?.getBoundingClientRect() ?? originRect;
-      const duration = reduceMotion ? 0 : 0.72;
-      const rootStyles = getComputedStyle(document.documentElement);
-      const clearBackground = rootStyles.getPropertyValue("--app-background-clear").trim();
-      const currentShadow = getComputedStyle(firstSheet).boxShadow;
-      const sourceShadow = rootStyles.getPropertyValue("--book-paper-shadow-clear").trim();
-
-      if (!targetRect?.width || !targetRect?.height) {
-        gsap.timeline({ onComplete: onClose })
-          .to([...rails, ...secondarySheets, ...pageContent], {
-            autoAlpha: 0,
-            duration: reduceMotion ? 0 : 0.24,
-            ease: "sine.inOut",
-          });
-        return;
-      }
-
-      gsap.set(firstSheet, {
-        position: "fixed",
-        top: currentRect.top,
-        left: currentRect.left,
-        width: currentRect.width,
-        height: currentRect.height,
-        zIndex: 6,
-        transformOrigin: "top left",
-        boxShadow: currentShadow,
-        willChange: "transform, box-shadow",
-      });
-
-      const targetTransform = {
-        x: targetRect.left - currentRect.left,
-        y: targetRect.top - currentRect.top,
-        scaleX: targetRect.width / currentRect.width,
-        scaleY: targetRect.height / currentRect.height,
-      };
-
-      const timeline = gsap.timeline({ defaults: { ease: "power2.inOut" }, onComplete: onClose })
-        .addLabel("close", 0);
-      if (rails.length) timeline.to(rails, {
-          autoAlpha: 0,
-          x: (index) => index === 0 ? -12 : 12,
-          duration: reduceMotion ? 0 : 0.22,
-        }, "close");
-      if (secondarySheets.length) timeline.to(secondarySheets, {
-          autoAlpha: 0,
-          y: 20,
-          duration: reduceMotion ? 0 : 0.22,
-        }, "close");
-      if (pageContent.length) timeline.to(pageContent, { autoAlpha: 0, duration: reduceMotion ? 0 : 0.24, ease: "sine.inOut" }, "close");
-      timeline.to(firstSheet, {
-          ...targetTransform,
-          boxShadow: sourceShadow,
-          borderRadius: 3,
-          duration,
-        }, "close+=0.06")
-        .to(root, {
-          backgroundColor: clearBackground,
-          duration: reduceMotion ? 0 : 0.42,
-        }, `close+=${duration * 0.5}`);
-    };
-
-    if (!scrollRoot.scrollTop || reduceMotion) {
-      scrollRoot.scrollTop = 0;
-      finishClose();
-      return;
+      onClose();
+    } catch {
+      // Retain the editor and its retryable save if delivery failed.
+      closingRef.current = false;
+      onCloseBlocked?.();
     }
-
-    gsap.to(scrollRoot, {
-      scrollTop: 0,
-      duration: 0.34,
-      ease: "power3.inOut",
-      onComplete: finishClose,
-    });
-  });
+  };
 
   useEffect(() => {
     if (closeSignal) closeWorkspace();
@@ -978,7 +774,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
 
   return (
     <section
-      className={`lesson-file-workspace${entryPending ? " is-entering" : ""}`}
+      className="lesson-file-workspace"
       ref={rootRef}
       aria-label={`${file.title}备课文件`}
       tabIndex={-1}

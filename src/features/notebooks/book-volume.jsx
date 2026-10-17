@@ -10,6 +10,7 @@ export function BookVolume({
   pageIndex,
   onToggle,
   onOpenFile,
+  onPrepareFile,
   onDeleteFile,
   onPageChange,
   pageAnimating,
@@ -39,19 +40,11 @@ export function BookVolume({
     event.stopPropagation();
     if (!isOpen || !file || pageAnimating || bookAnimating) return;
     const sourceElement = event.currentTarget;
-    const rect = sourceElement.getBoundingClientRect();
-    const originRect = {
-      top: rect.top,
-      left: rect.left,
-      width: rect.width,
-      height: rect.height,
-    };
     sourceElement.blur();
     onOpenFile({
       notebookId: notebook.id,
       fileId: file.id,
       sourceElement,
-      originRect,
     });
   };
 
@@ -76,7 +69,7 @@ export function BookVolume({
                 aria-hidden={index !== activePageIndex}
                 key={page.id}
               >
-                {page.kind === "file" ? (
+                {Math.abs(index - activePageIndex) <= 1 && (page.kind === "file" ? (
                   <button
                     className={`folder-paper book-volume-file book-volume-leaf-front ${activeFileId === page.id ? "is-file-source" : ""}`}
                     data-file-id={page.id}
@@ -84,6 +77,8 @@ export function BookVolume({
                     tabIndex={isOpen && index === activePageIndex && !pageAnimating && !bookAnimating ? 0 : -1}
                     aria-label={`打开备课文件${page.title}`}
                     onClick={(event) => openFile(event, page)}
+                    onPointerEnter={() => { if (isOpen && !bookAnimating && !pageAnimating) onPrepareFile?.(); }}
+                    onFocus={() => { if (isOpen && !bookAnimating && !pageAnimating) onPrepareFile?.(); }}
                   >
                     <LessonFilePageSummary
                       file={page}
@@ -95,13 +90,13 @@ export function BookVolume({
                   <div className="folder-paper book-volume-leaf-front" aria-label={`${notebook.title}扉页`}>
                     <NotebookTitlePageSummary notebook={notebook} />
                   </div>
-                )}
+                ))}
                 <div className="book-volume-leaf-back" aria-hidden="true">
-                  {page.kind === "title" ? (
+                  {Math.abs(index - activePageIndex) <= 1 && (page.kind === "title" ? (
                     <NotebookTitlePageSummary notebook={notebook} />
                   ) : (
                     <LessonFilePageBackSummary file={page} />
-                  )}
+                  ))}
                 </div>
               </div>
             ))}

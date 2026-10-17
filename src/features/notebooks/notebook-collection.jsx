@@ -28,6 +28,7 @@ export const NotebookCollection = forwardRef(function NotebookCollection({
   inert,
   onSelect,
   onOpenFile,
+  onPrepareFile,
   onDeleteFile,
   onDeleteNotebook,
   onCreateNotebook,
@@ -164,6 +165,7 @@ export const NotebookCollection = forwardRef(function NotebookCollection({
           onSelect={onSelect}
           onActiveChange={setActiveNotebookId}
           onOpenFile={onOpenFile}
+          onPrepareFile={onPrepareFile}
           onDeleteFile={onDeleteFile}
           ref={carouselRef}
         />

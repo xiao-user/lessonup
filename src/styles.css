@@ -655,7 +655,6 @@
 .book-volume-leaf-back { transform: rotateY(180deg); }
 
 .book-volume .folder-paper.is-file-source {
-  /* Plate stays opaque; animatePageCopy already clears the text for the morph handoff. */
   pointer-events: none !important;
 }
 
@@ -1707,6 +1706,23 @@
   box-shadow: var(--elevation-popover);
 }
 
+.lesson-open-progress {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  z-index: 110;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  transform: translateX(-50%);
+  padding: 12px 20px;
+  border-radius: 16px;
+  background: var(--app-background);
+  box-shadow: var(--shadow-folder-hover);
+}
+
+.lesson-open-progress button { text-decoration: underline; cursor: pointer; }
+
 .lesson-file-workspace {
   position: fixed;
   inset: 0;
@@ -1721,10 +1737,14 @@
   color: var(--gray-1000);
 }
 
-/* The spatial morph establishes its inline start pose in the first layout
-   pass. Keep the workspace out of the first paint until that pose exists. */
-.lesson-file-workspace.is-entering {
-  visibility: hidden;
+/* One compositor fade; document geometry and mobile drawer state stay stable. */
+@media (prefers-reduced-motion: no-preference) {
+  .lesson-file-workspace { animation: lesson-workspace-enter 160ms ease-out; }
+}
+
+@keyframes lesson-workspace-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .lesson-side-rail {

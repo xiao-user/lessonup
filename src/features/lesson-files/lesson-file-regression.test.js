@@ -120,18 +120,7 @@ test("presentation material is the final A4 row and starts the confirmation flow
   assert.doesNotMatch(workspace, /PresentationStudio|presentationStudioOpen|lesson-presentation-entry/);
 });
 
-test("the detail morph establishes its start pose before first paint", async () => {
-  const workspace = await readFile(new URL("./lesson-file-workspace.jsx", import.meta.url), "utf8");
-  const styles = await readFile(new URL("../../styles.css", import.meta.url), "utf8");
-
-  assert.match(workspace, /className=\{`lesson-file-workspace\$\{entryPending \? " is-entering"/);
-  assert.match(workspace, /root\.classList\.remove\("is-entering"\)/);
-  assert.match(workspace, /setEntryPending\(false\)/);
-  assert.match(styles, /\.lesson-file-workspace\.is-entering\s*\{[^}]*visibility:\s*hidden;/s);
-  assert.doesNotMatch(workspace, /requestAnimationFrame\(\(\) => \{\s*\/\/ The paper frame owns/);
-});
-
-test("the spatial morph keeps every paginated sheet in a stable layout slot", async () => {
+test("pagination keeps every sheet in a stable layout slot", async () => {
   const editor = await readFile(new URL("./lesson-plan-tiptap.jsx", import.meta.url), "utf8");
   const styles = await readFile(new URL("../../styles.css", import.meta.url), "utf8");
 

@@ -364,14 +364,8 @@ test("turns real lesson-file pages and restores an independently routed detail",
     const openBook = page.locator(".book-volume.is-open");
     const titleLeaf = openBook.locator('.book-volume-leaf[data-page-index="0"]');
     const firstLeaf = openBook.locator('.book-volume-leaf[data-page-index="1"]');
-    await page.waitForTimeout(450);
-    const openingAngles = await openBook.evaluate((book) => ({
-      cover: Number.parseFloat(window.getComputedStyle(book.querySelector(".book-volume-cover")!)
-        .getPropertyValue("--cover-angle")),
-      title: Number.parseFloat(window.getComputedStyle(book.querySelector('[data-page-kind="title"]')!)
-        .getPropertyValue("--leaf-angle")),
-    }));
-    expect(Math.abs(openingAngles.cover)).toBeGreaterThan(Math.abs(openingAngles.title) + 30);
+    // Opening lands directly on the first file; no delayed title-page sequence.
+    await expect(openBook).not.toHaveClass(/is-animating/);
     await expect(titleLeaf).toHaveAttribute("data-page-kind", "title");
     await expect(titleLeaf).toContainText("语文备课本");
     await expect(titleLeaf).toHaveClass(/is-turned/);

@@ -1,5 +1,4 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import gsap from "gsap";
 import { toast } from "sonner";
 
 import { Toaster } from "@/components/ui/sonner";
@@ -16,7 +15,14 @@ import { agentApi } from "@/lib/agent-api";
 import { createLessonPlanPreview } from "@/lib/lesson-preview";
 import { signOut } from "@/lib/session";
 
-const loadLessonFileWorkspace = () => import("@/features/lesson-files/lesson-file-workspace");
+let lessonWorkspaceModule;
+const loadLessonFileWorkspace = () => {
+  lessonWorkspaceModule ??= import("@/features/lesson-files/lesson-file-workspace").catch((error) => {
+    lessonWorkspaceModule = null;
+    throw error;
+  });
+  return lessonWorkspaceModule;
+};
 const loadCreateDialog = () => import("@/features/notebooks/create-dialog");
 const loadProfileDialog = () => import("@/features/auth/profile-dialog");
 const loadSemesterFrameworkWorkspace = () => import("@/features/semester-frameworks/semester-framework-workspace");
@@ -102,38 +108,6 @@ const getClassroomPresentationRouteId = () => {
   }
 };
 
-const animatePageCopy = (page, opacity) => {
-  const targets = page ? [...page.children] : [];
-  if (!targets.length) return Promise.resolve();
-  gsap.killTweensOf(targets);
-  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-    gsap.set(targets, { autoAlpha: opacity });
-    return Promise.resolve();
-  }
-  return new Promise((resolve) => {
-    gsap.to(targets, {
-      autoAlpha: opacity,
-      duration: 0.18,
-      ease: "sine.inOut",
-      overwrite: true,
-      onComplete: resolve,
-    });
-  });
-};
-
-const restorePageCopy = (page) => {
-  const targets = page ? [...page.children] : [];
-  if (!targets.length) return;
-  gsap.killTweensOf(targets);
-  gsap.to(targets, {
-    autoAlpha: 1,
-    duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 0.2,
-    ease: "sine.out",
-    overwrite: true,
-    clearProps: "opacity,visibility",
-  });
-};
-
 const mergeRemoteFile = (notebooks, notebookId, fileId, remoteFile) => notebooks.map((notebook) => (
   notebook.id === notebookId
     ? {
@@ -177,6 +151,8 @@ function CollectionApp() {
   const [dialogKind, setDialogKind] = useState(null);
   const [dialogNotebookId, setDialogNotebookId] = useState(null);
   const [activeFile, setActiveFile] = useState(null);
+  const [openingFile, setOpeningFile] = useState(null);
+  const fileOpenRequestRef = useRef(null);
   const [routeCloseRequest, setRouteCloseRequest] = useState(0);
   const [profileOpen, setProfileOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
@@ -240,7 +216,6 @@ function CollectionApp() {
               notebookId: routedNotebook.id,
               fileId: routedFileId,
               sourceElement: null,
-              originRect: null,
             });
           } else {
             window.history.replaceState({}, "", "/");
@@ -339,7 +314,6 @@ function CollectionApp() {
           notebookId: targetId,
           fileId: file.id,
           sourceElement: null,
-          originRect: null,
         });
         return;
       }
@@ -374,33 +348,37 @@ function CollectionApp() {
     )));
   };
 
+  const cancelFileOpen = () => {
+    const request = fileOpenRequestRef.current;
+    fileOpenRequestRef.current = null;
+    setOpeningFile(null);
+    request?.sourceElement?.removeAttribute("aria-busy");
+    request?.sourceElement?.focus({ preventScroll: true });
+  };
+
   const openLessonFile = async (
     nextActiveFile,
     { historyMode = "push", dismissFramework = false } = {},
   ) => {
     const sourceElement = nextActiveFile.sourceElement;
-    if (sourceElement?.dataset.detailTransition === "pending") return false;
-    if (sourceElement) {
-      sourceElement.dataset.detailTransition = "pending";
-      sourceElement.setAttribute("aria-busy", "true");
-    }
+    if (fileOpenRequestRef.current) return false;
+    const request = { sourceElement };
+    fileOpenRequestRef.current = request;
+    setOpeningFile(nextActiveFile);
+    sourceElement?.setAttribute("aria-busy", "true");
     try {
       const [remoteFile] = await Promise.all([
         agentApi.getLessonFile(nextActiveFile.fileId),
         loadLessonFileWorkspace(),
       ]);
+      // Cancelled or superseded navigation must never reopen a stale destination.
+      if (fileOpenRequestRef.current !== request) return false;
       setNotebooks((current) => mergeRemoteFile(
         current,
         nextActiveFile.notebookId,
         nextActiveFile.fileId,
         remoteFile,
       ));
-      // Fade paper copy in parallel with the A4 morph — do not wait for the
-      // fade to finish before mounting the workspace.
-      if (sourceElement?.isConnected) {
-        gsap.killTweensOf([...sourceElement.children]);
-        gsap.set([...sourceElement.children], { autoAlpha: 0 });
-      }
       // Keep the notebook open across framework → lesson. Clear the framework in
       // the same state batch as mounting the lesson so the collection never
       // flashes underneath as a closed/resting shelf.
@@ -413,20 +391,25 @@ function CollectionApp() {
       }
       return true;
     } catch (error) {
+      if (fileOpenRequestRef.current !== request) return false;
       if (sourceElement) {
-        delete sourceElement.dataset.detailTransition;
-        sourceElement.removeAttribute("aria-busy");
-        restorePageCopy(sourceElement);
         sourceElement.focus({ preventScroll: true });
       }
       toast.error(error.message === "lesson_file_not_found"
         ? "这份教案已不存在，请刷新备课本"
         : "暂时无法同步云端教案，助手会在版本一致后才开始工作");
       return false;
+    } finally {
+      if (fileOpenRequestRef.current === request) {
+        fileOpenRequestRef.current = null;
+        setOpeningFile(null);
+        sourceElement?.removeAttribute("aria-busy");
+      }
     }
   };
 
   const openSemesterFramework = async (notebookId, frameworkId = null, { historyMode = "push" } = {}) => {
+    cancelFileOpen();
     try {
       const targetFrameworkId = frameworkId ?? (
         await agentApi.listSemesterFrameworks(notebookId)
@@ -474,15 +457,14 @@ function CollectionApp() {
           ? document.querySelector(`.book-volume-file[data-file-id="${CSS.escape(fileId)}"]`)
           : null;
       if (!paper?.isConnected) return;
-      delete paper.dataset.detailTransition;
       paper.removeAttribute("aria-busy");
-      restorePageCopy(paper);
       paper.focus({ preventScroll: true });
     });
   };
 
   useEffect(() => {
     const handlePopState = () => {
+      cancelFileOpen();
       const routedFileId = getLessonFileRouteId();
       const routedFrameworkId = getSemesterFrameworkRouteId();
       if (routedFrameworkId) {
@@ -521,7 +503,6 @@ function CollectionApp() {
         notebookId: routedNotebook.id,
         fileId: routedFileId,
         sourceElement: null,
-        originRect: null,
       }, { historyMode: null });
     };
     window.addEventListener("popstate", handlePopState);
@@ -569,7 +550,6 @@ function CollectionApp() {
       notebookId: notebook.id,
       fileId,
       sourceElement: null,
-      originRect: null,
     }, {
       historyMode: "replace",
       dismissFramework: true,
@@ -743,7 +723,11 @@ function CollectionApp() {
         selectedId={selectedId}
         activeFileId={activeFile?.fileId}
         inert={Boolean(activeFile || activeFramework)}
-        onSelect={setSelectedId}
+        onSelect={(id) => {
+          cancelFileOpen();
+          setSelectedId(id);
+        }}
+        onPrepareFile={() => { void loadLessonFileWorkspace().catch(() => {}); }}
         onOpenFile={openLessonFile}
         onDeleteFile={setDeleteTarget}
         onDeleteNotebook={setDeleteNotebookTarget}
@@ -766,13 +750,17 @@ function CollectionApp() {
         }}
         onSignOut={() => { void signOut(); }}
       />
+      {openingFile && (
+        <div className="lesson-open-progress" role="status">
+          <span>正在打开教案…</span>
+          <button type="button" onClick={cancelFileOpen}>取消打开</button>
+        </div>
+      )}
       {activeNotebook && activeFileData && (
         <Suspense fallback={null}>
           <LessonFileWorkspace
             notebook={activeNotebook}
             file={activeFileData}
-            sourceElement={activeFile.sourceElement}
-            originRect={activeFile.originRect}
             closeSignal={routeCloseRequest}
             onSave={updateLessonPlan}
             onAgentVersionCommitted={async (lessonPlan, documentVersion, pageCount) => {
@@ -784,6 +772,11 @@ function CollectionApp() {
               updateLocalLessonPlan(saved.document, saved.pageCount, saved.documentVersion);
             }}
             onClose={closeLessonFile}
+            onCloseBlocked={() => {
+              setRouteCloseRequest(0);
+              const route = lessonFileRoute(activeFile.fileId);
+              if (window.location.pathname !== route) window.history.pushState({}, "", route);
+            }}
             key={`${activeNotebook.id}-${activeFileData.id}`}
           />
         </Suspense>
