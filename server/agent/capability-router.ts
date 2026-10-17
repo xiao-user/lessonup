@@ -3,22 +3,9 @@ import { parseContinuityWritebackFeedbackId } from "../curriculum/continuity-ado
 import { lessonFieldSchema, type CapabilityPlan, type LessonField, type LessonPlan } from "../domain.js";
 
 export const capabilityPlanSchema = z.object({
-  skillIds: z.array(z.enum([
-    "lesson-objective-review",
-    "lesson-process-design",
-    "lesson-assessment-alignment",
-    "lesson-critique",
-    "lesson-full-authoring",
-    "dashi-ppt",
-  ])).max(3),
+  skillIds: z.array(z.literal("dashi-ppt")).max(1),
   toolGroups: z.array(z.enum(["document-read", "document-write", "presentation-create"])).max(3),
   mcpServers: z.array(z.enum(["knowledge", "web"])).max(2),
-  specialistAgents: z.array(z.enum([
-    "curriculum-analysis",
-    "learning-design",
-    "assessment",
-    "critic",
-  ])).max(3),
   evidenceRequired: z.boolean().default(false),
   writeMode: z.enum(["consultative", "open", "explicit"]).default("open"),
   designBasisRequested: z.boolean().default(false),
@@ -56,7 +43,7 @@ const attachmentReferencePattern = /附件|上传的?(?:文件|资料)|我(?:上
 // 目标/评价对齐修改扩张成外部事实审查。只有明确的全局审查语义才
 // 结合现稿中的可核事实启动知识检索。
 const broadReviewPattern = /全面|整体|完整|全局|整份|通篇|审查|检查|评估/;
-const explicitConsultationPattern = /(?:先|暂时|目前).{0,8}(?:给|只做|只).{0,8}(?:建议|分析|判断|检查|审查|评估)|(?:不要|不用|不必|无需).{0,8}(?:写入|修改|生成确认)|先判断|只(?:做)?(?:检查|审查|评估|分析)/;
+const explicitConsultationPattern = /(?:先|暂时|目前).{0,8}(?:给|只做|只).{0,8}(?:建议|分析|判断|检查|审查|评估)|(?:不要|不用|不必|无需).{0,8}(?:写入|修改|生成确认)|(?<!能|得|可|须)不(?:写入|修改|生成确认)|先判断|只(?:做)?(?:检查|审查|评估|分析)/;
 const explicitApprovalPattern = /(?:提交|生成|创建).{0,14}(?:修改|调整|建议|确认项|审批)|(?:等待|由|让我).{0,8}(?:确认|批准).{0,8}(?:再|后).{0,4}(?:写入|修改)/;
 // Reading upstream planning context and writing the teacher-facing A4 lesson are
 // ordinary lesson operations. Only route to the structured design-basis write
@@ -96,7 +83,6 @@ const classroomPresentationPattern = new RegExp([
   `上课(?:用|使用)的?.{0,4}${presentationNoun}`,
   "课件(?:做|制作|生成|设计)(?:一下|好|出来|吧)?",
 ].join("|"), "i");
-const independentSpecialistPattern = /独立(?:复核|审查|判断)|第二意见|另一个角度|多专家|专家会诊/;
 
 const documentFieldAliases: Array<[LessonField, RegExp]> = [
   ["totalPeriods", /总课时/g],
@@ -185,7 +171,6 @@ export const deterministicCapabilityPlan = (
     skillIds: [],
     toolGroups: ["document-read", "document-write"],
     mcpServers: [],
-    specialistAgents: [],
     evidenceRequired: false,
     writeMode: writebackFeedbackId
       ? "explicit"
@@ -218,7 +203,6 @@ export const deterministicCapabilityPlan = (
       executionLane: "fast",
       toolGroups: [],
       mcpServers: [],
-      specialistAgents: [],
       skillIds: [],
       evidenceRequired: false,
     });
@@ -229,25 +213,12 @@ export const deterministicCapabilityPlan = (
       skillIds: ["dashi-ppt"],
       toolGroups: ["presentation-create"],
       mcpServers: [],
-      specialistAgents: [],
       evidenceRequired: false,
       writeMode: "consultative",
       requestedDocumentFields: undefined,
     });
   }
   const externalEvidenceRequest = requestsExternalEvidence(message);
-  if (/目标|课标|重点|难点/.test(message)) {
-    plan.skillIds.push("lesson-objective-review");
-    if (independentSpecialistPattern.test(message)) plan.specialistAgents.push("curriculum-analysis");
-  }
-  if (/过程|活动|问题链|板书|作业/.test(message)) {
-    plan.skillIds.push("lesson-process-design");
-    if (independentSpecialistPattern.test(message)) plan.specialistAgents.push("learning-design");
-  }
-  if (/评价|练习|达成|一致性/.test(message)) {
-    plan.skillIds.push("lesson-assessment-alignment");
-    if (independentSpecialistPattern.test(message)) plan.specialistAgents.push("assessment");
-  }
   if (externalEvidenceRequest) {
     plan.mcpServers.push("knowledge");
     plan.evidenceRequired = true;
@@ -282,21 +253,10 @@ export const deterministicCapabilityPlan = (
       "web_open" as const,
     ])];
   }
-  if (/检查|审查|批评|完整/.test(message)) {
-    plan.skillIds.push("lesson-critique");
-    if (independentSpecialistPattern.test(message)) plan.specialistAgents.push("critic");
-  }
-  // 整份重编是一个直接生产 A4 教案的任务。不要仅因正文出现“目标、
-  // 评价、知识点”等业务词就把它扩张成多 Agent 审查链。
-  //
-  // 写入技能与强制课标证据都预设本轮会产出教案，因此必须与写入授权
-  // 同源。教师只是在征求“要不要重写”时，本轮没有 propose 工具，挂上
-  // lesson-full-authoring 会直接抛 pi_skill_required_tool_missing；即便
-  // 补上工具，强制课标检索也会让一次如实作答以 evidence_required 结束。
+  // Full authoring retains its evidence contract. Professional judgment is a
+  // shared static policy; content words no longer select Skills or model calls.
   const lessonAuthoringRun = fullRewriteRequested && plan.writeMode !== "consultative";
   if (lessonAuthoringRun) {
-    plan.specialistAgents = [];
-    plan.skillIds = ["lesson-full-authoring"];
     const explicitlyNeedsExternalEvidence = attachmentReferencePattern.test(message)
       || /联网|搜索网页|新闻|当前政策|课程标准|课标|文献|作品原文|课文原文|出处|作者生平|事实核验|数据核验/.test(message);
     // A complete lesson must be aligned with the published standard even when
@@ -314,7 +274,6 @@ export const deterministicCapabilityPlan = (
     }
   }
   if (plan.minimalWriteRequested) {
-    plan.specialistAgents = [];
     plan.skillIds = [];
     if (!attachmentReferencePattern.test(message) && !/联网|搜索网页|课程标准|课标|文献|作品原文|课文原文|出处|作者生平|事实核验|数据核验/.test(message)) {
       plan.mcpServers = [];
@@ -325,7 +284,6 @@ export const deterministicCapabilityPlan = (
   return capabilityPlanSchema.parse({
     ...plan,
     skillIds: [...new Set(plan.skillIds)].slice(0, 3),
-    specialistAgents: [...new Set(plan.specialistAgents)].slice(0, 3),
     mcpServers: [...new Set(plan.mcpServers)].slice(0, 2),
   });
 };
@@ -419,20 +377,6 @@ export function isFastFollowUpMessage(message: string) {
 export function isFastChatTurn(message: string) {
   if (parseContinuityWritebackFeedbackId(message)) return false;
   return isConversationalControlMessage(message) || isFastFollowUpMessage(message);
-}
-
-export function enforceRequiredCapabilities(message: string, plan: CapabilityPlan): CapabilityPlan {
-  const toolGroups = new Set(plan.toolGroups);
-  toolGroups.add("document-read");
-  toolGroups.add("document-write");
-  return capabilityPlanSchema.parse({ ...plan, toolGroups: [...toolGroups] });
-}
-
-export function hasDeterministicRoutingSignal(plan: CapabilityPlan) {
-  return plan.skillIds.length > 0
-    || plan.specialistAgents.length > 0
-    || plan.mcpServers.length > 0
-    || plan.evidenceRequired;
 }
 
 export async function routeCapabilities(

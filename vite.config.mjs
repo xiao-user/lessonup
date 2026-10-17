@@ -7,10 +7,13 @@ export default defineConfig({
   build: {
     rollupOptions: {
       output: {
+        onlyExplicitManualChunks: true,
         manualChunks(id) {
+          if (id.includes("commonjsHelpers")) return "vendor-react";
           if (!id.includes("node_modules")) return undefined;
+          if (id.includes("/node_modules/@tiptap/") || /\/node_modules\/prosemirror-[^/]+\//.test(id)) return "vendor-editor";
           if (id.includes("/gsap/") || id.includes("/@gsap/")) return "vendor-gsap";
-          if (id.includes("/react/") || id.includes("/react-dom/") || id.includes("/scheduler/")) {
+          if (id.includes("/node_modules/react/") || id.includes("/node_modules/react-dom/") || id.includes("/node_modules/scheduler/")) {
             return "vendor-react";
           }
           return undefined;

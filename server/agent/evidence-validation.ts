@@ -42,7 +42,7 @@ export function evidenceRequiredToolError(missingKinds: AgentRunEvidenceKind[]) 
   return new Error(JSON.stringify({
     error: "evidence_required",
     missingKinds,
-    message,
+    message: `${message} 检索为空或来源不可用时，不要重复同样的检索或无依据提案。读取当前规范内容后，调用 complete_without_change（kind: insufficient_evidence），说明缺失来源及需要教师补充什么。`,
   }));
 }
 

@@ -54,7 +54,16 @@ export function lessonTurnContext(
           ? "presentation"
         : plan.writeMode,
       allowedWriteFields: readOnly ? null : plan.requestedDocumentFields ?? null,
-      completion: plan.lightweightConversation
+      evidence: {
+        required: plan.evidenceRequired,
+        kinds: plan.requiredEvidenceKinds ?? [],
+        instruction: "Required evidence must be retrieved before drafting a proposal. An empty search is not evidence for a write. If required sources are unavailable, read the canonical document and call complete_without_change with kind insufficient_evidence and the specific missing sources; do not repeat the same empty searches or submit unsupported proposals.",
+      },
+      taskIntent: plan.taskIntent,
+      alternativeCompletion: "complete_without_change after reading canonical content when no change is justified or evidence is insufficient",
+      completion: plan.taskIntent?.type === "learning_inquiry" ? "propose_learning_inquiry_or_explain_gap"
+        : plan.taskIntent?.type === "learning_review" ? "propose_learning_review_or_explain_gap"
+        : plan.lightweightConversation
         ? plan.presentationThemeDismissed ? "dismiss_presentation_theme" : "brief_reply_only"
         : plan.presentationRequested && plan.presentationThemeConfirmationRequired
           ? "ask_presentation_theme"
@@ -120,8 +129,10 @@ export function emptyRuntimeTools(): {
   tools: AgentTool<any>[];
   getProposal: () => PiCapturedProposal | null;
   getEvidenceAttempts: () => ReadonlySet<AgentRunEvidenceKind>;
+  getNoChange: () => null;
+  getLearningProposal: () => null;
 } {
-  return { tools: [], getProposal: () => null, getEvidenceAttempts: () => new Set() };
+  return { tools: [], getProposal: () => null, getNoChange: () => null, getLearningProposal: () => null, getEvidenceAttempts: () => new Set() };
 }
 
 export function isFastExecution(

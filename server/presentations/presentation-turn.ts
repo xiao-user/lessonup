@@ -27,7 +27,6 @@ function presentationPlan(plan: CapabilityPlan, theme?: DashiThemeId): Capabilit
     skillIds: ["dashi-ppt"],
     toolGroups: ["presentation-create"],
     mcpServers: [],
-    specialistAgents: [],
     writeMode: "consultative",
     lightweightConversation: false,
     executionLane: "agent",
@@ -45,7 +44,6 @@ function dismissedPlan(plan: CapabilityPlan): CapabilityPlan {
     skillIds: [],
     toolGroups: [],
     mcpServers: [],
-    specialistAgents: [],
     lightweightConversation: true,
     executionLane: "fast",
   };
@@ -159,7 +157,6 @@ export function resolvePresentationTurn(input: {
       skillIds: [],
       toolGroups: [],
       mcpServers: [],
-      specialistAgents: [],
       writeMode: "consultative",
       executionLane: "agent",
     },

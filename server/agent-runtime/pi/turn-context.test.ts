@@ -20,7 +20,6 @@ const basePlan = {
   writeMode: "consultative",
   mcpServers: [],
   skillIds: [],
-  specialistAgents: [],
 } as unknown as CapabilityPlan;
 
 const lessonContext = {

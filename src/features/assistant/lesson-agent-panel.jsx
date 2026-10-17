@@ -46,6 +46,8 @@ export function LessonAgentPanel({
   onBeforeRun,
   onDocumentDraft,
   onNavigateToSection,
+  learningRequest,
+  onLearningRequestHandled,
 }) {
   const [generationIntent, setGenerationIntent] = useState(null);
   const [generationIntentLoaded, setGenerationIntentLoaded] = useState(false);
@@ -62,6 +64,13 @@ export function LessonAgentPanel({
     // know whether this lesson already owns a server-side generation command.
     starterSuggestionsEnabled: generationIntentLoaded && !generationIntent,
   });
+  const previousStatus = useRef(chat.status);
+  useEffect(() => {
+    if (previousStatus.current !== "ready" && chat.status === "ready") {
+      window.dispatchEvent(new CustomEvent("lessonup:presentation-changed", { detail: { lessonFileId: file.id } }));
+    }
+    previousStatus.current = chat.status;
+  }, [chat.status, file.id]);
   const activeThread = chat.threads.find((thread) => thread.id === chat.activeThreadId);
   const [selectedDraftId, setSelectedDraftId] = useState(null);
   const documentApprovals = useMemo(() => [...chat.approvals].reverse().filter((item) => isDocumentApproval(item) && approvalPhase(item) !== "settled"), [chat.approvals]);
@@ -99,6 +108,19 @@ export function LessonAgentPanel({
   const [contextLessonNodes, setContextLessonNodes] = useState([]);
   const [loadingContextCatalog, setLoadingContextCatalog] = useState(false);
   const attachmentInputRef = useRef(null);
+
+  const handledLearningRequest = useRef(null);
+  useEffect(() => {
+    if (!learningRequest || handledLearningRequest.current === learningRequest.id
+      || chat.status === "loading" || !generationIntentLoaded) return;
+    handledLearningRequest.current = learningRequest.id;
+    onLearningRequestHandled?.(learningRequest.id);
+    if (chat.status !== "ready" || (generationIntent && generationIntentDispatchRef.current !== generationIntent.id)) {
+      toast.info(chat.status === "unconfigured" ? "AI 服务尚未配置，可先自行记录方案。" : "请先完成或恢复当前请求，再发起学习验证。");
+      return;
+    }
+    void chat.send(learningRequest.prompt, { taskIntent: learningRequest.taskIntent });
+  }, [chat.send, chat.status, generationIntent, generationIntentLoaded, learningRequest, onLearningRequestHandled]);
 
   useEffect(() => {
     const requestDashiPresentation = (event) => {

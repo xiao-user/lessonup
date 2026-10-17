@@ -384,17 +384,10 @@ describe("Pi production coordinator", () => {
     }];
     faux.setResponses([
       (context) => {
-        expect(context.systemPrompt).toContain("skill://lesson-full-authoring@1.1.1");
+        expect(context.systemPrompt).toContain("重要性是突出显示的首要依据");
         expect(context.systemPrompt).toContain("段落或清单已能表达清楚时不加小标题");
-        return fauxAssistantMessage(fauxToolCall("read_skill", {
-          id: "lesson-full-authoring", version: "1.1.1",
-        }), { stopReason: "toolUse" });
-      },
-      (context) => {
-        const received = JSON.stringify(context.messages ?? []);
-        expect(received).toContain("重要性是突出显示的首要依据");
-        expect(received).toContain("重要内容应得到恰当突出，但不必每处都涂色");
-        expect(received).toContain("不要把每条目标或每个要点都包装成“标题＋解释”");
+        expect(context.systemPrompt).not.toContain("<available_skills>");
+        expect((context.tools ?? []).map((tool) => tool.name)).not.toContain("read_skill");
         return fauxAssistantMessage(fauxToolCall("read_document", {}), { stopReason: "toolUse" });
       },
       fauxAssistantMessage(fauxToolCall("search_curriculum_standards", {
@@ -425,6 +418,8 @@ describe("Pi production coordinator", () => {
       operations: [{ field: "process", replacement: "学生圈画==关键证据==，再解释它如何支持判断。" }],
     });
     expect(await repository.getLessonFile(ownerId, lessonFileId)).toMatchObject({ documentVersion: 0 });
+    const run = await repository.getLatestRun(ownerId, created.thread.id, created.branch.id);
+    expect(run?.tokenUsage?.requests).toBe(3); // Read, evidence, proposal; no Skill-read request.
   });
 
   it("routes a running-turn instruction through Pi's native steering queue", async () => {
@@ -1011,6 +1006,40 @@ describe("Pi production coordinator", () => {
     expect((await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id)).filter(item => item.state === "pending")).toEqual([]);
   });
 
+  it("cancels a native provider stalled before its first token and replays cancellation without resending", async () => {
+    const { repository, created, faux, coordinator } = await fixture();
+    let started!: () => void;
+    const providerStarted = new Promise<void>((resolve) => { started = resolve; });
+    let calls = 0;
+    faux.setResponses([async (_context, options) => {
+      calls += 1; started();
+      await new Promise<void>((resolve) => {
+        if (options?.signal?.aborted) resolve();
+        else options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return fauxAssistantMessage("", { stopReason: "aborted" });
+    }]);
+    const input = { userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
+      message: "检查现有教学过程", activeSectionId: "process", documentVersion: 0, attachmentIds: [], clientCommandId: crypto.randomUUID() };
+    const events: any[] = [];
+    const runTask = coordinator.start(input, async (event, delivery) => {
+      events.push(event);
+      if (delivery?.persist !== false) await repository.appendRunEvent(ownerId, event.runId, event.type, event);
+    });
+    await providerStarted;
+    const run = (await repository.getLatestRun(ownerId, created.thread.id, created.branch.id))!;
+    await expect(coordinator.cancel("another-owner", run.id)).resolves.toBe(false);
+    await expect(coordinator.cancel(ownerId, run.id)).resolves.toBe(true);
+    await runTask;
+    expect(await repository.getRun(ownerId, run.id)).toMatchObject({ status: "cancelled" });
+    expect(events.some((event) => event.type === "run.completed" || event.type === "message.delta")).toBe(false);
+    const replay: any[] = [];
+    await coordinator.start(input, (event) => { replay.push(event); });
+    expect(replay.at(-1)).toMatchObject({ type: "run.cancelled", runId: run.id });
+    expect(calls).toBe(1);
+    expect(await repository.getThread(ownerId, created.thread.id)).toMatchObject({ status: "idle" });
+  });
+
   it.each(["getMessage", "appendMessage"] as const)("releases a legacy continuation after %s initialization fails and safely retries", async (method) => {
     const { repository, created, faux, coordinator } = await fixture();
     faux.setResponses([
@@ -1422,11 +1451,11 @@ describe("Pi production coordinator", () => {
     expect(assistant?.content).toBe("这次改完了，后面要调整再说一声就好。");
   });
 
-  it("does not make Fast chat wait for or depend on the Skill catalog", async () => {
+  it("keeps ordinary teaching and Fast chat independent of a failed Dashi catalog", async () => {
     const { repository, created, faux } = await fixture();
     const models = createModels();
     models.setProvider(faux.provider);
-    faux.setResponses([() => fauxAssistantMessage("不客气。")]);
+    faux.setResponses([fauxAssistantMessage("不客气。"), fauxAssistantMessage("先验证学生能否独立解释证据。")]);
     const coordinator = new PiLessonAgentCoordinator(repository, {
       model: faux.getModel(),
       streamFn: models.streamSimple.bind(models),
@@ -1436,15 +1465,17 @@ describe("Pi production coordinator", () => {
       } as never,
     });
 
-    await expect(coordinator.start({
-      userId: ownerId,
-      threadId: created.thread.id,
-      branchId: created.branch.id,
-      message: "谢谢",
-      activeSectionId: "assessment",
-      documentVersion: 0,
-      attachmentIds: [],
-    }, () => undefined)).resolves.toBeUndefined();
+    for (const message of ["谢谢", "先分析当前课堂最应该验证的问题，不修改教案。"]) {
+      await expect(coordinator.start({
+        userId: ownerId,
+        threadId: created.thread.id,
+        branchId: created.branch.id,
+        message,
+        activeSectionId: "assessment",
+        documentVersion: 0,
+        attachmentIds: [],
+      }, () => undefined)).resolves.toBeUndefined();
+    }
 
     const latest = await repository.getLatestRun(ownerId, created.thread.id, created.branch.id);
     expect(latest?.status).toBe("completed");
@@ -1911,6 +1942,31 @@ describe("Pi coordinator lesson questions, retrieval and diagnostics", () => {
       .toMatchObject({ status: "failed", error: "evidence_required" });
   });
 
+  it("exposes required sources before authoring and completes honestly when the search is empty", async () => {
+    const value = await fixture();
+    value.repository.searchCurriculumStandards = async () => [];
+    let turnContext = "";
+    value.faux.setResponses([
+      (context) => {
+        turnContext = turnContextOf(context);
+        return fauxAssistantMessage(fauxToolCall("read_document", {}), { stopReason: "toolUse" });
+      },
+      fauxAssistantMessage(fauxToolCall("search_curriculum_standards", { query: "语文 学段要求" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("complete_without_change", {
+        kind: "insufficient_evidence",
+        reason: "当前没有检索到本课必需的课标依据，请先补充可核验的课标来源，再编写完整教案。",
+      }), { stopReason: "toolUse" }),
+    ]);
+    await start(value, "请完整编写这节课的教案并提交确认");
+    expect(turnContext).toContain('"required":true');
+    expect(turnContext).toContain("curriculum_standard_search");
+    expect(turnContext).toContain("do not repeat the same empty searches");
+    expect(await value.repository.getLatestRun(ownerId, value.created.thread.id, value.created.branch.id))
+      .toMatchObject({ status: "completed" });
+    expect(await value.repository.listPendingApprovals(ownerId, value.created.thread.id, value.created.branch.id)).toHaveLength(0);
+    expect((await value.repository.getLessonFile(ownerId, lessonFileId))?.documentVersion).toBe(0);
+  });
+
   it("does not let a search that found nothing back a lesson change", async () => {
     const value = await fixture();
     value.repository.searchCurriculumStandards = async () => [];
@@ -1959,5 +2015,142 @@ describe("Pi coordinator lesson questions, retrieval and diagnostics", () => {
     } finally {
       log.mockRestore();
     }
+  });
+});
+
+describe("Pi teaching investigation", () => {
+  it("can investigate real feedback and retrieve evidence without routing keywords or specialist calls", async () => {
+    const { repository, created, faux, coordinator } = await fixture();
+    await repository.createLessonClassFeedback(ownerId, {
+      lessonFileId, kind: "practice_gap", statement: "学生能圈画句子，但不能解释它怎样支持温晴的判断。",
+    });
+    repository.searchKnowledge = async () => [{
+      id: "teaching-evidence", title: "已上传的课堂观察记录", kind: "private", score: 1,
+      passage: "让学生在引用句子后补充景物特征与判断之间的解释。",
+    }];
+    faux.setResponses([
+      (context) => {
+        const names = (context.tools ?? []).map((tool) => tool.name);
+        expect(names).toEqual(expect.arrayContaining([
+          "read_lesson_class_feedback", "read_lesson_design_basis", "search_knowledge", "search_curriculum_standards",
+        ]));
+        expect(names).not.toContain("read_skill");
+        expect(names).not.toContain("critic");
+        expect(names).not.toContain("assessment");
+        expect(context.systemPrompt).toContain("支持及反例");
+        return fauxAssistantMessage(fauxToolCall("read_lesson_class_feedback", {}), { stopReason: "toolUse" });
+      },
+      (context) => {
+        expect(JSON.stringify(context.messages)).toContain("不能解释它怎样支持温晴的判断");
+        return fauxAssistantMessage(fauxToolCall("search_knowledge", { query: "文本证据与判断之间的解释支架" }), { stopReason: "toolUse" });
+      },
+      (context) => {
+        expect(JSON.stringify(context.messages)).toContain("补充景物特征与判断之间的解释");
+        return fauxAssistantMessage("观察提示断点可能在解释而非找句子。先让学生独立补写一句证据与判断的联系，再比较是否仍需支架；目前不能认定调整已经有效。");
+      },
+    ]);
+    await coordinator.start({
+      userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
+      message: "先看看有什么值得保留的，以及最应该验证的假设。只分析。",
+      activeSectionId: "process", documentVersion: 0, attachmentIds: [],
+    }, () => undefined);
+    const run = await repository.getLatestRun(ownerId, created.thread.id, created.branch.id);
+    expect(run).toMatchObject({ status: "completed", tokenUsage: { requests: 3 }, capabilityPlan: { mcpServers: [] } });
+    expect(await repository.listRunEvidence(ownerId, run!.id)).toMatchObject([{ kind: "knowledge_search" }]);
+    expect(await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id)).toHaveLength(0);
+    expect((await repository.getLessonFile(ownerId, lessonFileId))?.documentVersion).toBe(0);
+  });
+});
+
+describe("Pi grounded completion and learning proposals", () => {
+  it("keeps a structured analysis action read-only even when its text asks for a write", async () => {
+    const { repository, created, faux, coordinator } = await fixture();
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("read_document", {}), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("propose_document_patch", { summary: "修改评价", operations: [{ field: "assessment", replacement: "不应写入" }] }), { stopReason: "toolUse" }),
+      fauxAssistantMessage("本轮只作分析：保留现稿，并核对学生能否用文本证据解释判断。"),
+    ]);
+    await coordinator.start({ userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
+      message: "请直接修改评价练习。", taskIntent: { type: "analysis" }, activeSectionId: "assessment", documentVersion: 0, attachmentIds: [],
+    }, () => undefined);
+    expect(await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id)).toHaveLength(0);
+    expect((await repository.getLessonFile(ownerId, lessonFileId))?.documentVersion).toBe(0);
+    expect(await repository.getLatestRun(ownerId, created.thread.id, created.branch.id)).toMatchObject({ status: "completed" });
+  });
+  it("completes an explicit change request without inventing a patch when the current content is sufficient", async () => {
+    const { repository, created, faux, coordinator } = await fixture();
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("read_document", {}), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("complete_without_change", {
+        kind: "no_change_needed", reason: "现稿已要求学生用两处文本证据回答中心问题，活动与评价已对应，没有必要再增加同类任务。",
+      }), { stopReason: "toolUse" }),
+    ]);
+    const events: Array<{ type: string; outcome?: string }> = [];
+    await coordinator.start({ userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
+      message: "请先检查评价是否已经直接检验本课目标。只有确有必要时修改评价栏目；否则保留现稿，通过无修改完成说明具体理由。不要增加重复任务。", taskIntent: { type: "document_write", fields: ["assessment"] }, activeSectionId: "assessment", documentVersion: 0, attachmentIds: [],
+    }, (event) => { events.push(event); });
+    const run = await repository.getLatestRun(ownerId, created.thread.id, created.branch.id);
+    expect(run).toMatchObject({ status: "completed", tokenUsage: { requests: 2 } });
+    expect(events.some((event) => event.type === "tool.completed" && event.outcome === "no_change")).toBe(true);
+    expect((await repository.getMessage(ownerId, run!.assistantMessageId!))?.content).toContain("没有必要再增加");
+    expect(await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id)).toHaveLength(0);
+    expect((await repository.getLessonFile(ownerId, lessonFileId))?.documentVersion).toBe(0);
+  });
+
+  it("lets a structured learning action produce a scoped proposal, never a document write or teacher decision", async () => {
+    const { repository, created, faux, coordinator } = await fixture();
+    const { LearningService } = await import("../../learning/service.js");
+    const service = new LearningService(repository);
+    const baseline = await service.recordEvidence({ ownerId, lessonFileId }, {
+      documentVersion: 0, objective: "解释文本证据如何支持温晴", task: "独立解释一处景物证据", criterion: "说清证据与判断的联系",
+      learnerGroup: "一班", observation: "能够圈画但解释不充分", method: "student_work",
+      observedAt: new Date(Date.now() - 60_000).toISOString(), sourceReference: "课堂解释卡",
+    }, "pi-learning-baseline");
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("read_learning_progress", {}), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("propose_learning_inquiry", {
+        hypothesis: "困难可能在连接证据与结论", alternativeExplanation: "也可能受书面表达负担影响",
+        intervention: "先口头解释证据的作用再补写一句联系", expectedSignal: "学生独立解释证据与结论的联系",
+        checkPlan: "以同一判据比较下一次独立作答，并保留未达成样本",
+      }), { stopReason: "toolUse" }),
+    ]);
+    const events: string[] = [];
+    await coordinator.start({ userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
+      message: "请准备学习改进方案。", taskIntent: { type: "learning_inquiry", evidenceId: baseline.id },
+      activeSectionId: "process", documentVersion: 0, attachmentIds: [],
+    }, (event) => { events.push(event.type); });
+    const run = await repository.getLatestRun(ownerId, created.thread.id, created.branch.id);
+    expect(run).toMatchObject({ status: "completed", tokenUsage: { requests: 2 } });
+    const progress = await service.read({ ownerId, lessonFileId });
+    expect(progress.inquiries).toHaveLength(1);
+    expect(progress.inquiries[0]).toMatchObject({ state: "proposed", sourceRunId: run!.id, baselineEvidenceId: baseline.id });
+    expect(progress.inquiries[0]!.implementedAt).toBeUndefined();
+    expect(events).toContain("learning.updated");
+    expect(await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id)).toHaveLength(0);
+    expect((await repository.getLessonFile(ownerId, lessonFileId))?.documentVersion).toBe(0);
+
+    const inquiry = progress.inquiries[0]!;
+    await service.act({ ownerId, lessonFileId }, inquiry.id, { action: "adopt", expectedVersion: 0 }, "adopt");
+    const implemented = await service.act({ ownerId, lessonFileId }, inquiry.id, { action: "implement", expectedVersion: 1 }, "implement");
+    const followup = await service.recordEvidence({ ownerId, lessonFileId }, {
+      documentVersion: 0, objective: baseline.objective, task: "独立解释另一处词句", criterion: baseline.criterion,
+      learnerGroup: baseline.learnerGroup, observation: "能解释证据与结论的联系", method: "student_work",
+      observedAt: new Date().toISOString(), sourceReference: "后续独立解释卡", inquiryId: inquiry.id,
+    }, "followup");
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("read_learning_progress", {}), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("propose_learning_review", {
+        outcome: "supported", rationale: "独立解释出现，符合预期信号", limitations: "任务熟悉度仍可能影响表现，不能证明因果效果",
+      }), { stopReason: "toolUse" }),
+    ]);
+    await coordinator.start({ userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
+      message: "请核对复测证据，提出待审议建议。", taskIntent: { type: "learning_review", inquiryId: inquiry.id, evidenceId: followup.id, expectedVersion: implemented.version },
+      activeSectionId: "assessment", documentVersion: 0, attachmentIds: [],
+    }, () => undefined);
+    const reviewRun = await repository.getLatestRun(ownerId, created.thread.id, created.branch.id);
+    expect(reviewRun).toMatchObject({ status: "completed", tokenUsage: { requests: 2 } });
+    const updated = (await service.read({ ownerId, lessonFileId })).inquiries[0]!;
+    expect(updated).toMatchObject({ state: "implemented", proposedReview: { outcome: "supported", evidenceId: followup.id, sourceRunId: reviewRun!.id } });
+    expect(updated.review).toBeUndefined();
   });
 });

@@ -21,6 +21,9 @@ const testAuthentication: SessionAuthentication = {
 };
 const app = createApp(repository, {
   agent: new DeterministicAgentHarness(repository),
+  // Test-only suggestion transport. Production model behavior is validated
+  // separately; UI performance must not include deliberate missing-provider 503s.
+  threadStarterGenerator: async () => ["测试建议：检查学习目标与评价的一致性"],
   authentication: testAuthentication,
   knowledgeUploads: new KnowledgeUploadService(repository, objectStorage, sourceStore),
 });

@@ -1,5 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { tmpdir } from "node:os";
+import { gradeApprovalRequirement, gradeToolRequirements } from "./tool-outcomes.js";
 import { resolveEvalGraderConfig } from "./config.js";
 import { createPiGraderClient } from "./pi-grader.js";
 import {
@@ -22,6 +24,7 @@ type EvalCase = {
   requiredTools?: string[];
   forbiddenTools?: string[];
   requiresApproval: boolean;
+  allowsNoChange?: boolean;
   requiresSource: boolean;
   rubric: string[];
   minimumRubricScore?: number;
@@ -256,10 +259,11 @@ for (const testCase of cases) {
   let designBasis: unknown;
   let curriculumKnowledge: unknown;
   let frameworkContinuity: unknown;
+  let classroomFeedback: unknown;
   let assistantResponse = "";
   let approvalPatch: unknown;
   let runActivity: RunActivity | null = null;
-  let performance: AgentEvalPerformance = {
+  let metrics: AgentEvalPerformance = {
     durationMs: 0,
     firstSafeEventMs: null,
     firstProviderEventMs: null,
@@ -277,6 +281,9 @@ for (const testCase of cases) {
       frameworkContinuity = await request(
         `/api/semester-frameworks/${process.env.LESSONUP_EVAL_SEMESTER_FRAMEWORK_ID}/continuity`,
       ).catch(() => null);
+      classroomFeedback = await request(
+        `/api/semester-frameworks/${process.env.LESSONUP_EVAL_SEMESTER_FRAMEWORK_ID}/class-feedback`,
+      );
     } else {
       lessonFile = await request<NonNullable<typeof lessonFile>>(
         `/api/lesson-files/${process.env.LESSONUP_EVAL_LESSON_FILE_ID}`,
@@ -284,6 +291,9 @@ for (const testCase of cases) {
       designBasis = await request(
         `/api/lesson-files/${process.env.LESSONUP_EVAL_LESSON_FILE_ID}/design-basis`,
       ).catch(() => null);
+      classroomFeedback = await request(
+        `/api/lesson-files/${process.env.LESSONUP_EVAL_LESSON_FILE_ID}/class-feedback`,
+      );
       const textbookId = lessonFile.contextProfile?.textbookId;
       const curriculumNodeId = lessonFile.contextProfile?.lessonNodeId
         ?? lessonFile.contextProfile?.unitNodeId;
@@ -304,10 +314,10 @@ for (const testCase of cases) {
         : lessonFile!.documentVersion,
     });
     events = streamed.events;
-    performance.durationMs = Math.round(performance.now() - startedAt);
-    performance.firstSafeEventMs = streamed.firstSafeEventMs;
-    performance.firstProviderEventMs = streamed.firstProviderEventMs;
-    performance.firstOutputMs = streamed.firstOutputMs;
+    metrics.durationMs = Math.round(performance.now() - startedAt);
+    metrics.firstSafeEventMs = streamed.firstSafeEventMs;
+    metrics.firstProviderEventMs = streamed.firstProviderEventMs;
+    metrics.firstOutputMs = streamed.firstOutputMs;
     runActivity = await request<RunActivity>(
       `/api/agent/threads/${created.thread.id}/activity?branchId=${created.branch.id}`,
     ).catch(() => null);
@@ -334,10 +344,10 @@ for (const testCase of cases) {
   const toolNames = events
     .filter((event) => event.type === "tool.started" && event.name)
     .map((event) => event.name as string);
-  performance.toolCalls = toolNames.length;
-  performance.modelRequests = runActivity?.run?.tokenUsage?.requests ?? null;
-  performance.inputTokens = runActivity?.run?.tokenUsage?.inputTokens ?? null;
-  performance.cachedInputTokens = runActivity?.run?.tokenUsage?.cachedInputTokens ?? null;
+  metrics.toolCalls = toolNames.length;
+  metrics.modelRequests = runActivity?.run?.tokenUsage?.requests ?? null;
+  metrics.inputTokens = runActivity?.run?.tokenUsage?.inputTokens ?? null;
+  metrics.cachedInputTokens = runActivity?.run?.tokenUsage?.cachedInputTokens ?? null;
   const proposalRevisionCodes = events
     .filter((event) => event.type === "tool.completed" && event.revisionCode)
     .map((event) => event.revisionCode as string);
@@ -347,22 +357,13 @@ for (const testCase of cases) {
   const runErrors = events
     .filter((event) => event.type === "run.failed" && event.error)
     .map((event) => event.error as string);
-  const failures: string[] = [];
-  for (const tool of testCase.requiredTools ?? []) {
-    if (!toolNames.includes(tool)) failures.push(`missing_required_tool:${tool}`);
-  }
-  if (testCase.requiredAnyTools?.length && !testCase.requiredAnyTools.some((tool) => toolNames.includes(tool))) {
-    failures.push(`missing_required_tool_group:${testCase.requiredAnyTools.join("|")}`);
-  }
-  for (const tool of testCase.forbiddenTools ?? []) {
-    if (toolNames.includes(tool)) failures.push(`forbidden_tool:${tool}`);
-  }
+  const failures = gradeToolRequirements(testCase, events);
   const hasApproval = events.some((event) => event.type === "approval.required");
-  if (hasApproval !== testCase.requiresApproval) failures.push(`approval_mismatch:${hasApproval}`);
+  failures.push(...gradeApprovalRequirement(testCase, events));
   const hasSource = events.some((event) => event.type === "source.added");
   if (testCase.requiresSource && !hasSource) failures.push("missing_source");
   if (events.some((event) => event.type === "run.failed")) failures.push("run_failed");
-  failures.push(...gradePerformance(performance, performanceBudget));
+  failures.push(...gradePerformance(metrics, performanceBudget));
   if (
     testCase.rejectInternalImplementationDetails !== false
     && exposesInternalImplementationDetails(assistantResponse)
@@ -395,6 +396,7 @@ for (const testCase of cases) {
       curriculumKnowledge,
       semesterFramework,
       frameworkContinuity,
+      classroomFeedback,
     },
     rubric,
     observed: {
@@ -426,8 +428,11 @@ for (const testCase of cases) {
       toolOutcomes,
       runErrors,
     },
-    performance,
+    performance: metrics,
     assistantResponse,
+    reviewMaterial: { prompt: testCase.prompt, document: isFrameworkCase ? semesterFramework : lessonFile?.document,
+      businessContext: { resourceType: isFrameworkCase ? "semester_framework" : "lesson_file",
+        designBasis, curriculumKnowledge, semesterFramework, frameworkContinuity, classroomFeedback } },
     businessGrade,
   });
 }
@@ -440,7 +445,7 @@ const output = {
   passed: results.filter((result) => result.passed).length,
   total: results.length,
 };
-const resultsDir = path.resolve("evals/results");
+const resultsDir = path.resolve(process.env.LESSONUP_EVAL_OUTPUT_DIR ?? path.join(tmpdir(), "lessonup-evals", "agent"));
 await mkdir(resultsDir, { recursive: true });
 await writeFile(path.join(resultsDir, "latest.json"), `${JSON.stringify(output, null, 2)}\n`);
 console.log(`Agent evals: ${output.passed}/${output.total} automated gates passed.`);

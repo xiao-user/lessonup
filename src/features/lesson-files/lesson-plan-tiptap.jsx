@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 import { Eraser, Eye, FileText, LoaderCircle, RefreshCw, Trash2 } from "lucide-react";
 
@@ -7,6 +7,7 @@ import {
   lessonFieldExtensions,
   parseLessonMarkdown,
   serializeLessonMarkdown,
+  renderLessonMarkdownHtml,
 } from "./lesson-markdown";
 
 const fieldExtensions = lessonFieldExtensions;
@@ -47,7 +48,19 @@ function editorKey(field, start, end) {
   return `${field}:${start ?? 0}:${end ?? ""}`;
 }
 
-function LessonFieldEditor({
+const ReadOnlyLessonField = memo(function ReadOnlyLessonField({ field, value, start = 0, end, label }) {
+  const html = useMemo(() => renderLessonMarkdownHtml(value), [value]);
+  return <div className="lesson-field-editor" data-field={field} data-start={start} data-end={end}>
+    <div className="lesson-tiptap-field" aria-label={label} contentEditable={false} dangerouslySetInnerHTML={{ __html: html }} />
+  </div>;
+});
+
+function LessonFieldEditor(props) {
+  return props.readOnly ? <ReadOnlyLessonField field={props.field} value={props.value} start={props.start} end={props.end} label={props.label} />
+    : <EditableLessonField {...props} />;
+}
+
+function EditableLessonField({
   field,
   value,
   start = 0,
@@ -350,7 +363,7 @@ export function PresentationMaterialRow({
  * isolated Tiptap instance. Rich-text transactions therefore cannot rewrite
  * sibling modules, while pagination remains a pure projection of the plan.
  */
-export function LessonPlanTiptapEditor({
+export const LessonPlanTiptapEditor = memo(function LessonPlanTiptapEditor({
   plan,
   pages,
   readOnly = false,
@@ -457,4 +470,4 @@ export function LessonPlanTiptapEditor({
       ))}
     </div>
   );
-}
+});

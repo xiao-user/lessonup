@@ -1,3 +1,5 @@
+import { applyTaskIntent } from "../../conversation/task-intent.js";
+import type { AgentTaskIntent } from "../../domain.js";
 import type { Model } from "@earendil-works/pi-ai";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { config } from "../../config.js";
@@ -35,6 +37,7 @@ export type PiStartRunInput = {
   threadId: string;
   branchId: string;
   message: string;
+  taskIntent?: AgentTaskIntent;
   activeSectionId: string;
   activeUnitId?: string;
   documentVersion: number;
@@ -155,6 +158,8 @@ export class PiLessonAgentCoordinator {
     if (pendingOnBranch.some((item) => item.state === "pending" && !isDocumentDraftPatch(item.patch))) {
       throw new Error("active_run_exists");
     }
+    if (input.taskIntent && (input.generationIntentId || input.frameworkWritebackIntentId)) throw new Error("multiple_start_intents_invalid");
+    if (input.taskIntent && input.taskIntent.type !== "analysis" && existingThread.resourceType !== "lesson_file") throw new Error("agent_task_scope_invalid");
     if (input.generationIntentId && input.frameworkWritebackIntentId) {
       throw new Error("multiple_start_intents_invalid");
     }
@@ -187,6 +192,9 @@ export class PiLessonAgentCoordinator {
       : null;
     if (input.continuation && continuationRun?.status !== "failed") {
       throw new Error("run_not_continuable");
+    }
+    if (continuationRun && input.taskIntent && JSON.stringify(input.taskIntent) !== JSON.stringify(continuationRun.capabilityPlan?.taskIntent)) {
+      throw new Error("continuation_intent_conflict");
     }
     const effectiveInput = continuationRun
       ? { ...input, attachmentIds: continuationRun.attachmentSourceIds ?? [] }
@@ -248,13 +256,13 @@ export class PiLessonAgentCoordinator {
           createdAt: startedAt,
         }
         : undefined;
-      const initialPlan = continuationRun?.capabilityPlan
+      const initialPlan = applyTaskIntent(continuationRun?.capabilityPlan
         ?? await routeCapabilities(input.message, {
           signal: controller.signal,
           attachmentSourceIds: effectiveInput.attachmentIds,
           activeSectionId: input.activeSectionId,
           selectionField: input.selection?.field,
-        });
+        }), input.taskIntent);
       const skipDesignBasis = isFastExecution(initialPlan, effectiveInput, continuationRun);
       const contextP = loadPreparationContext(this.repository, {
         ...effectiveInput,
@@ -350,18 +358,17 @@ export class PiLessonAgentCoordinator {
       let runtimeTools: ReturnType<PiToolSurface["toolsForLesson"]>;
       let runtimeTurnContext: unknown;
       if (isSemesterFrameworkAgentContext(context)) {
-        plan = { ...initialPlan, skillIds: [], specialistAgents: [], presentationRequested: false };
+        plan = { ...initialPlan, skillIds: [], presentationRequested: false };
         const fast = isFastExecution(plan, effectiveInput, continuationRun);
         const resolvedTurn = resolveTurn({ plan });
         skills = [];
         pinnedSkills = [];
-        if (!fast) await this.ready;
         runtimeTools = fast ? emptyRuntimeTools() : this.toolSurface.toolsForSemester(context, plan, resolvedTurn.toolSurface);
         runtimeTurnContext = semesterTurnContext(context, plan, fast ? "none" : resolvedTurn.toolSurface);
       } else {
         const currentLesson = context as LessonAgentContext;
         currentLesson.attachmentSourceIds = attachments.map((source) => source.id);
-        plan = continuationRun?.capabilityPlan ?? (
+        plan = applyTaskIntent(continuationRun?.capabilityPlan ?? (
           skipDesignBasis
             ? initialPlan
             : await routeCapabilities(input.message, {
@@ -372,10 +379,13 @@ export class PiLessonAgentCoordinator {
               activeSectionId: currentLesson.activeSectionId,
               selectionField: currentLesson.selection?.field,
             })
-        );
+        ), input.taskIntent);
         const branch = await this.repository.getBranch(input.userId, input.threadId, input.branchId);
         if (!branch) throw new Error("thread_scope_invalid");
-        const presentationTurn = continuationRun ? null : resolvePresentationTurn({
+        if (plan.taskIntent && branch.pendingInteraction) {
+          await this.repository.updateBranch(input.userId, input.threadId, input.branchId, { pendingInteraction: null });
+        }
+        const presentationTurn = continuationRun || plan.taskIntent ? null : resolvePresentationTurn({
           message: input.message,
           routedPlan: plan,
           pendingInteraction: branch.pendingInteraction,
@@ -401,10 +411,8 @@ export class PiLessonAgentCoordinator {
           runtimeTools = emptyRuntimeTools();
           runtimeTurnContext = lessonTurnContext(currentLesson, attachments, plan, "none", presentationRequest);
         } else {
-          // Skill discovery is irrelevant to Fast chat. Its cold-start work
-          // runs in parallel from construction and is awaited only once this
-          // turn has actually selected the Agent lane.
-          await this.ready;
+          // Only the separate presentation workflow depends on its Skill.
+          if (plan.presentationRequested) await this.ready;
           if (skipDesignBasis) {
             const basis = await this.repository.getLessonDesignBasis(input.userId, currentLesson.lessonFileId);
             if (!basis) throw new Error("thread_scope_invalid");
@@ -467,6 +475,7 @@ export class PiLessonAgentCoordinator {
             "继续使用当前会话里已经读取的规范教案与工具错误；每项修改提交完整语义字段 replacement，由服务端绑定当前字段快照，不要复述或猜测定位原文。",
             "调用 propose_document_patch；如果上一次提案被工具拒绝，按返回的结构化错误修正，不要用文字宣称已完成。",
           ].join("\n");
+      const learningTask = plan.taskIntent?.type === "learning_inquiry" || plan.taskIntent?.type === "learning_review";
       const requiredCompletion = fastLane
         ? undefined
         : plan.presentationRequested && !plan.presentationThemeConfirmationRequired
@@ -475,13 +484,17 @@ export class PiLessonAgentCoordinator {
             followUp: presentationCompletionPrompt,
             maxFollowUps: 2,
           }
-        : plan.writeMode === "explicit"
+        : plan.writeMode === "explicit" || learningTask
           ? {
               isComplete: () => {
                 const proposal = runtimeTools.getProposal();
-                return proposal != null && proposal.patchKind !== "presentation_storyboard";
+                return Boolean(runtimeTools.getNoChange() || (learningTask
+                  ? runtimeTools.getLearningProposal()
+                  : proposal != null && proposal.patchKind !== "presentation_storyboard"));
               },
-              followUp: writeCompletionPrompt,
+              followUp: learningTask
+                ? "请读取学习证据并提出教学改进或复测审议建议；若证据不足，读取当前教案后调用 complete_without_change 说明缺口。不能编造观察或替教师确认实施和效果。"
+                : `${writeCompletionPrompt}\n如果规范内容已符合要求，或证据不足无法负责任地修改，调用 complete_without_change 说明具体原因，不要硬造提案。`,
               maxFollowUps: 2,
             }
           : undefined;
@@ -549,11 +562,16 @@ export class PiLessonAgentCoordinator {
       ) {
         throw new Error("presentation_proposal_missing");
       }
-      if (plan.writeMode === "explicit" && (!proposal || proposal.patchKind === "presentation_storyboard")) {
+      const noChange = runtimeTools.getNoChange();
+      const learningProposal = runtimeTools.getLearningProposal();
+      if (((plan.writeMode === "explicit" && (!proposal || proposal.patchKind === "presentation_storyboard")) || (learningTask && !learningProposal)) && !noChange) {
         throw new Error("write_proposal_missing");
       }
       const evidence = await this.repository.listRunEvidence(input.userId, runId);
-      if (!proposal && validateObservedEvidence({
+      // A grounded no-op is based on canonical reads and makes no mutation.
+      // Retrieval gates for new claims/writes must not force needless searches
+      // merely to preserve an already sufficient lesson.
+      if (!proposal && !learningProposal && !noChange && validateObservedEvidence({
         plan,
         evidence,
         attemptedKinds: runtimeTools.getEvidenceAttempts(),
@@ -567,7 +585,8 @@ export class PiLessonAgentCoordinator {
       const hidePresentationProse = Boolean(proposal)
         && plan.presentationRequested
         && !plan.presentationThemeConfirmationRequired;
-      content = hidePresentationProse ? "" : result.content || content || "";
+      content = hidePresentationProse ? "" : noChange?.reason
+        ?? (learningProposal ? (learningProposal.proposedReview ? "复测审议建议已准备，请在学习验证中核对证据与限制后确认。" : "学习改进方案已准备，请在学习验证中审阅并决定是否采用。") : result.content || content || "");
       if (proposal) {
         await this.approvals.commit({
           userId: input.userId,
@@ -600,6 +619,9 @@ export class PiLessonAgentCoordinator {
         messageSources: sources,
         sessionCursor: result.sessionCursor,
       });
+      if (learningProposal && !isSemesterFrameworkAgentContext(context)) {
+        await emit({ type: "learning.updated", runId, lessonFileId: context.lessonFileId, inquiryId: learningProposal.id });
+      }
       const message = await this.repository.getMessage(input.userId, assistant.id) ?? assistant;
       await emit({ type: "message.completed", runId, message });
       await emit({ type: "run.completed", runId, transportTiming: result.transportTiming });
@@ -699,6 +721,7 @@ function fingerprintRunCommand(input: PiStartRunInput) {
     generationIntentId: input.generationIntentId ?? null,
     frameworkWritebackIntentId: input.frameworkWritebackIntentId ?? null,
     thinkingLevel: input.thinkingLevel ?? null,
+    taskIntent: input.taskIntent ?? null,
   });
 }
 

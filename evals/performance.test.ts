@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { gradePerformance, isSafePublicEvent, resolvePerformanceBudget } from "./performance.js";
+import { gradeFrontendPerformance, gradePerformance, isSafePublicEvent, resolveFrontendPerformanceBudget, resolvePerformanceBudget } from "./performance.js";
 
 const environment = {
   LESSONUP_EVAL_ENFORCE_PERFORMANCE_BUDGET: "1",
@@ -9,6 +9,17 @@ const environment = {
   LESSONUP_EVAL_MAX_TOOL_CALLS: "6",
   LESSONUP_EVAL_MAX_INPUT_TOKENS: "24000",
 };
+
+describe("browser performance budget", () => {
+  it("requires explicit measured budgets and fails missing or over-budget observations", () => {
+    expect(resolveFrontendPerformanceBudget({})).toBeNull();
+    expect(() => resolveFrontendPerformanceBudget({ LESSONUP_UI_ENFORCE_BUDGET: "1" })).toThrow("LESSONUP_UI_MAX_INPUT_MS");
+    const budget = resolveFrontendPerformanceBudget({ LESSONUP_UI_ENFORCE_BUDGET: "1", LESSONUP_UI_MAX_INPUT_MS: "1000", LESSONUP_UI_MAX_BLOCKING_MS: "1000", LESSONUP_UI_MAX_FRAME_GAP_MS: "500" });
+    expect(gradeFrontendPerformance({ inputMs: 500, streaming: { blockingTimeMs: 400, maximumFrameGapMs: 200 } }, budget)).toEqual([]);
+    expect(gradeFrontendPerformance({ inputMs: 1500, streaming: { blockingTimeMs: 1400, maximumFrameGapMs: null } }, budget)).toHaveLength(3);
+    expect(gradeFrontendPerformance({ inputMs: NaN, streaming: { blockingTimeMs: Infinity, maximumFrameGapMs: NaN } }, budget)).toHaveLength(3);
+  });
+});
 
 describe("agent eval performance budget", () => {
   it("records without enforcing a budget during ordinary diagnostic evals", () => {

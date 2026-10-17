@@ -4,8 +4,6 @@ import { createNodeSkillRegistry } from "./skill-registry-node.js";
 import {
   deterministicCapabilityPlan,
   documentWriteMode,
-  enforceRequiredCapabilities,
-  hasDeterministicRoutingSignal,
   isConversationalControlMessage,
   isFastChatTurn,
   isFastFollowUpMessage,
@@ -14,7 +12,7 @@ import {
   routeCapabilities,
 } from "./capability-router.js";
 
-describe("enforceRequiredCapabilities", () => {
+describe("deterministic turn policy", () => {
   it("keeps acknowledgements tool-free instead of inheriting the preceding task", () => {
     for (const message of ["好", "好的", "没问题", "收到", "OK", "Thanks", "Thank you", "Got it"]) {
       expect(deterministicCapabilityPlan(message), message).toMatchObject({
@@ -33,7 +31,6 @@ describe("enforceRequiredCapabilities", () => {
       skillIds: ["dashi-ppt"],
       toolGroups: ["presentation-create"],
       mcpServers: [],
-      specialistAgents: [],
       writeMode: "consultative",
       evidenceRequired: false,
     });
@@ -55,29 +52,7 @@ describe("enforceRequiredCapabilities", () => {
     }
   });
 
-  it("keeps document writes available when the model router omits them", () => {
-    const plan = enforceRequiredCapabilities("请替换教学目标第一条并提交修改建议", {
-      skillIds: ["lesson-objective-review"],
-      toolGroups: ["document-read"],
-      mcpServers: [],
-      specialistAgents: ["curriculum-analysis"],
-      evidenceRequired: false,
-    });
 
-    expect(plan.toolGroups).toEqual(["document-read", "document-write"]);
-  });
-
-  it("keeps the approval-gated write tool available for read-only questions", () => {
-    const plan = enforceRequiredCapabilities("概括当前教学目标", {
-      skillIds: [],
-      toolGroups: ["document-read"],
-      mcpServers: [],
-      specialistAgents: [],
-      evidenceRequired: false,
-    });
-
-    expect(plan.toolGroups).toEqual(["document-read", "document-write"]);
-  });
 
   it("does not require external evidence merely because the teacher asks for current content", () => {
     expect(deterministicCapabilityPlan("查看当前教学内容")).toMatchObject({
@@ -101,23 +76,14 @@ describe("enforceRequiredCapabilities", () => {
     });
   });
 
-  it("keeps broad optimization intent consultative without hiding the standard write tool", () => {
-    expect(requiresDocumentWrite("你认为现在还有哪些需要调整和优化？")).toBe(false);
-    const plan = enforceRequiredCapabilities("你认为现在还有哪些需要调整和优化？", {
-      skillIds: ["lesson-critique"],
-      toolGroups: ["document-read", "document-write"],
-      mcpServers: [],
-      specialistAgents: ["critic"],
-      evidenceRequired: false,
-    });
-    expect(plan.toolGroups).toEqual(["document-read", "document-write"]);
-  });
 
   it("recognizes an explicit optimization command as write intent", () => {
     expect(requiresDocumentWrite("请优化教学目标并提交修改")).toBe(true);
     expect(requiresDocumentWrite("按照这些内容重新更改教学重点难点")).toBe(true);
     expect(requiresDocumentWrite("只对最关键一处问题提交最小修改建议，等待我确认后再写入")).toBe(true);
     expect(requiresDocumentWrite("先判断当前教案是否需要调整，不要写入")).toBe(false);
+    expect(requiresDocumentWrite("先分析当前课堂最应该验证的问题，不修改教案。")).toBe(false);
+    expect(requiresDocumentWrite("这处问题不得不修改，请提交修改确认。")).toBe(true);
     expect(requiresDocumentWrite("重新编写教案")).toBe(true);
     expect(requiresDocumentWrite("重新整理当前教案")).toBe(true);
     expect(requiresDocumentWrite("好的，请按上面的方案调整教案")).toBe(true);
@@ -198,7 +164,7 @@ describe("enforceRequiredCapabilities", () => {
     expect(deterministicCapabilityPlan("重新整理当前教案")).toMatchObject({
       writeMode: "explicit",
       fullRewriteRequested: true,
-      skillIds: ["lesson-full-authoring"],
+      skillIds: [],
       requestedDocumentFields: undefined,
       mcpServers: ["knowledge"],
       evidenceRequired: true,
@@ -208,7 +174,7 @@ describe("enforceRequiredCapabilities", () => {
       expect(deterministicCapabilityPlan(message), message).toMatchObject({
         writeMode: "explicit",
         fullRewriteRequested: true,
-        skillIds: ["lesson-full-authoring"],
+        skillIds: [],
       });
     }
   });
@@ -224,9 +190,6 @@ describe("enforceRequiredCapabilities", () => {
       expect(deterministicCapabilityPlan(message), message).toMatchObject({
         writeMode: "consultative",
         fullRewriteRequested: true,
-        // The authoring skill requires propose_document_patch, which a
-        // consultative turn never creates. Selecting it here used to fail the
-        // run before the model was called.
         skillIds: [],
         evidenceRequired: false,
       });
@@ -270,8 +233,6 @@ describe("enforceRequiredCapabilities", () => {
     ]) {
       const plan = deterministicCapabilityPlan(message);
       const requiredTools = registry.resolve(plan.skillIds).flatMap((skill) => skill.requiredTools);
-      // Mirrors the single authority decision in PiLessonAgentCoordinator:
-      // the document proposal tool exists only outside a consultative turn.
       if (plan.writeMode === "consultative") {
         expect(requiredTools, message).not.toContain("propose_document_patch");
       }
@@ -294,7 +255,6 @@ describe("enforceRequiredCapabilities", () => {
       executionLane: "fast",
       writeMode: "consultative",
       toolGroups: [],
-      specialistAgents: [],
       mcpServers: [],
     });
     expect(deterministicCapabilityPlan("可以")).toMatchObject({
@@ -334,7 +294,6 @@ describe("enforceRequiredCapabilities", () => {
       minimalWriteRequested: true,
       fullRewriteRequested: false,
       skillIds: [],
-      specialistAgents: [],
       mcpServers: [],
       evidenceRequired: false,
     });
@@ -422,7 +381,6 @@ describe("enforceRequiredCapabilities", () => {
       mcpServers: ["knowledge"],
       evidenceRequired: true,
       requiredEvidenceKinds: ["curriculum_standard_search"],
-      specialistAgents: [],
     });
   });
 
@@ -453,10 +411,9 @@ describe("enforceRequiredCapabilities", () => {
 
   it("routes an explicit document change without requiring a model decision", () => {
     expect(deterministicCapabilityPlan("按照这些内容重新更改教学重点难点")).toMatchObject({
-      skillIds: ["lesson-objective-review"],
+      skillIds: [],
       toolGroups: ["document-read", "document-write"],
       mcpServers: [],
-      specialistAgents: [],
     });
   });
 
@@ -543,7 +500,6 @@ describe("enforceRequiredCapabilities", () => {
 
   it("keeps deterministically classified teaching work off the model-router critical path", async () => {
     const plan = deterministicCapabilityPlan("请检查教学目标与重点");
-    expect(hasDeterministicRoutingSignal(plan)).toBe(true);
     await expect(routeCapabilities("请检查教学目标与重点")).resolves.toEqual(plan);
   });
 

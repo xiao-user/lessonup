@@ -6,7 +6,6 @@ const plan = (patch: Partial<CapabilityPlan> = {}): CapabilityPlan => ({
   skillIds: [],
   toolGroups: ["document-read", "document-write"],
   mcpServers: [],
-  specialistAgents: [],
   evidenceRequired: false,
   writeMode: "open",
   designBasisRequested: false,

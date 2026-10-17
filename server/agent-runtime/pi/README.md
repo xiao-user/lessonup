@@ -9,7 +9,10 @@ boundary; callers should not construct the internal collaborators independently.
 | `coordinator.ts` | Accept/replay commands, prepare a new turn, orchestrate its result. |
 | `run-lifecycle.ts` | Own live cancellation, queued input and heartbeat resources. Both turn paths use an owned `open`/`close` scope. |
 | `executor.ts` | Invoke native Pi, restore/checkpoint branch transcripts, bind provider context, compact memory and project safe events. |
-| `tool-surface.ts` | Assemble capability-scoped tools and stable skill prefixes without executing them. |
+| `tool-surface.ts` | Assemble stable resource-scoped teaching tools; Dashi has its own compact surface. |
+| `education-policy.ts` | Shared professional judgment in the static prompt, without nested expert calls or teaching Skill reads. |
+| `teaching-completion.ts` | Grounded no-change/insufficient-evidence completion, mutually exclusive with proposals. |
+| `learning-tools.ts` | Adapt bounded evidence reads and scoped inquiry/review proposals to native Pi; teacher decisions remain business actions. |
 | `approval-workflow.ts` | Persist proposals, apply explicit decisions, deliver through business services and request a brief continuation reply. |
 
 ## Ownership rules
@@ -26,3 +29,9 @@ boundary; callers should not construct the internal collaborators independently.
 - Keep the public facade stable when moving internal responsibilities. Cover native
   Pi behavior with `coordinator.integration.test.ts`, live ownership with
   `run-lifecycle.test.ts`, and SQL invariants with repository transaction tests.
+- `server/lesson-teaching-context.ts` composes canonical planning and feedback;
+  tool adapters do not own curriculum/feedback joins or infer learning outcomes.
+- `server/learning/service.ts` owns immutable observations, inquiry lifecycle,
+  comparable follow-up validation and command recovery. An Agent must read the
+  selected evidence before proposing; only a completed run exposes its draft.
+  Model recommendations never adopt, implement or finalize teacher judgments.

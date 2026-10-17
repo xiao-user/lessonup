@@ -68,7 +68,6 @@ export class DeterministicAgentHarness {
         skillIds: [],
         toolGroups: ["document-read"],
         mcpServers: [],
-        specialistAgents: [],
         evidenceRequired: false,
       },
       agentDefinitionVersion: "deterministic-agent-e2e@1",
@@ -392,6 +391,14 @@ export class DeterministicAgentHarness {
     file: NonNullable<Awaited<ReturnType<LessonRepository["getLessonFile"]>>>;
     emit: Emit;
   }) {
+    if (args.input.message.includes("长教案流式提交修改")) {
+      const expectedText = args.file.document.process;
+      return this.persistApproval({ ...args, patch: {
+        fileId: args.file.id, baseDocumentVersion: args.file.documentVersion, summary: "长教案流式性能验收",
+        operations: [{ op: "replace_text", field: "process", start: 0, end: expectedText.length, expectedText,
+          replacement: `${expectedText}\n\n## 独立迁移检查\n学生用新材料独立解释，教师依据同一判据记录证据与待检查的问题。` }],
+      } });
+    }
     if (args.input.message.includes("完整备课调整")) {
       const basis = await this.repository.getLessonDesignBasis(
         args.input.userId,
@@ -486,7 +493,12 @@ export class DeterministicAgentHarness {
     for (const operation of args.patch.operations) {
       const original = file!.document[operation.field];
       const full = original.slice(0, operation.start) + operation.replacement + original.slice(operation.end);
-      for (let length = 6; length < full.length + 6; length += 6) {
+      const step = args.input.message.includes("长教案流式提交修改") ? 240 : 6;
+      for (let length = step; length < full.length + step; length += step) {
+        if (this.activeRuns.get(`${args.input.userId}:${args.runId}`)?.cancelled) {
+          await this.cancelled(args.input.userId, args.runId, args.input.threadId, args.assistantId, "", args.emit);
+          return;
+        }
         fields[operation.field] = full.slice(0, length);
         await args.emit({ type: "document.draft", runId: args.runId, toolCallId: `draft:${args.runId}`,
           fileId: args.patch.fileId, baseDocumentVersion: args.patch.baseDocumentVersion, fields: { ...fields } });

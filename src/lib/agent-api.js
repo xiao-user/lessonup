@@ -23,7 +23,7 @@ async function request(path, options = {}) {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body.error ?? `request_failed:${response.status}`);
+    throw Object.assign(new Error(body.error ?? `request_failed:${response.status}`), { status: response.status });
   }
   return /** @type {Promise<T>} */ (response.status === 204
     ? Promise.resolve(null)
@@ -32,6 +32,22 @@ async function request(path, options = {}) {
 
 /** @type {Record<string, (...args: any[]) => Promise<any>>} */
 export const agentApi = {
+  getLearningCommandResult: (fileId, key) => request(`/api/lesson-files/${encodeURIComponent(fileId)}/learning/commands/${encodeURIComponent(key)}`),
+  getLearningInquiryContext: (fileId, inquiryId) => request(`/api/lesson-files/${encodeURIComponent(fileId)}/learning/inquiries/${encodeURIComponent(inquiryId)}`),
+  getLearningProgress: (fileId, cursors = {}) => {
+    const query = new URLSearchParams(Object.entries(cursors).filter(([, value]) => value).map(([key, value]) => [key, JSON.stringify(value)]));
+    return request(`/api/lesson-files/${encodeURIComponent(fileId)}/learning${query.size ? `?${query}` : ""}`);
+  },
+  recordLearningEvidence: (fileId, input, commandId) => request(`/api/lesson-files/${encodeURIComponent(fileId)}/learning/evidence`, {
+    method: "POST", headers: { "idempotency-key": commandId }, body: JSON.stringify(input),
+  }),
+  proposeLearningInquiry: (fileId, input, commandId) => request(`/api/lesson-files/${encodeURIComponent(fileId)}/learning/inquiries`, {
+    method: "POST", headers: { "idempotency-key": commandId }, body: JSON.stringify(input),
+  }),
+  actOnLearningInquiry: (fileId, inquiryId, input, commandId) => request(`/api/lesson-files/${encodeURIComponent(fileId)}/learning/inquiries/${encodeURIComponent(inquiryId)}`, {
+    method: "PATCH", headers: { "idempotency-key": commandId }, body: JSON.stringify(input),
+  }),
+
   runtime: () => request("/api/runtime"),
   listNotebooks: () => request("/api/notebooks"),
   createNotebook: (input) => request("/api/notebooks", { method: "POST", body: JSON.stringify(input) }),

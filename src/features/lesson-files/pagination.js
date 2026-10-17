@@ -71,8 +71,28 @@ function avoidSplitMarker(text, start, end) {
 }
 
 const takeTextForHeight = (text, start, availableHeight, measureText) => {
+  // Prefer semantic Markdown line boundaries directly. Searching arbitrary
+  // character prefixes first repeatedly parses broken headings/lists and
+  // forces almost twice as many synchronous browser layouts on long fields.
+  const lineEnds = [];
+  for (let index = text.indexOf("\n", start); index >= 0; index = text.indexOf("\n", index + 1)) lineEnds.push(index + 1);
+  if (lineEnds.at(-1) !== text.length) lineEnds.push(text.length);
+  if (lineEnds.length > 1) {
+    let lowLine = 0;
+    let highLine = lineEnds.length - 1;
+    let bestLine = -1;
+    while (lowLine <= highLine) {
+      const middle = Math.floor((lowLine + highLine) / 2);
+      if (measureText(text.slice(start, lineEnds[middle])) <= availableHeight) {
+        bestLine = middle; lowLine = middle + 1;
+      } else highLine = middle - 1;
+    }
+    if (bestLine >= 0) return lineEnds[bestLine];
+  }
   let low = start + 1;
-  let high = text.length;
+  // A single line may exceed a page. Fall back within that line so pagination
+  // always makes progress without splitting unrelated following structures.
+  let high = lineEnds[0] ?? text.length;
   let best = start;
 
   while (low <= high) {

@@ -1,3 +1,5 @@
+import type { LearningCommand, LearningCursor, LearningEvidence, LearningInquiry, LearningRecord } from "../learning/domain.js";
+import { learningReviewContext } from "../learning/review-context.js";
 import type { AgentSessionItem as AgentInputItem } from "../repository.js";
 import {
   applyDocumentPatch,
@@ -99,6 +101,78 @@ const now = () => {
 const key = (...parts: string[]) => parts.join(":");
 
 export class MemoryLessonRepository implements LessonRepository {
+  private learningEvidence = new Map<string, LearningEvidence>();
+  private learningInquiries = new Map<string, LearningInquiry>();
+  private learningReceipts = new Map<string, { fingerprint: string; record: LearningRecord }>();
+  async listLearningReviews(ownerId: string, scope: { lessonFileId?: string; lessonBlueprintId?: string; limit: number }) {
+    if ((!scope.lessonFileId && !scope.lessonBlueprintId) || !Number.isInteger(scope.limit) || scope.limit < 1 || scope.limit > 100) throw new Error("learning_scope_invalid");
+    return structuredClone([...this.learningInquiries.values()].filter((item) => {
+      const file = this.files.get(key(ownerId, item.lessonFileId));
+      return item.ownerId === ownerId && file && item.state === "reviewed" && item.review
+        && (!scope.lessonFileId || item.lessonFileId === scope.lessonFileId)
+        && (!scope.lessonBlueprintId || file.lessonBlueprintId === scope.lessonBlueprintId);
+    }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.id.localeCompare(a.id)).slice(0, scope.limit)
+      .map((item) => learningReviewContext(item, this.learningEvidence.get(key(ownerId, item.baselineEvidenceId))!, this.learningEvidence.get(key(ownerId, item.review!.evidenceId))!)));
+  }
+
+  private replayLearningNow(ownerId: string, command: LearningCommand) {
+    const receipt = this.learningReceipts.get(key(ownerId, command.idempotencyKey));
+    if (!receipt) return null;
+    if (receipt.fingerprint !== command.fingerprint) throw new Error("idempotency_conflict");
+    return structuredClone(receipt.record);
+  }
+  async getLearningCommandResult(ownerId: string, idempotencyKey: string) {
+    return structuredClone(this.learningReceipts.get(key(ownerId, idempotencyKey))?.record ?? null);
+  }
+  async replayLearningCommand(ownerId: string, command: LearningCommand) { return this.replayLearningNow(ownerId, command); }
+  async listLearningEvidence(ownerId: string, fileId: string, limit: number, before?: LearningCursor) {
+    return structuredClone([...this.learningEvidence.values()].filter((item) => item.ownerId === ownerId && item.lessonFileId === fileId && this.files.has(key(ownerId, fileId)))
+      .filter((item) => !before || item.observedAt < before.at || (item.observedAt === before.at && item.id < before.id))
+      .sort((a, b) => b.observedAt.localeCompare(a.observedAt) || b.id.localeCompare(a.id)).slice(0, limit));
+  }
+  async getLearningEvidence(ownerId: string, id: string) {
+    const value = this.learningEvidence.get(key(ownerId, id));
+    return value && this.files.has(key(ownerId, value.lessonFileId)) ? structuredClone(value) : null;
+  }
+  async listLearningInquiries(ownerId: string, fileId: string, limit: number, before?: LearningCursor) {
+    return structuredClone([...this.learningInquiries.values()].filter((item) => item.ownerId === ownerId && item.lessonFileId === fileId && this.files.has(key(ownerId, fileId)) && (!item.sourceRunId || this.runs.get(item.sourceRunId)?.status === "completed"))
+      .filter((item) => !before || item.updatedAt < before.at || (item.updatedAt === before.at && item.id < before.id))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.id.localeCompare(a.id)).slice(0, limit));
+  }
+  async getLearningInquiry(ownerId: string, id: string) {
+    const value = this.learningInquiries.get(key(ownerId, id));
+    return value && this.files.has(key(ownerId, value.lessonFileId)) ? structuredClone(value) : null;
+  }
+  private assertLearningFile(record: LearningRecord, command: LearningCommand) {
+    const file = this.files.get(key(record.ownerId, record.lessonFileId));
+    if (!file || file.notebookId !== record.notebookId || (command.documentVersion !== undefined && file.documentVersion !== command.documentVersion)) {
+      throw new Error("stale_learning_inquiry");
+    }
+  }
+  async saveLearningEvidence(record: LearningEvidence, command: LearningCommand) {
+    const replay = this.replayLearningNow(record.ownerId, command);
+    if (replay) return replay as LearningEvidence;
+    this.assertLearningFile(record, command);
+    if (record.inquiryId) {
+      const inquiry = this.learningInquiries.get(key(record.ownerId, record.inquiryId));
+      if (!inquiry || inquiry.lessonFileId !== record.lessonFileId || inquiry.state !== "implemented" || inquiry.version !== command.inquiryVersion) throw new Error("stale_learning_inquiry");
+    }
+    if (this.learningEvidence.has(key(record.ownerId, record.id))) throw new Error("idempotency_conflict");
+    this.learningEvidence.set(key(record.ownerId, record.id), structuredClone(record));
+    this.learningReceipts.set(key(record.ownerId, command.idempotencyKey), { fingerprint: command.fingerprint, record: structuredClone(record) });
+    return structuredClone(record);
+  }
+  async saveLearningInquiry(record: LearningInquiry, expectedVersion: number | null, command: LearningCommand) {
+    const replay = this.replayLearningNow(record.ownerId, command);
+    if (replay) return replay as LearningInquiry;
+    this.assertLearningFile(record, command);
+    const current = this.learningInquiries.get(key(record.ownerId, record.id));
+    if (expectedVersion === null ? Boolean(current) : !current || current.version !== expectedVersion) throw new Error("stale_learning_inquiry");
+    this.learningInquiries.set(key(record.ownerId, record.id), structuredClone(record));
+    this.learningReceipts.set(key(record.ownerId, command.idempotencyKey), { fingerprint: command.fingerprint, record: structuredClone(record) });
+    return structuredClone(record);
+  }
+
   private notebooks = new Map<string, NotebookRecord>();
   private files = new Map<string, LessonFileRecord>();
   private lessonGenerationIntents = new Map<string, LessonGenerationIntentRecord>();
@@ -2378,18 +2452,18 @@ export class MemoryLessonRepository implements LessonRepository {
 
   async listLessonClassFeedback(
     ownerId: string,
-    filter: {
-      lessonFileId?: string;
-      lessonBlueprintId?: string;
-      semesterFrameworkId?: string;
-    },
+    filter: Parameters<LessonRepository["listLessonClassFeedback"]>[1],
   ) {
-    void ownerId;
+    if (filter.limit !== undefined && (!Number.isInteger(filter.limit) || filter.limit < 1 || filter.limit > 100)) {
+      throw new Error("class_feedback_limit_invalid");
+    }
     return structuredClone(this.lessonClassFeedback.filter((item) => (
-      (!filter.lessonFileId || item.lessonFileId === filter.lessonFileId)
+      this.files.has(key(ownerId, item.lessonFileId))
+      && (!filter.lessonFileId || item.lessonFileId === filter.lessonFileId)
       && (!filter.lessonBlueprintId || item.lessonBlueprintId === filter.lessonBlueprintId)
       && (!filter.semesterFrameworkId || item.semesterFrameworkId === filter.semesterFrameworkId)
-    )));
+    )).sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))
+      .slice(0, filter.limit));
   }
 
   async getPendingSemesterFrameworkWritebackIntent(ownerId: string, frameworkId: string) {

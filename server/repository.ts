@@ -1,3 +1,4 @@
+import type { LearningRepository } from "./learning/domain.js";
 export type AgentSessionItem = Record<string, unknown>;
 type AgentInputItem = AgentSessionItem;
 interface Session {
@@ -123,7 +124,7 @@ export type AgentRuntimeSessionSnapshot = {
   updatedAt: string;
 };
 
-export interface LessonRepository {
+export interface LessonRepository extends LearningRepository {
   importNotebookGraph(ownerId: string, notebooks: ImportedNotebook[]): Promise<{ imported: number }>;
   listNotebooks(ownerId: string): Promise<NotebookGraphRecord[]>;
   createNotebook(ownerId: string, input: {
@@ -534,6 +535,8 @@ export interface LessonRepository {
       lessonFileId?: string;
       lessonBlueprintId?: string;
       semesterFrameworkId?: string;
+      /** Bounded Agent reads; omitted keeps the existing full-list API. */
+      limit?: number;
     },
   ): Promise<LessonClassFeedbackRecord[]>;
   getPendingSemesterFrameworkWritebackIntent(

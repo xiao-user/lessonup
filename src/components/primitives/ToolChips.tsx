@@ -33,7 +33,7 @@ const Icons: Record<string, React.ReactNode> = {
 const STATE_LABEL: Record<ToolActivity["state"], string> = {
   running: "运行中",
   completed: "完成",
-  unchanged: "无需变更",
+  unchanged: "未修改",
   needs_revision: "需要调整",
   failed: "失败",
   cancelled: "已停止",

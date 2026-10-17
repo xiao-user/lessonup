@@ -1,6 +1,6 @@
 # LessonUp Pi Agent 迁移与当前架构
 
-> 更新日期：2026-09-29
+> 更新日期：2026-10-17
 > 平台：Cloudflare Workers + Durable Object + D1 / R2（2026-08 自 Supabase 迁入，Agent 内核仍为 Pi）
 > Pi 版本：`@earendil-works/pi-agent-core@0.84.2` / `@earendil-works/pi-ai@0.84.2`  
 > Node 基线：`24.19.x`
@@ -22,7 +22,7 @@ flowchart TB
   DO --> C["PiLessonAgentCoordinator"]
   C --> A["pi-agent-core Agent 0.84.2"]
   A --> T["作用域内 LessonUp 业务工具"]
-  A --> S["固定版本平台 Skills"]
+  A --> S["Dashi 固定版本 Skill"]
   T --> DB[("D1 canonical state · R2 私有文件")]
   T --> K["受限知识与课程检索"]
   C --> DB
@@ -86,14 +86,16 @@ user
 - 教材目录、课程标准、知识点、语义关系与连续性读取；
 - 学期框架、单元、课时蓝图、课堂反馈与版本读取；
 - SSRF 防护的 Web 搜索和页面读取；
-- 课程分析、学习设计、评价和批判内部专家工具；
+- 统一的教学判断规范与有界的上游规划、课堂反馈读取；
+- 学习证据分页与精确定位、待采用改进方案和待教师审议的复测建议；
+- 读取规范内容后，以保留现稿或说明证据缺口完成，不强制制造修改；
 - 普通 A4 教案 patch；
 - 教案与结构化设计依据的联合变更、投影和独立维护；
 - 学期框架 patch；
 - 课堂演示最终 Dashi goal 提案；
 - 教师确认后由服务端确定性渲染已校验 goal，不再调用模型改写。
 
-所有有副作用的业务变更先在工具输入阶段完成 scope、类型、快照、目标、证据与 CAS 预检，随后只创建一个持久化审批。咨询不触发写入。
+教案、框架和演示变更先在工具输入阶段完成 scope、类型、快照、目标、证据与 CAS 预检，随后只创建一个持久化审批。学习工具仅保存待采用方案或待审议建议，采用、实施和最终判断由教师的明确业务动作提交；不自动修改教案或产生课堂事实。咨询不触发业务交付。
 
 知识与课标检索：教师资料先只读文本并打分，再仅为最相关的候选读取向量重排；课标按笔记本的学科、学段、年级整体排序，并对同一发布版本、范围和查询复用最近结果。查询向量来自配置的嵌入服务，未配置或调用失败时退回文本排序（失败结果不入缓存）。文本排序对不带空格的中文按字符对匹配，因此整句提问也能命中原文。
 
@@ -141,17 +143,17 @@ flowchart LR
 ### 提示与上下文分层
 
 - Pi 持久化 transcript 只保存教师原始消息和完整、协议安全的 Agent/tool 消息；资源版本、焦点、选区、附件和本轮完成条件通过服务端生成的临时 `lessonup_turn_context` 注入，不再伪装成教师消息进入长期历史。
-- 基础 system prompt 只负责身份、语言、安全、证据、审批和不可信数据边界；领域方法由当轮 Skill 提供，工具 schema 只描述调用合同。
-- 工具按 CapabilityPlan 最小化暴露：轻量对话为零工具；课堂演示只提供当前教案读取、Dashi 查询/检查和最终提案；知识、课程、设计依据、联网和专业复核按需加入。快车道没有工具也看不到教案，因此只接收致谢/确认，以及指向对话本身的追问（“为什么？”“刚才那句是什么意思？”）；关于教案内容或需要证据的问题一律走 Agent 车道，拿不准时选 Agent 车道。
-- 完整教案编写规则由固定版本 `lesson-full-authoring` Skill 承担，产品按钮只发送简洁教师意图。
-- 目标、过程、评价和审查 Skill 是默认专业判断层；内部 specialist 只在教师明确要求独立复核、第二意见或多专家比较时启用，不再与 Skill 默认重复执行。
+- 静态 system prompt 同时包含身份、安全、证据、审批边界和统一教学判断规范；五份教学 Skill 已合并到 `education-policy.ts`，不再额外调用模型读取基本专业方法。
+- 轻量对话为零工具，课堂演示保持独立工具面；普通教学任务的文档、课程、资料、依据及已配置联网工具保持稳定。关键词不再决定调查工具是否存在，写入策略和证据要求仍由服务端校验。快车道只接收致谢/确认和指向对话本身的追问；涉及教案或外部事实时走 Agent 车道。
+- 完整教案编写、目标、过程、评价与审查共用专业规范；Dashi 是唯一独立 Skill。普通教学和文件采用不依赖 Dashi 清单加载成功。
+- 已移除内部 specialist 模型调用。第二意见通过同一 Agent 比较不同解释和反例，不能将同模型的另一份回答宣称为独立专家共识。完整产品目标与待补能力见 [教育 Agent 架构](education-agent-architecture.md)。
 
 | 能力 | 当前采用方式 |
 |---|---|
 | Streaming / tool loop / abort | Coordinator 直接使用原生 Agent，并把完整生命周期安全投影为 SSE 事件 |
 | Provider abstraction | `MODEL_API` 选择 Responses 或 Chat Completions，凭据仅服务端 |
 | Tools | TypeBox schema，读写工具均绑定服务端 scope |
-| Skills | 只由 `SkillRegistry` 加载仓库内固定版本 |
+| Skills | `SkillRegistry` 仅加载仓库内固定版本 Dashi；教学规范直接内置 |
 | Branch / session | D1 canonical transcript + revision CAS |
 | Compaction | 版本化、校验、不可信摘要 + 完整原始历史 |
 | HITL | LessonUp durable approval/continuation state machine |

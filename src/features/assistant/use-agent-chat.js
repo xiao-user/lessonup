@@ -515,6 +515,10 @@ export function useAgentChat({
   }, [createThread, resourceScope, selectThread]);
 
   const handleEvent = useCallback((event, explicitScope = null) => {
+    if (event.type === "learning.updated") {
+      window.dispatchEvent(new CustomEvent("lessonup:learning-changed", { detail: { lessonFileId: event.lessonFileId } }));
+      return;
+    }
     if (event.type === "run.started") {
       runScopesRef.current.set(event.runId, { threadId: event.threadId, branchId: event.branchId });
       setThreads((current) => current.map((thread) => thread.id === event.threadId ? { ...thread, status: "running" } : thread));
@@ -1030,6 +1034,7 @@ export function useAgentChat({
         generationIntentId: options.generationIntentId,
         frameworkWritebackIntentId: options.frameworkWritebackIntentId,
         thinkingLevel,
+        taskIntent: options.taskIntent,
         clientCommandId,
       }, (event) => handleEvent(event, requestScope), {
         signal: controller.signal,

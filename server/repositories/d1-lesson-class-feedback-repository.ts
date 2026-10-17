@@ -36,12 +36,16 @@ export class D1LessonClassFeedbackRepository implements D1LessonClassFeedbackSto
     return this.require(ownerId, feedbackId);
   }
 
-  async listLessonClassFeedback(ownerId: string, filter: { lessonFileId?: string; lessonBlueprintId?: string; semesterFrameworkId?: string }) {
+  async listLessonClassFeedback(ownerId: string, filter: Parameters<LessonRepository["listLessonClassFeedback"]>[1]) {
+    if (filter.limit !== undefined && (!Number.isInteger(filter.limit) || filter.limit < 1 || filter.limit > 100)) {
+      throw new Error("class_feedback_limit_invalid");
+    }
     const clauses = ["owner_id = ?"]; const params: Array<string | number | null> = [ownerId];
     if (filter.lessonFileId) { clauses.push("lesson_file_id = ?"); params.push(filter.lessonFileId); }
     if (filter.lessonBlueprintId) { clauses.push("lesson_blueprint_id = ?"); params.push(filter.lessonBlueprintId); }
     if (filter.semesterFrameworkId) { clauses.push("semester_framework_id = ?"); params.push(filter.semesterFrameworkId); }
-    const result = await this.database.query<Row>({ sql: `${select} WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC, id DESC`, params });
+    if (filter.limit !== undefined) params.push(filter.limit);
+    const result = await this.database.query<Row>({ sql: `${select} WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC, id DESC${filter.limit === undefined ? "" : " LIMIT ?"}`, params });
     return result.rows.map(record);
   }
 

@@ -73,6 +73,7 @@ describe("business eval gate", () => {
       documentGrounded: false,
       curriculumGrounded: false,
       summary: "内容可替换到多数教案。",
+      exposesInternalImplementation: false,
     }, rubric);
 
     expect(result.passed).toBe(false);
@@ -102,6 +103,7 @@ describe("business eval gate", () => {
       documentGrounded: true,
       curriculumGrounded: false,
       summary: "存在伪精确判断。",
+      exposesInternalImplementation: false,
     }, rubric);
 
     expect(result.passed).toBe(false);
@@ -130,6 +132,7 @@ describe("business eval gate", () => {
       documentGrounded: true,
       curriculumGrounded: false,
       summary: "课堂建议具体，但缺少当前教材依据。",
+      exposesInternalImplementation: false,
     }, { ...rubric, requireCurriculumGrounding: true });
 
     expect(result.passed).toBe(false);

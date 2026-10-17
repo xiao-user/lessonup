@@ -2585,6 +2585,8 @@
     width: min(300px, calc(100vw - 56px));
     background: var(--app-background);
     opacity: 0;
+    pointer-events: none;
+    transition: transform 0.3s ease, opacity 0.3s ease, visibility 0.3s;
   }
 
   .lesson-outline-rail {
@@ -2598,6 +2600,17 @@
     padding-top: 64px;
     transform: translateX(100%);
   }
+
+  .lesson-side-rail.is-mobile-open {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateX(0);
+  }
+}
+
+@media (max-width: 680px) and (prefers-reduced-motion: reduce) {
+  .lesson-side-rail { transition: none; }
 }
 
 .book-carousel-position-cue {

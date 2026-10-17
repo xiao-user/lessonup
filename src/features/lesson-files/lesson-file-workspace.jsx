@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
 import { ArrowLeft, Check, PanelLeft, Redo2, Sparkles, Undo2 } from "lucide-react";
@@ -20,9 +20,13 @@ import { LessonPlanTiptapEditor, PresentationMaterialRow } from "@/features/less
 import { applyLessonFieldEdit } from "@/features/lesson-files/lesson-plan-tiptap-bridge";
 import { renderLessonMarkdownHtml } from "@/features/lesson-files/lesson-markdown";
 import { agentApi } from "@/lib/agent-api";
+import { reconcilePresentationMaterial } from "./presentation-material-state.js";
+import { createMeasurementCache } from "./measurement-cache.js";
 import { previewDocumentDraft } from "@/features/assistant/document-draft.js";
 
 gsap.registerPlugin(useGSAP);
+
+const LearningWorkbench = lazy(() => import("@/features/learning/learning-workbench").then((module) => ({ default: module.LearningWorkbench })));
 
 const LessonAgentPanel = lazy(() => import("@/features/assistant/lesson-agent-panel").then((module) => ({
   default: module.LessonAgentPanel,
@@ -41,18 +45,19 @@ function LessonTableColumns() {
   );
 }
 
-function MeasuredMarkdown({ value }) {
+const MeasuredMarkdown = memo(function MeasuredMarkdown({ value }) {
+  const html = useMemo(() => renderLessonMarkdownHtml(value), [value]);
   return (
     <div
       className="lesson-tiptap-field"
       // This HTML is generated locally from the same trusted Markdown parser
       // and extension set as the field editor; no remote HTML enters here.
-      dangerouslySetInnerHTML={{ __html: renderLessonMarkdownHtml(value) }}
+      dangerouslySetInnerHTML={{ __html: html }}
     />
   );
-}
+});
 
-function PaginationMeasure({ plan, presentationMaterial, measureRef }) {
+const PaginationMeasure = memo(function PaginationMeasure({ plan, presentationMaterial, measureRef }) {
   return (
     <div className="lesson-pagination-measure" ref={measureRef} aria-hidden="true">
       <div className="lesson-pagination-page-box" />
@@ -103,7 +108,9 @@ function PaginationMeasure({ plan, presentationMaterial, measureRef }) {
       </table>
     </div>
   );
-}
+});
+
+const measurementCaches = new WeakMap();
 
 function createDomMeasurements(measureRoot, plan) {
   const pageBox = measureRoot.querySelector(".lesson-pagination-page-box");
@@ -117,7 +124,14 @@ function createDomMeasurements(measureRoot, plan) {
     return null;
   }
 
-  const cache = new Map();
+  const probeStyle = getComputedStyle(probeContent);
+  const geometry = `${probeRow.offsetWidth}:${probeStyle.font}:${probeStyle.lineHeight}:${probeStyle.letterSpacing}`;
+  let saved = measurementCaches.get(measureRoot);
+  if (!saved || saved.geometry !== geometry) {
+    saved = { geometry, cache: createMeasurementCache() };
+    measurementCaches.set(measureRoot, saved);
+  }
+  const cache = saved.cache;
   measureRoot.querySelectorAll("[data-measure-section]").forEach((row) => {
     const sectionId = row.dataset.measureSection;
     cache.set(`${sectionId}:0:${String(plan[sectionId] ?? "")}`, row.getBoundingClientRect().height);
@@ -207,7 +221,12 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
   // original/draft view selection stable across that handoff.
   const draftIdentity = agentDraft?.toolCallId ?? agentDraft?.id;
   useEffect(() => { setShowOriginal(false); }, [draftIdentity]);
-  const draftPlan = useMemo(() => previewDocumentDraft(plan, agentDraft), [plan, agentDraft]);
+  const incomingProjection = useMemo(() => ({ identity: draftIdentity, fields: agentDraft?.fields }), [draftIdentity, agentDraft?.fields]);
+  const deferredProjection = useDeferredValue(incomingProjection);
+  const draftFields = agentDraft?.phase === "streaming" && deferredProjection.identity === draftIdentity
+    ? deferredProjection.fields : incomingProjection.fields;
+  const draftPatch = agentDraft?.patch;
+  const draftPlan = useMemo(() => previewDocumentDraft(plan, draftFields || draftPatch ? { fields: draftFields, patch: draftPatch } : null), [plan, draftFields, draftPatch]);
   const displayingDraft = Boolean(agentDraft && draftPlan && !showOriginal);
   const historyRef = useRef(createLessonHistory(initialPlan));
   const [historyAvailability, setHistoryAvailability] = useState({
@@ -230,13 +249,14 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     confirmingDelete: false,
   });
   const [pages, setPages] = useState(() => paginateLessonPlan(initialPlan, {}, presentationMaterial));
-  const [measuredDraft, setMeasuredDraft] = useState(null);
+  const [measuredDraftPages, setMeasuredDraftPages] = useState(null);
   const draftPages = useMemo(() => {
     if (!displayingDraft) return null;
-    return measuredDraft?.plan === draftPlan && measuredDraft.presentationMaterial === presentationMaterial
-      ? measuredDraft.pages
-      : paginateLessonPlan(draftPlan, {}, presentationMaterial);
-  }, [displayingDraft, draftPlan, measuredDraft, presentationMaterial]);
+    // Keep the last measured projection while the layout effect measures the
+    // new snapshot. Replacing every fragment with an estimated projection and
+    // then the measured one made each stream update render the paper twice.
+    return measuredDraftPages ?? paginateLessonPlan(draftPlan, {}, presentationMaterial);
+  }, [displayingDraft, draftPlan, measuredDraftPages, presentationMaterial]);
   const pageLayoutSignatureRef = useRef(pageLayoutSignature(pages));
   const pageContentSignatureRef = useRef(pageContentSignature(pages));
   const [pageLayoutRevision, setPageLayoutRevision] = useState(0);
@@ -362,7 +382,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
   measureDraftRef.current = () => {
     if (!displayingDraft) return;
     const measuredPages = paginateMeasuredPlan(draftMeasureRef.current, draftPlan, presentationMaterial);
-    if (measuredPages) setMeasuredDraft({ plan: draftPlan, presentationMaterial, pages: measuredPages });
+    if (measuredPages) setMeasuredDraftPages(measuredPages);
   };
 
   const flushDocumentBeforeAgentRun = useCallback(async () => {
@@ -401,17 +421,9 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
         agentApi.listClassroomPresentations(file.id),
         agentApi.getClassroomPresentationGeneration(file.id),
       ]);
-      setPresentationMaterial((current) => ({
-        ...current,
-        presentation: presentations[0] ?? null,
-        // The status belongs to the server-side generation, not this React
-        // instance. This also lets an Agent-initiated render update A4.
-        state: current.state === "deleting"
-          ? "deleting"
-          : generation?.status === "generating" ? "generating" : "idle",
-        error: current.state === "deleting" ? current.error : presentationGenerationErrorMessage(generation),
-        confirmingDelete: false,
-      }));
+      setPresentationMaterial((current) => reconcilePresentationMaterial(
+        current, presentations[0] ?? null, generation, presentationGenerationErrorMessage(generation),
+      ));
     } catch (error) {
       setPresentationMaterial((current) => ({
         ...current,
@@ -425,9 +437,15 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
   }, [loadPresentationMaterial]);
 
   useEffect(() => {
-    const refresh = window.setInterval(() => { void loadPresentationMaterial(); }, 1_500);
-    return () => window.clearInterval(refresh);
-  }, [loadPresentationMaterial]);
+    const refresh = () => { if (document.visibilityState === "visible") void loadPresentationMaterial(); };
+    const timer = window.setInterval(refresh, presentationMaterial.state === "generating" ? 1_500 : 30_000);
+    const settled = (event) => { if (!event.detail?.lessonFileId || event.detail.lessonFileId === file.id) refresh(); };
+    window.addEventListener("focus", refresh);
+    window.addEventListener("lessonup:presentation-changed", settled);
+    document.addEventListener("visibilitychange", refresh);
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", refresh);
+      window.removeEventListener("lessonup:presentation-changed", settled); document.removeEventListener("visibilitychange", refresh); };
+  }, [file.id, loadPresentationMaterial, presentationMaterial.state]);
 
   const generatePresentationMaterial = useCallback(async () => {
     setPresentationMaterial((current) => ({ ...current, error: "", confirmingDelete: false }));
@@ -500,6 +518,8 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     let cancelled = false;
     document.fonts?.ready.then(() => {
       if (!cancelled) {
+        measurementCaches.delete(measureRef.current);
+        measurementCaches.delete(draftMeasureRef.current);
         measureAndPaginateRef.current();
         measureDraftRef.current();
       }
@@ -599,7 +619,10 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     const root = rootRef.current;
     const firstSheet = firstSheetRef.current;
     if (!root || !firstSheet) return undefined;
-    const rails = root.querySelectorAll(".lesson-side-rail");
+    // CSS owns mobile drawers; entry animation must not override their state.
+    const rails = window.matchMedia("(min-width: 681px)").matches
+      ? root.querySelectorAll(".lesson-side-rail")
+      : [];
     const pageContent = root.querySelectorAll(".lesson-sheet-content");
     const secondarySheets = [...root.querySelectorAll(".lesson-sheet-frame")].slice(1);
     const finalRect = firstSheet.getBoundingClientRect();
@@ -636,7 +659,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
       gsap.set(root, { clearProps: "backgroundColor" });
       if (pageContent.length) gsap.set(pageContent, { autoAlpha: 1 });
       if (secondarySheets.length) gsap.set(secondarySheets, { autoAlpha: 1, clearProps: "transform" });
-      if (rails.length) gsap.set(rails, { autoAlpha: 1, clearProps: "transform" });
+      if (rails.length) gsap.set(rails, { clearProps: "opacity,visibility,transform" });
       return undefined;
     }
 
@@ -669,6 +692,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
         root.classList.remove("is-entering");
         setEntryPending(false);
         openingTimelineRef.current = null;
+        if (rails.length) gsap.set(rails, { clearProps: "opacity,visibility,transform" });
       },
     });
     openingTimelineRef.current = timeline;
@@ -712,31 +736,6 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     return () => timeline.kill();
   }, { scope: rootRef });
 
-  useGSAP(() => {
-    const media = gsap.matchMedia();
-    media.add("(max-width: 680px)", () => {
-      const outline = rootRef.current.querySelector(".lesson-outline-rail");
-      const assistant = rootRef.current.querySelector(".lesson-assistant-rail");
-      if (outline) gsap.to(outline, {
-        xPercent: mobileRail === "outline" ? 0 : -100,
-        autoAlpha: mobileRail === "outline" ? 1 : 0,
-        pointerEvents: mobileRail === "outline" ? "auto" : "none",
-        duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 0.3,
-        ease: "power3.inOut",
-        overwrite: "auto",
-      });
-      if (assistant) gsap.to(assistant, {
-        xPercent: mobileRail === "assistant" ? 0 : 100,
-        autoAlpha: mobileRail === "assistant" ? 1 : 0,
-        pointerEvents: mobileRail === "assistant" ? "auto" : "none",
-        duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 0.3,
-        ease: "power3.inOut",
-        overwrite: "auto",
-      });
-    });
-    return () => media.revert();
-  }, { dependencies: [mobileRail], scope: rootRef, revertOnUpdate: true });
-
   const updateHistoryAvailability = (history) => {
     setHistoryAvailability({
       canUndo: history.past.length > 0,
@@ -744,7 +743,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     });
   };
 
-  const persistPlan = (nextPlan, transaction = null) => {
+  const persistPlan = useCallback((nextPlan, transaction = null) => {
     const nextHistory = recordLessonChange(
       historyRef.current,
       nextPlan,
@@ -760,9 +759,9 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     if (transaction?.origin !== "tiptap") {
       setEditorExternalRevision((version) => version + 1);
     }
-  };
+  }, []);
 
-  const commitEditorFragment = (edit, transaction) => {
+  const commitEditorFragment = useCallback((edit, transaction) => {
     const currentPlan = planRef.current;
     const nextPlan = applyLessonFieldEdit(currentPlan, edit);
     if (nextPlan === currentPlan) return;
@@ -770,7 +769,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
       nextPlan,
       transaction ?? { field: edit.field, kind: "typing", origin: "tiptap" },
     );
-  };
+  }, [persistPlan]);
 
   const applyHistory = (direction) => {
     const currentHistory = historyRef.current;
@@ -965,6 +964,18 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
     if (closeSignal) closeWorkspace();
   }, [closeSignal]);
 
+  const [sidecarView, setSidecarView] = useState("assistant");
+  const editablePresentationMaterial = useMemo(() => ({ ...presentationMaterial,
+    onGenerate: generatePresentationMaterial, onPreview: previewPresentationMaterial, onDelete: deletePresentationMaterial,
+  }), [presentationMaterial, generatePresentationMaterial, previewPresentationMaterial, deletePresentationMaterial]);
+  const [learningRequest, setLearningRequest] = useState(null);
+  const handleLearningRequest = useCallback((id) => setLearningRequest((current) => current?.id === id ? null : current), []);
+  const requestLearningAgent = useCallback((request) => {
+    setLearningRequest({ ...request, id: crypto.randomUUID() });
+    setSidecarView("assistant");
+    setMobileRail("assistant");
+  }, []);
+
   return (
     <section
       className={`lesson-file-workspace${entryPending ? " is-entering" : ""}`}
@@ -1112,12 +1123,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
             onFieldChange={commitEditorFragment}
             onFieldFocus={setActiveSection}
             onSelectionChange={setSelectionContext}
-            presentationMaterial={{
-              ...presentationMaterial,
-              onGenerate: generatePresentationMaterial,
-              onPreview: previewPresentationMaterial,
-              onDelete: deletePresentationMaterial,
-            }}
+            presentationMaterial={editablePresentationMaterial}
           />
           </div>
         </main>
@@ -1139,6 +1145,19 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
       </div>
 
       <aside id="lesson-assistant-panel" className={`lesson-side-rail lesson-assistant-rail ${mobileRail === "assistant" ? "is-mobile-open" : ""}`}>
+        <div className="lesson-sidecar-tabs" role="tablist" aria-label="备课与学习验证" onKeyDown={(event) => {
+          if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+          event.preventDefault();
+          const view = event.key === "Home" ? "assistant" : event.key === "End" ? "learning" : sidecarView === "assistant" ? "learning" : "assistant";
+          setSidecarView(view); document.getElementById(`${view}-tab`)?.focus();
+        }}>
+          <Button id="assistant-tab" role="tab" tabIndex={sidecarView === "assistant" ? 0 : -1} aria-selected={sidecarView === "assistant"} aria-controls="assistant-tab-panel" size="sm" variant="ghost" onClick={() => setSidecarView("assistant")}>备课助手</Button>
+          <Button id="learning-tab" role="tab" tabIndex={sidecarView === "learning" ? 0 : -1} aria-selected={sidecarView === "learning"} aria-controls="learning-tab-panel" size="sm" variant="ghost" onClick={() => setSidecarView("learning")}>学习验证</Button>
+        </div>
+        <div id="learning-tab-panel" role="tabpanel" aria-labelledby="learning-tab" hidden={sidecarView !== "learning"} className="lesson-sidecar-content">
+          {sidecarView === "learning" ? <Suspense fallback={<p role="status">正在读取学习记录…</p>}><LearningWorkbench file={{ ...file, documentVersion }} notebook={notebook} plan={plan} onBeforeWrite={flushDocumentBeforeAgentRun} onAgentRequest={requestLearningAgent} /></Suspense> : null}
+        </div>
+        <div id="assistant-tab-panel" role="tabpanel" aria-labelledby="assistant-tab" hidden={sidecarView !== "assistant"} className="lesson-sidecar-content">
         <Suspense fallback={<p className="lesson-agent-status">正在加载备课助手…</p>}>
           <LessonAgentPanel
             notebook={notebook}
@@ -1151,8 +1170,11 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, originRect,
             onBeforeRun={flushDocumentBeforeAgentRun}
             onDocumentDraft={setAgentDraft}
             onNavigateToSection={scrollToSection}
+            learningRequest={learningRequest}
+            onLearningRequestHandled={handleLearningRequest}
           />
         </Suspense>
+        </div>
       </aside>
 
     </section>

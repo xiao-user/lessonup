@@ -16,6 +16,6 @@
     "target": "ES2023",
     "types": ["node", "vite/client", "vitest/globals"]
   },
-  "include": ["server/**/*.ts", "src/**/*", "vite.config.mjs", "vitest.config.ts"],
+  "include": ["server/**/*.ts", "src/**/*", "evals/**/*.ts", "vite.config.mjs", "vitest.config.ts"],
   "exclude": ["dist", "node_modules"]
 }

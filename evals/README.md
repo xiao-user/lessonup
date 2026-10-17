@@ -15,11 +15,12 @@ Required environment:
 - `MODEL_API_KEY`
 - `MODEL_BASE_URL`
 - `MODEL_ID`
+- `MODEL_API` (`openai-responses` or `openai-completions`)
+- `MODEL_CONTEXT_WINDOW` and `MODEL_MAX_TOKENS`
 
 Optional:
 
 - `LESSONUP_EVAL_BASE_URL` (defaults to `http://127.0.0.1:8787`)
-- `MODEL_API` (defaults to `openai-responses`)
 - `LESSONUP_EVAL_GRADER_API_KEY`, `LESSONUP_EVAL_GRADER_BASE_URL` and
   `LESSONUP_EVAL_GRADER_MODEL` only when the grader must use a separate
   credential, endpoint, or model. Otherwise the evaluation runner reuses the
@@ -28,7 +29,7 @@ Optional:
 The runner creates one isolated thread per case, records normalized observable
 events, rejects any generated approval so an evaluation never writes the lesson
 document, soft-deletes the temporary thread, and writes
-`evals/results/latest.json`.
+`<系统暂存目录>/lessonup-evals/agent/latest.json` (override with `LESSONUP_EVAL_OUTPUT_DIR`).
 
 Set `LESSONUP_EVAL_CASE_IDS` to a comma-separated list when rerunning selected
 regressions. Lesson-file and semester-framework cases share the same runner but
@@ -36,10 +37,10 @@ use their own canonical resource snapshot and isolated thread. If the grader is
 temporarily unavailable, execution evidence is still written and the case fails
 as `grader_unavailable` instead of losing the whole run.
 
-Automated gates cover required and forbidden tools, approval boundaries,
+Automated gates require successful completion of required tools, reject forbidden tool attempts, and cover approval boundaries,
 sources and terminal failures. Every case is also graded by a separately configured
 model against the canonical lesson document, lesson metadata, design basis, current
-curriculum knowledge and its case-specific `rubric`. Five shared business gates
+curriculum knowledge, real classroom feedback and its case-specific `rubric`. Five shared business gates
 measure whether the Agent understands the current lesson, understands the current
 curriculum when required, fulfills the teacher's actual goal, produces executable
 classroom action, and keeps evidence and uncertainty honest. Generic, ungrounded,
@@ -47,9 +48,38 @@ non-actionable or unsupported-precision output fails the command and exits non-z
 Teacher-facing tool names, schema parameters, UUIDs, internal knowledge codes,
 validation codes, and technical retry narration are also hard failures.
 The rubric is an executable release gate rather than an unscored note in the
-result file.
+result file. `tool-contract.test.ts` checks case requirements against the actual
+native tool surface. The feedback case distinguishes observation, explanation,
+adjustment and a future check; it cannot prove a learning improvement. Model
+grading is a screening measure and still needs calibration against educator
+judgment and real student work.
+
+人工专业盲评另见 [教育专业能力验证](../docs/professional-review.md)。`npm run eval:professional` 只处理本地材料与人工评分，不调用模型或发送材料。缺少两位完整独立评审或存在严重问题、大分歧时不能通过。
+
+Conditional cases can set `allowsNoChange`: a successful
+`complete_without_change` replaces the proposal/approval requirement, while
+required canonical reads and the substantive rubric still apply. A failed or
+merely started no-op cannot pass, and a no-op plus approval is a conflict.
+
+## 隔离的真实模型闭环冒烟测试
+
+`npm run eval:learning:smoke` 使用项目已有 `MODEL_*` 配置和原生 Pi，在独立内存仓储中创建明确标注的合成案例，无需登录或真实教案 ID，也不操作 D1/R2。覆盖保留现稿、准备待采用方案、读取前后证据并提出待教师审议的复测建议。断言正文版本不变，不生成文档审批，不由模型代替教师采用、实施或最终审议。
+
+默认使用产品的 `low` 思考强度；`LESSONUP_EVAL_THINKING_LEVEL=high` 或 `max` 可单独测量，仍使用同一配置模型。每案90秒后请求原生取消；供应商中断、失败、未完成或租约过期均不能通过。结果与每次运行记录写到系统暂存目录的 `lessonup-evals/native-learning/`，可用 `LESSONUP_EVAL_OUTPUT_DIR` 改为另一个工作区外路径。记录仅包含合成业务结果、公开工具状态、耗时和 token 使用，不保存凭据或私有推理。
+
+这条命令验证真实工具行为，不评分教育专业水平或真实课堂效果，也不是 p95 延迟结论。跨学科专家盲评和真实学生的延迟、迁移表现仍需独立验证。
 
 ## 性能发布门
+
+### 前端长文档与流式压力测试
+
+`npm run test:e2e:performance` 先构建生产包，在本地 Chromium 的4倍CPU降速下验证约4,700字、7页教案的草稿生成、输入、采用分页一致性、移动视口与中途取消恢复。传输是明确的确定性夹具，不用于证明模型能力。结果、CPU采样（可选 `LESSONUP_PERF_PROFILE=1`）、截图与追踪写到系统暂存目录；可用 Playwright 的 `--output` 覆盖目录。
+
+记录首次打开耗时、流式期间的输入操作耗时、超过50ms长任务的超额时长之和（blocking time）以及帧间隔。输入耗时含 Playwright 调用与状态确认，不能冒充浏览器 INP。CPU降速结果只比较同一机器与同一夹具，不能推断全部真实设备或供应商延迟。
+
+默认仅记录；发布约束显式设置 `LESSONUP_UI_ENFORCE_BUDGET=1` 和 `LESSONUP_UI_MAX_INPUT_MS`、`LESSONUP_UI_MAX_BLOCKING_MS`、`LESSONUP_UI_MAX_FRAME_GAP_MS` 三项正整数预算。缺失观测或超限不能通过。预算须由产品目标和实际设备基线决定，不与下面的模型延迟预算混为一个数字。
+
+### 模型请求性能
 
 每个案例都会写出实际的 `durationMs`、`firstOutputMs`、`modelRequests`、
 `toolCalls` 与 `inputTokens`。普通 `npm run eval:agent` 只记录这些数据，便于

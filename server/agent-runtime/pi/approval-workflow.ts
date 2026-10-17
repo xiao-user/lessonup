@@ -128,9 +128,9 @@ export class PiApprovalWorkflow {
     idempotencyKey: string;
     emit: Emit;
   }) {
-    await this.ready;
     let approval = await this.repository.getApproval(args.userId, args.approvalId);
     if (!approval) throw new Error("approval_not_found");
+    if (isPresentationGoalPatch(approval.patch)) await this.ready;
     if (approval.runId !== args.runId) throw new Error("run_scope_invalid");
     if (
       "kind" in approval.patch

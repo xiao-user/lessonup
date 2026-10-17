@@ -162,7 +162,7 @@ export function projectPublicPiEvents(args: {
         toolCallId: event.toolCallId,
         name: event.toolName,
         ok: !event.isError,
-        outcome: event.isError ? "needs_revision" : "completed",
+        outcome: event.isError ? "needs_revision" : event.toolName === "complete_without_change" ? "no_change" : "completed",
         turn: currentTurn,
         ...presentation,
       });

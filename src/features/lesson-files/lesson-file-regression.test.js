@@ -158,7 +158,8 @@ test("pagination renders every Markdown candidate with the same Tiptap schema", 
 
   assert.match(workspace, /probeContent\.innerHTML = renderLessonMarkdownHtml\(text\)/);
   assert.doesNotMatch(workspace, /richTextScale|rawFullHeight/);
-  assert.match(markdown, /generateHTML\(projectLessonMarkdownDocument\(value\)/);
+  assert.match(markdown, /projectionSchema\.nodeFromJSON\(projectLessonMarkdownDocument\(value\)\)/);
+  assert.match(markdown, /getHTMLFromFragment\(node\.content, projectionSchema\)/);
   assert.match(markdown, /lessonFieldExtensions/);
   assert.match(markdown, /content\.at\(-1\)\?\.type === "paragraph"/);
 });
@@ -363,6 +364,24 @@ test("measured table rows determine the final page boundary", () => {
   assert.ok(processEntries.length > 1);
   assert.ok(processEntries.some((entry) => entry.continued));
   assert.equal(processEntries.map((entry) => entry.value).join(""), "教学步骤".repeat(32));
+});
+
+test("long Markdown pagination searches whole lines and preserves every source character", () => {
+  const plan = createLessonPlanDraft({ subject: "语文" }, { title: "文本证据" });
+  plan.process = Array.from({ length: 300 }, (_, index) => `- 第${index + 1}项：用证据解释判断。`).join("\n");
+  let probes = 0;
+  const pages = paginateLessonPlan(plan, {
+    pageHeight: 200, measureBasics: () => 10, measureTopic: () => 10, measurePresentation: () => 20,
+    measureSection: (section, value) => {
+      if (section.id !== "process") return 10;
+      probes += 1;
+      return Math.max(1, String(value).split("\n").length) * 10;
+    },
+  });
+  const fragments = pages.flat().filter((item) => item.field === "process");
+  assert.equal(fragments.map((item) => item.value).join(""), plan.process);
+  assert.ok(fragments.slice(0, -1).every((item) => item.value.endsWith("\n")));
+  assert.ok(probes < 200, `Expected bounded line probes, got ${probes}`);
 });
 
 test("pagination tracks content separately from structural layout", async () => {

@@ -1,6 +1,13 @@
 export function resolveEvalGraderConfig(
   environment: Record<string, string | undefined>,
-) {
+): {
+  apiKey: string;
+  baseURL: string;
+  model: string;
+  api: "openai-responses" | "openai-completions";
+  contextWindow: number;
+  maxTokens: number;
+} {
   const apiKey = environment.LESSONUP_EVAL_GRADER_API_KEY
     ?? environment.MODEL_API_KEY;
   const baseURL = environment.LESSONUP_EVAL_GRADER_BASE_URL

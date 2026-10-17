@@ -1,4 +1,4 @@
-import { generateHTML } from "@tiptap/core";
+import { getHTMLFromFragment, getSchema } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { MarkdownManager } from "@tiptap/markdown";
 import Highlight from "@tiptap/extension-highlight";
@@ -140,6 +140,11 @@ export function projectLessonMarkdownDocument(value) {
   };
 }
 
+// Extensions are fixed for every field. Rebuilding their schema per binary
+// pagination probe was the dominant CPU cost for multi-page lessons.
+let projectionSchema;
 export function renderLessonMarkdownHtml(value) {
-  return generateHTML(projectLessonMarkdownDocument(value), lessonFieldExtensions);
+  projectionSchema ??= getSchema(lessonFieldExtensions);
+  const node = projectionSchema.nodeFromJSON(projectLessonMarkdownDocument(value));
+  return getHTMLFromFragment(node.content, projectionSchema);
 }

@@ -89,3 +89,25 @@ export function gradePerformance(
   }
   return failures;
 }
+
+export type FrontendPerformance = { inputMs: number; streaming: { blockingTimeMs: number; maximumFrameGapMs: number | null } };
+export type FrontendPerformanceBudget = { maxInputMs: number; maxBlockingMs: number; maxFrameGapMs: number };
+
+/** Browser budgets are explicit and separate from provider/model latency. */
+export function resolveFrontendPerformanceBudget(environment: Record<string, string | undefined>): FrontendPerformanceBudget | null {
+  if (environment.LESSONUP_UI_ENFORCE_BUDGET !== "1") return null;
+  return {
+    maxInputMs: readPositiveInteger(environment, "LESSONUP_UI_MAX_INPUT_MS"),
+    maxBlockingMs: readPositiveInteger(environment, "LESSONUP_UI_MAX_BLOCKING_MS"),
+    maxFrameGapMs: readPositiveInteger(environment, "LESSONUP_UI_MAX_FRAME_GAP_MS"),
+  };
+}
+
+export function gradeFrontendPerformance(metrics: FrontendPerformance, budget: FrontendPerformanceBudget | null) {
+  if (!budget) return [];
+  return [
+    ...(!Number.isFinite(metrics.inputMs) || metrics.inputMs > budget.maxInputMs ? ["ui_input_budget_exceeded"] : []),
+    ...(!Number.isFinite(metrics.streaming.blockingTimeMs) || metrics.streaming.blockingTimeMs > budget.maxBlockingMs ? ["ui_blocking_budget_exceeded"] : []),
+    ...(metrics.streaming.maximumFrameGapMs === null || !Number.isFinite(metrics.streaming.maximumFrameGapMs) || metrics.streaming.maximumFrameGapMs > budget.maxFrameGapMs ? ["ui_frame_gap_budget_exceeded"] : []),
+  ];
+}

@@ -1,4 +1,6 @@
 import { defineConfig } from "@playwright/test";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 export default defineConfig({
   testDir: "./e2e/agent",
@@ -8,7 +10,7 @@ export default defineConfig({
   timeout: 45_000,
   expect: { timeout: 8_000 },
   reporter: "line",
-  outputDir: "output/playwright/agent",
+  outputDir: path.join(tmpdir(), "lessonup-playwright", "agent"),
   use: {
     baseURL: "http://127.0.0.1:5176",
     browserName: "chromium",
@@ -26,7 +28,9 @@ export default defineConfig({
       timeout: 60_000,
     },
     {
-      command: "LESSONUP_API_ORIGIN=http://127.0.0.1:8790 npx vite --host 127.0.0.1 --port 5176 --strictPort",
+      command: process.env.LESSONUP_E2E_PREVIEW === "1"
+        ? "LESSONUP_API_ORIGIN=http://127.0.0.1:8790 npx vite preview --host 127.0.0.1 --port 5176 --strictPort"
+        : "LESSONUP_API_ORIGIN=http://127.0.0.1:8790 npx vite --host 127.0.0.1 --port 5176 --strictPort",
       url: "http://127.0.0.1:5176",
       reuseExistingServer: false,
       timeout: 60_000,

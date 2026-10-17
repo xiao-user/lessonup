@@ -1,6 +1,27 @@
 import { createThread, expect, openLessonFile, sendPrompt, test } from "./fixtures.js";
 import { lessonFileId, notebookId } from "./test-data.js";
 
+test("keeps both sidebars usable when resizing across the mobile breakpoint", async ({ lessonPage: page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const assistant = page.getByRole("button", { name: "新建会话", exact: true });
+  const outline = page.getByRole("button", { name: /^返回备课本：/ });
+  const toggle = page.getByRole("button", { name: "显示备课助手", exact: true });
+  await expect(assistant).toBeHidden();
+  await toggle.click();
+  await expect(assistant).toBeVisible();
+  await page.setViewportSize({ width: 1127, height: 844 });
+  await expect(assistant).toBeVisible();
+  await expect(outline).toBeVisible();
+  await expect(toggle).toBeHidden();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(assistant).toBeVisible();
+  await toggle.click();
+  await expect(assistant).toBeHidden();
+  await page.setViewportSize({ width: 1127, height: 844 });
+  await expect(assistant).toBeVisible();
+  await expect(outline).toBeVisible();
+});
+
 test("covers empty state, streaming, tools, sources, sessions, retry, cancel and branches", async ({ lessonPage: page }) => {
   await expect(page.getByText("可结合当前教案继续备课", { exact: true })).toBeVisible();
 

@@ -1,3 +1,4 @@
+import { D1LearningRepository } from "./d1-learning-repository.js";
 import type { LessonRepository } from "../repository.js";
 import type { SqlDatabase } from "../platform/sql-database.js";
 import { D1AgentApprovalStore, type AgentApprovalStore } from "./d1-agent-approval-store.js";
@@ -30,6 +31,7 @@ export function createD1LessonCoreRepository(
   database: SqlDatabase,
   clock = () => new Date().toISOString(),
 ): D1LessonCoreRepository {
+  const learning = new D1LearningRepository(database);
   const workspace = new D1LessonWorkspaceStore(database, clock);
   const runtime = new D1AgentRuntimeStore(database, clock);
   const approvals = new D1AgentApprovalStore(database, clock);
@@ -50,6 +52,7 @@ export function createD1LessonCoreRepository(
   const continuity = new D1SemesterFrameworkContinuityRepository(database, clock);
 
   return {
+    ...bind(learning, ["listLearningReviews", "listLearningEvidence", "getLearningEvidence", "listLearningInquiries", "getLearningInquiry", "replayLearningCommand", "getLearningCommandResult", "saveLearningEvidence", "saveLearningInquiry"]),
     ...bind(workspace, workspaceMethods),
     ...bind(runtime, runtimeMethods),
     ...bind(approvals, approvalMethods),

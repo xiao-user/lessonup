@@ -2,6 +2,7 @@ import { ZodError } from "zod";
 import { DesignBasisProjectionError } from "./design-basis-projection.js";
 
 const notFound = new Set([
+  "learning_inquiry_not_found",
   "notebook_not_found",
   "lesson_file_not_found",
   "semester_framework_not_found",
@@ -19,6 +20,8 @@ const notFound = new Set([
 ]);
 
 const conflicts = new Set([
+  "learning_proposal_not_delivered",
+  "stale_learning_inquiry",
   "stale_document",
   "stale_design_basis",
   "stale_resource",
@@ -38,6 +41,8 @@ const conflicts = new Set([
 ]);
 
 const forbidden = new Set([
+  "learning_scope_invalid",
+  "learning_evidence_scope_invalid",
   "scope_denied",
   "thread_scope_invalid",
   "lesson_scope_invalid",
@@ -55,6 +60,16 @@ const unavailable = new Set([
 ]);
 
 const badRequest = new Set([
+  "agent_task_scope_invalid",
+  "continuation_intent_conflict",
+  "learning_command_key_invalid",
+  "learning_implementation_time_invalid",
+  "learning_transition_invalid",
+  "learning_inquiry_not_implemented",
+  "learning_evidence_before_implementation",
+  "learning_observation_in_future",
+  "learning_evidence_not_comparable",
+  "learning_teacher_decision_required",
   "empty_patch",
   "knowledge_file_required",
   "knowledge_source_empty",

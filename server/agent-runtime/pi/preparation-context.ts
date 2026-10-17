@@ -66,14 +66,16 @@ export async function loadPreparationContext(
     };
   }
 
-  const file = args.skipDesignBasis
-    ? await repository.getLessonFileContext(args.userId, thread.lessonFileId)
-    : await repository.getLessonFile(args.userId, thread.lessonFileId);
+  const [file, basis] = await Promise.all([
+    args.skipDesignBasis
+      ? repository.getLessonFileContext(args.userId, thread.lessonFileId)
+      : repository.getLessonFile(args.userId, thread.lessonFileId),
+    args.skipDesignBasis
+      ? Promise.resolve(null)
+      : repository.getLessonDesignBasis(args.userId, thread.lessonFileId),
+  ]);
   if (!file || file.notebookId !== thread.notebookId) throw new Error("thread_scope_invalid");
   if (file.documentVersion !== args.documentVersion) throw new Error("document_context_stale");
-  const basis = args.skipDesignBasis
-    ? null
-    : await repository.getLessonDesignBasis(args.userId, thread.lessonFileId);
   if (!args.skipDesignBasis && !basis) throw new Error("thread_scope_invalid");
 
   return {

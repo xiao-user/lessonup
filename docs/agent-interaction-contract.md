@@ -48,8 +48,49 @@ the error with its cause chain, never the teacher's message or model output.
 - Use `read_document_outline` only when structure and content presence are
   sufficient.
 
-The manager owns the final user-visible answer. Specialist agents remain tools;
-their internal output is not a separate conversation.
+The single native Pi Agent owns investigation and the final answer. Shared
+teaching judgment is present in its static policy; only Dashi remains a separate
+Skill. There are no nested specialist model calls. Ordinary teaching tools stay
+stable for the resource, including curriculum, knowledge and teaching context;
+language routing restricts writes and requires evidence without hiding reads.
+
+`read_lesson_design_basis` includes the bound unit, current blueprint, nearby
+lessons and real classroom feedback. `read_lesson_class_feedback` returns the
+feedback view alone. Reads cover the current lesson and the nearest three
+earlier, non-cancelled blueprints in the same unit, with at most eight newest
+records per lesson and explicit truncation. No feedback is not proof of mastery.
+The same projection includes up to three finalized learning reviews per lesson,
+with original baseline, follow-up, intervention, alternative explanation and
+limitations. It reads the canonical records instead of duplicating feedback.
+
+## Structured teaching actions and completion
+
+Product actions pass `taskIntent` (`analysis`, `document_write`,
+`learning_inquiry`, `learning_review`). The server binds selected evidence,
+inquiry, version and write scope; natural-language routing remains a fallback
+for ordinary conversation. Learning actions cannot change the lesson document.
+
+`complete_without_change` requires a successful canonical content read and
+records either a justified preservation or an evidence gap. It cannot coexist
+with a proposal. It completes without an approval or write; external-retrieval
+gates for new lesson claims do not force a search merely to preserve existing
+content. It must not assert unobserved external facts.
+
+Learning tools must successfully read the selected evidence before saving an
+inquiry or review recommendation. These proposals use actual learning evidence
+rather than satisfying a language-derived external-search requirement. They
+remain hidden until the proposing run completes; cancellation and failed runs
+do not produce adoptable drafts. Teacher actions separately record adoption,
+implementation and final review, with CAS and idempotency. Agent review cannot
+mark a hypothesis verified or create classroom observations.
+
+`read_learning_progress` provides indexed cursor pagination and an exact
+server-bound selection even outside the latest window. Follow-up evidence is
+immutable, belongs to an implemented inquiry and cannot precede implementation.
+An incomparable objective, criterion or group requires an inconclusive review.
+Review retains limitations; its follow-up can seed another inquiry without
+claiming causality. Network uncertainty is resolved through the original
+command receipt or the same command, never a new automatic write.
 
 ## Event projection
 

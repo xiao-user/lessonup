@@ -891,11 +891,19 @@ export type AgentApprovalRecord = {
   createdAt: string;
 };
 
+export const agentTaskIntentSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("analysis") }).strict(),
+  z.object({ type: z.literal("document_write"), fields: z.array(lessonFieldSchema).min(1).max(14).optional() }).strict(),
+  z.object({ type: z.literal("learning_inquiry"), evidenceId: z.string().uuid() }).strict(),
+  z.object({ type: z.literal("learning_review"), inquiryId: z.string().uuid(), evidenceId: z.string().uuid(), expectedVersion: z.number().int().nonnegative() }).strict(),
+]);
+export type AgentTaskIntent = z.infer<typeof agentTaskIntentSchema>;
+
 export type CapabilityPlan = {
+  taskIntent?: AgentTaskIntent;
   skillIds: string[];
   toolGroups: string[];
   mcpServers: string[];
-  specialistAgents: string[];
   evidenceRequired: boolean;
   writeMode?: "consultative" | "open" | "explicit";
   designBasisRequested?: boolean;
@@ -1508,4 +1516,5 @@ export type NormalizedAgentEvent =
     transportTiming?: import("./agent-runtime/pi/transport-timing.js").PiTransportTiming;
   }
   | { type: "run.cancelled"; runId: string }
-  | { type: "run.failed"; runId: string; error: string; message?: AgentMessageRecord };
+  | { type: "run.failed"; runId: string; error: string; message?: AgentMessageRecord }
+  | { type: "learning.updated"; runId: string; lessonFileId: string; inquiryId: string };

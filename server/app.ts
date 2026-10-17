@@ -1,3 +1,4 @@
+import { registerLearningRoutes } from "./learning/routes.js";
 import { Hono } from "hono";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { cors } from "hono/cors";
@@ -7,6 +8,7 @@ import { z } from "zod";
 import { createRequireUser, getRuntimeAuthentication, type AppBindings } from "./auth.js";
 import { config, hasModelProvider, runtimeCapabilities } from "./config.js";
 import {
+  agentTaskIntentSchema,
   curriculumSemanticRelationSchema,
   createSemesterFrameworkSchema,
   createLessonBlueprintSchema,
@@ -66,6 +68,7 @@ const runInputSchema = z.object({
   generationIntentId: z.string().uuid().optional(),
   frameworkWritebackIntentId: z.string().uuid().optional(),
   clientCommandId: z.string().uuid().optional(),
+  taskIntent: agentTaskIntentSchema.optional(),
   thinkingLevel: z.enum(TEACHER_THINKING_LEVELS).optional().default(DEFAULT_TEACHER_THINKING_LEVEL),
 });
 
@@ -824,6 +827,8 @@ export function createApp(
       throw error;
     }
   });
+
+  registerLearningRoutes(app, repository);
 
   app.get("/api/lesson-files/:id/class-feedback", async (c) => {
     const lessonFileId = c.req.param("id");

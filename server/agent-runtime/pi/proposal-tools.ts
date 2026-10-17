@@ -217,6 +217,7 @@ export function createPiSemesterProposalTool(args: {
     parameters,
     executionMode: "sequential",
     execute: async (toolCallId, raw) => {
+      if (args.plan.writeMode === "consultative") throw new Error("write_not_requested");
       const proposal = semesterFrameworkPatchToolSchema.parse(raw);
       if (args.plan.minimalWriteRequested && proposal.operations.length > 1) {
         throw new Error("too_many_framework_operations");
@@ -225,7 +226,9 @@ export function createPiSemesterProposalTool(args: {
         args.context.userId,
         args.context.semesterFrameworkId,
       );
-      if (!aggregate) throw new Error("semester_framework_not_found");
+      if (!aggregate || aggregate.framework.notebookId !== args.context.notebookId) {
+        throw new Error("semester_framework_not_found");
+      }
       if (aggregate.framework.version !== args.context.frameworkVersion) {
         throw new Error("resource_context_stale");
       }

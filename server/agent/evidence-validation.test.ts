@@ -9,7 +9,6 @@ const plan = (overrides: Partial<CapabilityPlan> = {}): CapabilityPlan => ({
   skillIds: [],
   toolGroups: [],
   mcpServers: [],
-  specialistAgents: [],
   writeMode: "explicit",
   evidenceRequired: true,
   ...overrides,
@@ -74,5 +73,7 @@ describe("evidenceRequiredToolError", () => {
       message: expect.stringContaining("search_curriculum_standards"),
     });
     expect(payload.message).toContain("curriculum_standard_search");
+    expect(payload.message).toContain("complete_without_change");
+    expect(payload.message).toContain("insufficient_evidence");
   });
 });

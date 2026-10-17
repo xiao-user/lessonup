@@ -23,6 +23,10 @@ export const lessonFieldLabels: Record<LessonField, string> = {
 };
 
 const fallbackLabels: Record<string, string> = {
+  complete_without_change: "说明保留现稿或证据缺口",
+  read_learning_progress: "读取学习证据与改进记录",
+  propose_learning_inquiry: "准备学习改进方案",
+  propose_learning_review: "准备复测审议建议",
   read_document_metadata: "读取教案信息",
   read_document: "读取整份教案",
   read_section: "读取教案栏目",
