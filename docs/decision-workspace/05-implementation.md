@@ -8,7 +8,7 @@
 
 - `0024_lesson_decisions.sql`：决策版本（append-only）、决策版本历史、证据卡。
 - `0025_lesson_decision_events.sql`：聚合遥测（无自由文本、无学生标识）。
-- 本地迁移已验证；生产迁移与部署需单独执行。
+- 本地与远程迁移均已执行；生产 Worker 已发布（见 [发布记录](../releases/2026-10-18-decision-workspace.md)）。
 
 ### 1.2 服务与端口
 
@@ -63,10 +63,10 @@ npm run eval:decision-quality -- summarize /tmp/decision-review/packet.json /tmp
 ## 2. 验证
 
 - `npm run typecheck` 通过。
-- Vitest：133 个文件 / 746 通过 + 1 跳过（含决策领域、服务、Agent 工具、遥测与评测工具）。
+- Vitest：134 个文件 / 748 通过 + 1 跳过（含决策领域、服务、D1 仓储、Agent 工具、遥测与评测工具）。
 - Playwright：39 项通过，新增决策工作台完整链路（创建 → 证据 → 确认 → 实施 → 复测审议 → 遥测）。
-- 编辑器回归通过；生产构建通过。
-- 本地 D1 迁移 `0024`、`0025` 已验证。
+- 编辑器回归、严格类型检查、生产构建与 `npm run check` 通过。
+- 本地与远程 D1 迁移 `0024`、`0025` 均已执行。
 
 ## 3. 当前边界
 
@@ -74,7 +74,7 @@ npm run eval:decision-quality -- summarize /tmp/decision-review/packet.json /tmp
 - 决策证据目前随提案写入；尚无独立的证据管理界面。
 - 复测审议一次引用一条学习证据；多证据/延迟复测仍由学习验证模块承载。
 - 尚无决策质量遥测看板；事件已可读，分析脚本面向离线评审。
-- 未做生产迁移与部署；部署前需先应用 `0024`、`0025`。
+- 未做登录后的生产浏览器验收；生产已部署，回滚版本见发布记录。
 
 ## 4. 回退
 

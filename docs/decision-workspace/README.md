@@ -7,7 +7,7 @@
 | 文档 | 作用 | 状态 |
 | --- | --- | --- |
 | [00-charter.md](00-charter.md) | 目标、范围、约束、退出标准 | 待评审 |
-| [05-implementation.md](05-implementation.md) | v1 实现、验证、回退与边界 | 已落地 |
+| [05-implementation.md](05-implementation.md) | v1 实现、验证、回退与边界 | 已发布 |
 | [01-current-state-audit.md](01-current-state-audit.md) | 现有能力、Agent 流、失败模式、性能基线 | 待评审 |
 | [02-decision-model.md](02-decision-model.md) | 决策对象、证据卡、生命周期、数据模型 | v1 已实现 |
 | [03-evaluation-protocol.md](03-evaluation-protocol.md) | 证据阶梯、当前替代验证、真实教师 pilot 预案 | 工具已备，pilot 待启动 |
@@ -27,6 +27,10 @@
 2. 再读 `02-decision-model.md`，确认决策对象与证据卡是否覆盖真实教学判断。
 3. 最后审 `03` / `04`，确认验证方式与性能预算是否可执行、可证伪。
 4. 任何阶段只要证据不支持假设，就停止或改假设，不进入下一阶段。
+
+## 发布记录
+
+- [2026-10-18 教学决策工作台 v1](../releases/2026-10-18-decision-workspace.md)：生产 Worker 版本 `0640b8d0-161b-42f1-aba9-281a291e472d`，迁移 `0024`/`0025` 已应用。
 
 ## 与现有系统的关系
 
