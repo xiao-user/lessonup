@@ -136,6 +136,7 @@ npm run build
 - `npm run test:e2e:agent` 使用 Playwright Chromium 和确定性测试服务，自动启动独立端口；运行前需安装相应浏览器。
 - `npm run eval:agent` 用于配置真实模型后的评测；`eval:agent:release` 额外执行配置的性能预算检查。
 - `npm run eval:curriculum-standards` 用已导入的 D1 课标数据评测检索；`-- --lexical-only` 只看文本排序（未配置嵌入服务或嵌入失败时的行为）。
+- `npm run eval:decision:smoke` 使用真实配置模型和原生 Pi 验证独立的合成决策案例，并核对固定材料引用；不操作生产数据，也不证明真实教学效果。
 - `npm run eval:decision-quality` 导出/汇总教学决策盲评包；需要 baseline/treatment JSON 简报，结果仅作内部代理证据。
 - `npm run check` 依次运行类型检查、Vitest、编辑器回归、Playwright 和前端构建；Cloudflare 类型检查需单独执行。
 

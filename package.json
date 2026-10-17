@@ -44,6 +44,7 @@
     "eval:learning:smoke": "tsx evals/run-native-learning-smoke.ts",
     "eval:professional": "tsx evals/run-professional-review.ts",
     "eval:decision-quality": "tsx evals/run-decision-quality.ts",
+    "eval:decision:smoke": "tsx evals/run-native-decision-smoke.ts",
     "eval:agent:release": "LESSONUP_EVAL_ENFORCE_PERFORMANCE_BUDGET=1 tsx evals/run-agent-evals.ts",
     "eval:curriculum-standards": "tsx evals/run-curriculum-standard-retrieval.ts",
     "check": "npm run typecheck && npm run test && npm run test:legacy && npm run test:e2e:agent && npm run build",

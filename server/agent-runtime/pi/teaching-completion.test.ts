@@ -8,6 +8,16 @@ const tool = (name: string, execute = vi.fn(async () => ({ content: [{ type: "te
 } satisfies AgentTool<any>);
 
 describe("grounded no-change completion", () => {
+  it("keeps an evidence-gap decision open until a candidate is saved", async () => {
+    const proposal = tool("propose_decision");
+    const runtime = withTeachingCompletion([tool("read_document"), proposal], () => false, { decisionCandidateRequired: true });
+    await runtime.tools[0]!.execute("read", {});
+    await expect(runtime.tools.at(-1)!.execute("complete", { kind: "insufficient_evidence", reason: "缺少本班真实观察，需要先收集。" }))
+      .rejects.toThrow("decision_candidate_required");
+    expect(runtime.getNoChange()).toBeNull();
+    await runtime.tools[1]!.execute("proposal", {});
+    expect(proposal.execute).toHaveBeenCalledOnce();
+  });
   it("requires a successful canonical content read and blocks later mutation proposals", async () => {
     const write = tool("propose_document_patch");
     const runtime = withTeachingCompletion([tool("read_document"), write], () => false);

@@ -4,7 +4,11 @@ import { Type } from "typebox";
 export type TeachingNoChange = { kind: "no_change_needed" | "insufficient_evidence"; reason: string };
 
 /** A no-op is an explicit, grounded result, not a missing write or text guess. */
-export function withTeachingCompletion(tools: AgentTool<any>[], hasProposal: () => boolean) {
+export function withTeachingCompletion(
+  tools: AgentTool<any>[],
+  hasProposal: () => boolean,
+  options: { decisionCandidateRequired?: boolean } = {},
+) {
   const observed = new Set<string>();
   let outcome: TeachingNoChange | null = null;
   const canonicalReads = new Set(["read_document", "read_section", "read_semester_framework", "read_semester_unit"]);
@@ -26,6 +30,7 @@ export function withTeachingCompletion(tools: AgentTool<any>[], hasProposal: () 
     }, { additionalProperties: false }),
     executionMode: "sequential",
     execute: async (_callId, input) => {
+      if (options.decisionCandidateRequired) throw new Error("decision_candidate_required:use propose_decision with status insufficient_evidence when evidence is missing; this does not confirm or implement a change");
       if (!observed.size) throw new Error("canonical_read_required");
       if (hasProposal()) throw new Error("teaching_result_already_completed");
       outcome = input as TeachingNoChange;

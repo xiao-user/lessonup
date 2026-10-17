@@ -66,6 +66,34 @@ describe("decision quality review package", () => {
     expect(report.incompleteSamples).toHaveLength(4);
   });
 
+  it("rejects incomplete mappings and duplicate variants", () => {
+    const { packet, key } = createDecisionPacket({ cases });
+    expect(() => summarizeDecisionReviews(packet, { ...key, mapping: {} }, [])).toThrow("decision_mapping_incomplete");
+    const mapping = structuredClone(key.mapping);
+    for (const entry of Object.values(mapping)) entry.variant = "baseline";
+    expect(() => summarizeDecisionReviews(packet, { ...key, mapping }, [])).toThrow("decision_mapping_pair_invalid");
+  });
+
+  it("reports lower scores as a regression direction rather than no difference", () => {
+    const { packet, key } = createDecisionPacket({ cases });
+    const score = (sampleId: string) => key.mapping[sampleId].variant === "treatment" ? 1 : 2;
+    const report = summarizeDecisionReviews(packet, key, [
+      ...ratingsFor(packet, key, "reviewer-a", score), ...ratingsFor(packet, key, "reviewer-b", score),
+    ]);
+    expect(report.status).toBe("reviewed");
+    expect(report.summary.direction).toBe("lower");
+    expect(report.summary.meanDifference).toBe(-1);
+  });
+
+  it("does not report estimable kappa when every reviewer gives the same constant score", () => {
+    const { packet, key } = createDecisionPacket({ cases });
+    const report = summarizeDecisionReviews(packet, key, [
+      ...ratingsFor(packet, key, "reviewer-a", () => 2), ...ratingsFor(packet, key, "reviewer-b", () => 2),
+    ]);
+    expect(report.summary.direction).toBe("equal");
+    expect(report.summary.agreement.decision_clarity).toBeNull();
+  });
+
   it("rejects duplicate reviewer ratings against the same packet", () => {
     const { packet, key } = createDecisionPacket({ cases });
     const ratings = ratingsFor(packet, key, "reviewer-a", () => 2);

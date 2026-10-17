@@ -8,13 +8,15 @@ import {
   summarizeDecisionReviews,
 } from "./decision-quality.js";
 
-const [mode, input, output, keyFile, ...ratingFiles] = process.argv.slice(2);
+const [mode, input, ...args] = process.argv.slice(2);
 const usage = "usage: npm run eval:decision-quality -- export <cases.json> <new-output-directory> | summarize <packet.json> <key.json> <new-summary.json> <ratings.json>...";
-if (!input || !output || !["export", "summarize"].includes(mode ?? "")) throw new Error(usage);
+if (!input || !["export", "summarize"].includes(mode ?? "")) throw new Error(usage);
 
 const read = async (file: string) => JSON.parse(await readFile(path.resolve(file), "utf8"));
 
 if (mode === "export") {
+  const [output] = args;
+  if (!output) throw new Error(usage);
   const { packet, key } = createDecisionPacket(await read(input));
   const directory = path.resolve(output);
   await mkdir(directory, { mode: 0o700 });
@@ -40,13 +42,15 @@ if (mode === "export") {
   ]);
   console.log(`Exported ${packet.samples.length} blinded decision briefs. Keep coordinator-key.json away from reviewers.`);
 } else {
-  if (!keyFile) throw new Error(usage);
+  const [keyFile, output, ...ratingFiles] = args;
+  if (!keyFile || !output) throw new Error(usage);
   const ratings = (await Promise.all(ratingFiles.map(read))).flat();
   const report = summarizeDecisionReviews(await read(input), await read(keyFile), ratings);
   await writeFile(path.resolve(output), JSON.stringify(report, null, 2), { flag: "wx", mode: 0o600 });
   console.log(JSON.stringify({
     status: report.status,
     meanDifference: report.summary.meanDifference,
+    direction: report.summary.direction,
     differenceInterval: report.summary.differenceInterval,
     disagreements: report.disagreements.length,
     criticalFindings: report.criticalFindings.length,

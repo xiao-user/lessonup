@@ -166,7 +166,7 @@ export function quadraticWeightedKappa(pairs: Array<[number, number]>) {
       expectedAgreement += weight(row, column) * (leftMargin[row] / total) * (rightMargin[column] / total);
     }
   }
-  return expectedAgreement === 1 ? 1 : (observedAgreement - expectedAgreement) / (1 - expectedAgreement);
+  return expectedAgreement === 1 ? null : (observedAgreement - expectedAgreement) / (1 - expectedAgreement);
 }
 
 export function summarizeDecisionReviews(rawPacket: unknown, rawKey: unknown, rawRatings: unknown) {
@@ -180,6 +180,17 @@ export function summarizeDecisionReviews(rawPacket: unknown, rawKey: unknown, ra
   if (key.packetId !== packet.packetId || key.packetFingerprint !== fingerprint) throw new Error("decision_key_mismatch");
   const ratings = z.array(decisionRatingSchema).parse(rawRatings);
   const samples = new Map(packet.samples.map((sample) => [sample.sampleId, sample]));
+  if (samples.size !== packet.samples.length) throw new Error("duplicate_review_sample");
+  const mappedIds = Object.keys(key.mapping);
+  if (mappedIds.length !== samples.size || mappedIds.some((id) => !samples.has(id))) throw new Error("decision_mapping_incomplete");
+  const caseVariants = new Map<string, string[]>();
+  for (const { caseId, variant } of Object.values(key.mapping)) {
+    if (!caseId.trim()) throw new Error("decision_mapping_case_invalid");
+    caseVariants.set(caseId, [...(caseVariants.get(caseId) ?? []), variant]);
+  }
+  for (const variants of caseVariants.values()) {
+    if (variants.length !== 2 || new Set(variants).size !== 2) throw new Error("decision_mapping_pair_invalid");
+  }
   const seen = new Set<string>();
   for (const rating of ratings) {
     if (rating.packetId !== packet.packetId || rating.packetFingerprint !== fingerprint || !samples.has(rating.sampleId)) {
@@ -246,7 +257,9 @@ export function summarizeDecisionReviews(rawPacket: unknown, rawKey: unknown, ra
   }));
   const differenceMean = mean(differences);
   const status = criticalFindings.length || disagreements.length ? "needs_adjudication"
-    : incomplete.length ? "pending" : differenceMean !== null && differenceMean > 0 ? "reviewed" : "no_difference";
+    : incomplete.length ? "pending" : "reviewed";
+  const direction = incomplete.length || differenceMean === null ? "undetermined"
+    : differenceMean > 0 ? "higher" : differenceMean < 0 ? "lower" : "equal";
   return {
     packetId: packet.packetId,
     packetFingerprint: fingerprint,
@@ -259,10 +272,11 @@ export function summarizeDecisionReviews(rawPacket: unknown, rawKey: unknown, ra
       baselineAverage: mean(paired.map((item) => item.baseline).filter((value): value is number => value !== null)),
       treatmentAverage: mean(paired.map((item) => item.treatment).filter((value): value is number => value !== null)),
       meanDifference: differenceMean,
+      direction,
       differenceInterval: bootstrapInterval(differences),
       means,
       agreement,
     },
-    boundary: "Internal expert-proxy review only. It measures how a blinded brief reads, not external expert consensus, classroom implementation or student learning.",
+    boundary: "Internal expert-proxy review only. Reviewed means rating coverage is complete, not validated improvement. Direction and bootstrap intervals are descriptive, especially for small case sets. The coordinator mapping is trusted input; the packet fingerprint does not authenticate variant labels. This does not establish external expert consensus, classroom implementation or student learning.",
   };
 }

@@ -69,6 +69,12 @@ merely started no-op cannot pass, and a no-op plus approval is a conflict.
 
 这条命令验证真实工具行为，不评分教育专业水平或真实课堂效果，也不是 p95 延迟结论。跨学科专家盲评和真实学生的延迟、迁移表现仍需独立验证。
 
+## 决策任务与盲评
+
+`npm run eval:decision:smoke` 使用相同 `MODEL_*` 配置和原生 Pi；两例使用独立内存仓储，分别检查设计对齐候选与缺少学生效果证据时的候选。`LESSONUP_EVAL_CASE_IDS=goal_evidence` 可单独重跑。报告记录工具失败、固定原文引用核对、初始证据数量、耗时与 token 使用，输出到系统暂存目录下 `lessonup-evals/native-decision`。它不操作生产库，不证明教师可用性或学习效果。
+
+`npm run eval:decision-quality -- export <cases.json> <新目录>` 接受含 `caseId/decisionType/context/baseline/treatment` 的案例数组；`summarize <packet.json> <coordinator-key.json> <新summary.json> <ratings.json>...` 汇总评分。配对映射必须完整，每例恰有两个变体；`reviewed` 仅表示评分覆盖完成，差值方向为描述性的 `higher/lower/equal`。评分为同一常数时 kappa 不可估计，返回 `null`。保管配对密钥，样本指纹不认证标签真伪。详见 [原生模型验证记录](../docs/decision-workspace/06-native-decision-validation.md)。
+
 ## 性能发布门
 
 ### 前端长文档与流式压力测试

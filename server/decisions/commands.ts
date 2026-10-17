@@ -39,7 +39,8 @@ export const proposeDecisionSchema = z.object({
     statement: text(2_000),
     tradeoffs: z.array(text(1_000)).min(1).max(6),
   }).strict()).max(6).default([]),
-  chosenOptionId: z.string().trim().min(1).max(64).nullable().default(null),
+  chosenOptionId: z.string().trim().min(1).max(64).nullable().default(null)
+    .describe("Copy exactly one options[].id, such as opt_b. Do not use an option label, statement, or the string 'null'. If no option is chosen, send JSON null."),
   rationale: text(4_000),
   counterevidence: z.array(text(2_000)).max(8).default([]),
   assumptions: z.array(text(2_000)).max(8).default([]),

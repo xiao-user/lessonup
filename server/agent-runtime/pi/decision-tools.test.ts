@@ -29,11 +29,15 @@ function repository() {
     getLessonFileContext: vi.fn(async () => ({
       id: lessonFileId, ownerId: "teacher-1", notebookId: "notebook-1", documentVersion: 3, contextProfile: {},
     })),
+    getLessonFile: vi.fn(async () => ({
+      document: { objectives: "体会其表达效果。", assessment: "出口条只要求找出反复。" },
+    })),
     getRun: vi.fn(async () => ({ id: "run-1", ownerId: "teacher-1", threadId: "thread-1", branchId: "branch-1", status: "running" })),
     getThread: vi.fn(async () => ({ id: "thread-1", ownerId: "teacher-1", resourceType: "lesson_file", lessonFileId })),
     getBranch: vi.fn(async () => ({ id: "branch-1", ownerId: "teacher-1", threadId: "thread-1" })),
     listDecisions: vi.fn(async () => []),
     listDecisionEvidenceCards: vi.fn(async () => []),
+    listLearningEvidence: vi.fn(async () => []),
     getDecisionCommandResult: vi.fn(async () => null),
     replayDecisionCommand: vi.fn(async () => null),
     saveDecision: vi.fn(async (record) => record),
@@ -84,6 +88,93 @@ function toolsFor(plan = applyTaskIntent(deterministicCapabilityPlan("请帮我�
 }
 
 describe("decision agent tools", () => {
+  it("exposes input defaults as optional while keeping evidence facts required", () => {
+    const { tools } = toolsFor();
+    const schema = JSON.parse(JSON.stringify(tools[1]!.parameters));
+    expect(schema.required).not.toContain("evidenceCards");
+    expect(schema.required).not.toContain("chosenOptionId");
+    expect(schema.properties.evidenceCards.items.required).not.toContain("supports");
+    expect(schema.properties.evidenceCards.items.required).toContain("confidence");
+  });
+  it("resolves the current-lesson alias to server-owned metadata", async () => {
+    const { tools, repository } = toolsFor();
+    await tools[0]!.execute("read", {});
+    await tools[1]!.execute("propose", { ...proposal, evidenceCards: [{
+      ...evidenceCard, kind: "assessment_item", source: { ...evidenceCard.source, uri: "lessonup://lesson-files/current", version: "invented" },
+    }] });
+    const cards = vi.mocked(repository.saveDecision).mock.calls[0][3];
+    expect(cards[0].source).toMatchObject({ uri: "lessonup://lesson-files/lesson-1", version: "3" });
+    expect(cards[0].source.capturedAt).not.toBe(evidenceCard.source.capturedAt);
+  });
+
+  it("normalizes the model's literal null only to an unchosen candidate", async () => {
+    const { tools, getDecisionProposal } = toolsFor();
+    await tools[0]!.execute("read", {});
+    await tools[1]!.execute("propose", { ...proposal, chosenOptionId: "null", status: "insufficient_evidence" });
+    expect(getDecisionProposal()?.chosenOptionId).toBeNull();
+    expect(getDecisionProposal()?.provenance.confirmedBy).toBeNull();
+  });
+
+  it("rejects document evidence misclassified as standards or stitched from separate fields", async () => {
+    const { tools, repository } = toolsFor();
+    await tools[0]!.execute("read", {});
+    const source = { ...evidenceCard.source, uri: "lessonup://lesson-files/current" };
+    await expect(tools[1]!.execute("wrong-kind", { ...proposal, evidenceCards: [{ ...evidenceCard, source }] }))
+      .rejects.toThrow("decision_evidence_kind_mismatch");
+    await expect(tools[1]!.execute("stitched-quote", { ...proposal, evidenceCards: [{
+      ...evidenceCard, kind: "assessment_item", source, excerpt: "体会其表达效果。……出口条只要求找出反复。",
+    }] })).rejects.toThrow("decision_evidence_excerpt_not_exact");
+    expect(repository.saveDecision).not.toHaveBeenCalled();
+  });
+
+  it("returns exact option ids on a recoverable choice error", async () => {
+    const { tools, repository } = toolsFor();
+    await tools[0]!.execute("read", {});
+    await expect(tools[1]!.execute("bad", { ...proposal, chosenOptionId: "option B" }))
+      .rejects.toThrow('["opt_a","opt_b"]');
+    expect(repository.saveDecision).not.toHaveBeenCalled();
+    await tools[1]!.execute("corrected", proposal);
+    expect(repository.saveDecision).toHaveBeenCalledOnce();
+  });
+
+  it("refuses an unobserved in-app source instead of accepting a mistyped id", async () => {
+    const { tools, repository } = toolsFor();
+    await tools[0]!.execute("read", {});
+    await expect(tools[1]!.execute("propose", { ...proposal, evidenceCards: [{
+      ...evidenceCard, source: { ...evidenceCard.source, uri: "lessonup://lesson-files/wrong-lesson" },
+    }] })).rejects.toThrow("decision_evidence_source_unknown");
+    expect(repository.saveDecision).not.toHaveBeenCalled();
+  });
+  it("does not unlock proposals after a failed context read", async () => {
+    const { repository, tools } = toolsFor();
+    vi.mocked(repository.listDecisions).mockRejectedValueOnce(new Error("scope_denied"));
+    const read = tools.find((tool) => tool.name === "read_decision_context")!;
+    const propose = tools.find((tool) => tool.name === "propose_decision")!;
+    await expect(read.execute("read", {})).rejects.toThrow("scope_denied");
+    await expect(propose.execute("propose", proposal)).rejects.toThrow("read_decision_context_required");
+  });
+
+  it("includes bounded learning observations without dropping their source labels", async () => {
+    const { repository, tools } = toolsFor();
+    vi.mocked(repository.listLearningEvidence).mockResolvedValueOnce([
+      { id: "synthetic-observation", documentVersion: 3, observation: "合成评测，不代表真实学生", sourceReference: "合成样本" } as never,
+    ]);
+    const result = await tools[0]!.execute("read", {});
+    const content = result.content[0];
+    if (content.type !== "text") throw new Error("expected_text");
+    const context = JSON.parse(content.text);
+    expect(context.learning.evidence[0].sourceReference).toBe("合成样本");
+    expect(context.learning.truncated).toBe(false);
+    expect(context.learning.evidence[0].sourceUri).toBe("lessonup://learning-evidence/observation-1");
+    await tools[1]!.execute("propose", { ...proposal, evidenceCards: [{
+      ...evidenceCard, kind: "student_work", level: "synthetic", excerpt: "合成评测，不代表真实学生",
+      source: { ...evidenceCard.source, uri: context.learning.evidence[0].sourceUri, version: "invented" },
+    }] });
+    expect(vi.mocked(repository.saveDecision).mock.calls[0][3][0].source).toMatchObject({
+      uri: "lessonup://learning-evidence/synthetic-observation", version: "3",
+    });
+    expect(repository.listLearningEvidence).toHaveBeenCalledWith("teacher-1", lessonFileId, 21);
+  });
   it("reads existing decisions before proposing", async () => {
     const { tools } = toolsFor();
     const readTool = tools.find((tool) => tool.name === "read_decision_context")!;

@@ -75,6 +75,9 @@ export function validateDecisionRecord(record: DecisionRecord): string[] {
     if (!Array.isArray(option.tradeoffs) || option.tradeoffs.length === 0) errors.push("decision.option_tradeoffs_required");
   }
 
+  if (record.chosenOptionId !== null && !optionIds.has(record.chosenOptionId)) {
+    errors.push("decision.chosen_option_invalid");
+  }
   const evidenceIds = Array.isArray(record.evidenceCardIds) ? record.evidenceCardIds : [];
   if (!["draft", "insufficient_evidence"].includes(record.status) && evidenceIds.length === 0) {
     errors.push("decision.evidence_required");

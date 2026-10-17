@@ -57,15 +57,19 @@ export function lessonTurnContext(
       evidence: {
         required: plan.evidenceRequired,
         kinds: plan.requiredEvidenceKinds ?? [],
-        instruction: "Required evidence must be retrieved before drafting a proposal. An empty search is not evidence for a write. If required sources are unavailable, read the canonical document and call complete_without_change with kind insufficient_evidence and the specific missing sources; do not repeat the same empty searches or submit unsupported proposals.",
+        instruction: plan.taskIntent?.type === "decision_proposal"
+          ? "Retrieve available evidence and distinguish document-design observations from student outcomes. Missing required sources must be named in uncertainties and saved via propose_decision with status insufficient_evidence; an evidence-gap candidate records an unresolved judgment, not approval to change the lesson. Never fabricate sources or treat synthetic observations as real classroom evidence. Do not call complete_without_change for this task."
+          : "Required evidence must be retrieved before drafting a proposal. An empty search is not evidence for a write. If required sources are unavailable, read the canonical document and call complete_without_change with kind insufficient_evidence and the specific missing sources; do not repeat the same empty searches or submit unsupported proposals.",
       },
       taskIntent: plan.taskIntent,
       ...(plan.taskIntent?.type === "decision_proposal" ? {
         decision: {
-          instruction: "先读取当前教案与 read_decision_context；提出决策候选时必须给出问题、选项与取舍、可定位证据、反例、假设、不确定性、置信度、预期信号与证伪条件。证据不足时提交 insufficient_evidence。不得替教师确认、实施或审议，也不得把生成文本当作效果证明。",
+          instruction: "先读取当前教案与 read_decision_context；提出决策候选时必须给出问题、选项与取舍、可定位证据、反例、假设、不确定性、置信度、预期信号与证伪条件。教案原文足以支持目标与评价是否对齐的设计判断，可标 proposed 并明确它只是待教师审阅的设计假设；不能据此声称学生学习已改善。对于学生表现、方案效果或迁移等缺少观察的判断，提交 insufficient_evidence 并列出缺口。合成观察引用必须保留合成标注且证据卡 level=synthetic，不得升级为一手课堂证据。引用使用工具提供的来源标识、版本与时间，excerpt 逐字引用原文，不拼接推断。无所选项时 chosenOptionId 使用 JSON null，不写字符串。不得替教师确认、实施或审议。",
         },
       } : {}),
-      alternativeCompletion: "complete_without_change after reading canonical content when no change is justified or evidence is insufficient",
+      alternativeCompletion: plan.taskIntent?.type === "decision_proposal"
+        ? "propose_decision with decisionType no_change or status insufficient_evidence; never complete_without_change"
+        : "complete_without_change after reading canonical content when no change is justified or evidence is insufficient",
       completion: plan.taskIntent?.type === "decision_proposal" ? "propose_decision_or_explain_gap"
         : plan.taskIntent?.type === "learning_inquiry" ? "propose_learning_inquiry_or_explain_gap"
         : plan.taskIntent?.type === "learning_review" ? "propose_learning_review_or_explain_gap"

@@ -12,6 +12,7 @@
 | [02-decision-model.md](02-decision-model.md) | 决策对象、证据卡、生命周期、数据模型 | v1 已实现 |
 | [03-evaluation-protocol.md](03-evaluation-protocol.md) | 证据阶梯、当前替代验证、真实教师 pilot 预案 | 工具已备，pilot 待启动 |
 | [04-instrumentation-and-slo.md](04-instrumentation-and-slo.md) | 指标、事件、性能 SLO、测量方式 | 事件已落地，指标待分析 |
+| [06-native-decision-validation.md](06-native-decision-validation.md) | 原生模型暴露的问题、修复合同与评测边界 | 修复与验证 |
 
 ## 当前约束
 

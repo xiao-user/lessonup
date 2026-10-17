@@ -132,7 +132,9 @@ export class PiToolSurface {
     }
     const getProposal = () => captured.reduce<PiCapturedProposal | null>((found, read) => found ?? read(), null);
     const completion = teaching
-      ? withTeachingCompletion(tools, () => Boolean(getProposal() || learning.getLearningProposal() || decisions.getDecisionProposal()))
+      ? withTeachingCompletion(tools, () => Boolean(getProposal() || learning.getLearningProposal() || decisions.getDecisionProposal()), {
+          decisionCandidateRequired: plan.taskIntent?.type === "decision_proposal",
+        })
       : null;
     return {
       tools: completion?.tools ?? tools,

@@ -2,7 +2,10 @@ import { test, expect } from "./fixtures.js";
 import { lessonFileId } from "./test-data.js";
 import { writeFile } from "node:fs/promises";
 
-const localTime = () => { const date = new Date(); return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 23); };
+const localTime = () => {
+  const date = new Date();
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 23).replace(/0+$/, "").replace(/\.$/, "").replace(/:00$/, "");
+};
 
 test("records evidence, adopts and implements a plan, then reviews actual follow-up evidence", async ({ lessonPage: page }, testInfo) => {
   await page.getByRole("tab", { name: "学习验证", exact: true }).click();

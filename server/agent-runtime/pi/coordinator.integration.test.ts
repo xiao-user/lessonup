@@ -2153,4 +2153,42 @@ describe("Pi grounded completion and learning proposals", () => {
     expect(updated).toMatchObject({ state: "implemented", proposedReview: { outcome: "supported", evidenceId: followup.id, sourceRunId: reviewRun!.id } });
     expect(updated.review).toBeUndefined();
   });
+
+  it("recovers from an attempted no-change completion and persists an evidence-gap decision", async () => {
+    const { repository, created, faux, coordinator } = await fixture();
+    faux.setResponses([
+      (context) => {
+        expect(turnContextOf(context)).toContain("never complete_without_change");
+        return fauxAssistantMessage(fauxToolCall("read_decision_context", {}), { stopReason: "toolUse" });
+      },
+      fauxAssistantMessage(fauxToolCall("complete_without_change", {
+        kind: "insufficient_evidence", reason: "缺少本班真实观察，不能确定新任务是否适用。",
+      }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("propose_decision", {
+        decisionType: "assessment", question: "是否增加无提示迁移任务？",
+        options: [
+          { id: "keep", statement: "保留当前评价", tradeoffs: ["负担较低，但未检验迁移"] },
+          { id: "transfer", statement: "增加迁移评价", tradeoffs: ["可观察迁移，但增加时间与难度"] },
+        ],
+        rationale: "尚缺实际独立作答证据，记录问题供教师核对。",
+        uncertainties: ["缺少本班学生在新任务上的实际表现"],
+        status: "insufficient_evidence",
+      }), { stopReason: "toolUse" }),
+    ]);
+    const completions: Array<{ name: string; ok: boolean }> = [];
+    await coordinator.start({
+      userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
+      message: "准备一个评价决策候选，缺证据时记录证据不足。",
+      taskIntent: { type: "decision_proposal" }, activeSectionId: "assessment", documentVersion: 0, attachmentIds: [],
+    }, (event) => { if (event.type === "tool.completed") completions.push({ name: event.name, ok: event.ok }); });
+    const run = await repository.getLatestRun(ownerId, created.thread.id, created.branch.id);
+    expect(run?.status).toBe("completed");
+    expect(completions).toContainEqual({ name: "complete_without_change", ok: false });
+    expect(completions).toContainEqual({ name: "propose_decision", ok: true });
+    const candidates = await repository.listDecisions(ownerId, lessonFileId, 20);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ status: "insufficient_evidence", provenance: { createdBy: "agent", confirmedBy: null } });
+    expect((await repository.getLessonFile(ownerId, lessonFileId))?.documentVersion).toBe(0);
+    expect(await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id)).toHaveLength(0);
+  });
 });

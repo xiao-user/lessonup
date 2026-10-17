@@ -98,6 +98,12 @@ describe("evidence cards", () => {
 });
 
 describe("decision records", () => {
+  it("rejects an unknown chosen option even before teacher confirmation", () => {
+    expect(validateDecisionRecord(baseDecision({ status: "insufficient_evidence", chosenOptionId: "null" })))
+      .toContain("decision.chosen_option_invalid");
+    expect(validateDecisionRecord(baseDecision({ chosenOptionId: null })))
+      .not.toContain("decision.chosen_option_invalid");
+  });
   it("accepts a complete proposal", () => {
     expect(validateDecisionRecord(baseDecision())).toEqual([]);
   });
