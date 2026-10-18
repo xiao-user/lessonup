@@ -71,7 +71,7 @@ merely started no-op cannot pass, and a no-op plus approval is a conflict.
 
 ## 决策任务与盲评
 
-`npm run eval:decision:smoke` 使用相同 `MODEL_*` 配置和原生 Pi；两例使用独立内存仓储，分别检查设计对齐候选与缺少学生效果证据时的候选。`LESSONUP_EVAL_CASE_IDS=goal_evidence` 可单独重跑。报告记录工具失败、固定原文引用核对、初始证据数量、耗时与 token 使用，输出到系统暂存目录下 `lessonup-evals/native-decision`。它不操作生产库，不证明教师可用性或学习效果。
+`npm run eval:decision:smoke` 使用相同 `MODEL_*` 配置和原生 Pi；两例使用独立内存仓储，分别检查设计对齐候选与缺少学生效果证据时的候选。`LESSONUP_EVAL_CASE_IDS=goal_evidence` 可单独重跑，未知案例 ID 会在调用模型前失败。`LESSONUP_EVAL_REPETITIONS=2` 会预先固定两轮、每轮两例；允许 1–5 轮，每例重建独立仓储。报告在开始时创建、每例结束即更新，包含 `complete`、计划/完成/待执行/通过/失败计数、提案尝试数和工具失败数；失败与中断不会被丢弃。只有整个计划完成且全部通过才返回成功。报告还记录固定原文引用核对、初始证据数量、耗时与 token 使用，输出到系统暂存目录下 `lessonup-evals/native-decision`。它不操作生产库；少量固定案例不证明稳定成功率、延迟分位数、教师可用性或学习效果。
 
 `npm run eval:decision-quality -- export <cases.json> <新目录>` 接受含 `caseId/decisionType/context/baseline/treatment` 的案例数组；`summarize <packet.json> <coordinator-key.json> <新summary.json> <ratings.json>...` 汇总评分。配对映射必须完整，每例恰有两个变体；`reviewed` 仅表示评分覆盖完成，差值方向为描述性的 `higher/lower/equal`。评分为同一常数时 kappa 不可估计，返回 `null`。保管配对密钥，样本指纹不认证标签真伪。详见 [原生模型验证记录](../docs/decision-workspace/06-native-decision-validation.md)。
 

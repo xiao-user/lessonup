@@ -2156,6 +2156,8 @@ describe("Pi grounded completion and learning proposals", () => {
 
   it("recovers from an attempted no-change completion and persists an evidence-gap decision", async () => {
     const { repository, created, faux, coordinator } = await fixture();
+    const file = await repository.getLessonFile(ownerId, lessonFileId);
+    const [field, excerpt] = Object.entries(file!.document).find(([, value]) => value.trim().length > 0)!;
     faux.setResponses([
       (context) => {
         expect(turnContextOf(context)).toContain("never complete_without_change");
@@ -2172,6 +2174,12 @@ describe("Pi grounded completion and learning proposals", () => {
         ],
         rationale: "尚缺实际独立作答证据，记录问题供教师核对。",
         uncertainties: ["缺少本班学生在新任务上的实际表现"],
+        evidenceCards: [{
+          kind: "assessment_item", level: "primary",
+          source: { uri: "lessonup://lesson-files/current", locator: field },
+          excerpt, claim: "教案文本只能说明设计，不能证明学生学习效果。", applicability: "本课教案设计",
+          limitations: ["尚无学生观察"], confidence: 0.8,
+        }],
         status: "insufficient_evidence",
       }), { stopReason: "toolUse" }),
     ]);
@@ -2188,6 +2196,8 @@ describe("Pi grounded completion and learning proposals", () => {
     const candidates = await repository.listDecisions(ownerId, lessonFileId, 20);
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({ status: "insufficient_evidence", provenance: { createdBy: "agent", confirmedBy: null } });
+    const cards = await repository.listDecisionEvidenceCards(ownerId, lessonFileId, candidates[0].evidenceCardIds);
+    expect(cards[0].source).toMatchObject({ system: "lessonup", uri: `lessonup://lesson-files/${lessonFileId}`, version: "0", locator: field });
     expect((await repository.getLessonFile(ownerId, lessonFileId))?.documentVersion).toBe(0);
     expect(await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id)).toHaveLength(0);
   });

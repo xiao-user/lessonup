@@ -95,6 +95,7 @@ describe("decision agent tools", () => {
     expect(schema.required).not.toContain("chosenOptionId");
     expect(schema.properties.evidenceCards.items.required).not.toContain("supports");
     expect(schema.properties.evidenceCards.items.required).toContain("confidence");
+    expect(schema.properties.evidenceCards.items.properties.source.required).toEqual(["uri", "locator"]);
   });
   it("resolves the current-lesson alias to server-owned metadata", async () => {
     const { tools, repository } = toolsFor();
@@ -105,6 +106,55 @@ describe("decision agent tools", () => {
     const cards = vi.mocked(repository.saveDecision).mock.calls[0][3];
     expect(cards[0].source).toMatchObject({ uri: "lessonup://lesson-files/lesson-1", version: "3" });
     expect(cards[0].source.capturedAt).not.toBe(evidenceCard.source.capturedAt);
+  });
+
+  it("hydrates omitted local metadata before strict business parsing", async () => {
+    const { tools, repository } = toolsFor();
+    await tools[0]!.execute("read", {});
+    await tools[1]!.execute("propose", { ...proposal, evidenceCards: [{
+      ...evidenceCard, kind: "assessment_item",
+      source: { uri: "lessonup://lesson-files/current", locator: "objectives" },
+    }] });
+    expect(vi.mocked(repository.saveDecision).mock.calls[0][3][0].source).toMatchObject({
+      system: "lessonup", uri: "lessonup://lesson-files/lesson-1", version: "3", locator: "objectives",
+    });
+  });
+
+  it("does not trust model-supplied metadata for a bound local source", async () => {
+    const { tools, repository } = toolsFor();
+    await tools[0]!.execute("read", {});
+    await tools[1]!.execute("propose", { ...proposal, evidenceCards: [{
+      ...evidenceCard, kind: "assessment_item",
+      source: { ...evidenceCard.source, uri: "lessonup://lesson-files/current", system: "curriculum_standards", capturedAt: "not-a-timestamp" },
+    }] });
+    const source = vi.mocked(repository.saveDecision).mock.calls[0][3][0].source;
+    expect(source.system).toBe("lessonup");
+    expect(Number.isFinite(Date.parse(source.capturedAt))).toBe(true);
+  });
+
+  it("keeps full provenance mandatory for external sources", async () => {
+    const { tools, repository } = toolsFor();
+    await tools[0]!.execute("read", {});
+    await expect(tools[1]!.execute("missing-external", { ...proposal, evidenceCards: [{
+      ...evidenceCard, source: { uri: evidenceCard.source.uri, locator: evidenceCard.source.locator },
+    }] })).rejects.toThrow();
+    await expect(tools[1]!.execute("invalid-external", { ...proposal, evidenceCards: [{
+      ...evidenceCard, source: { ...evidenceCard.source, capturedAt: "not-a-timestamp" },
+    }] })).rejects.toThrow();
+    expect(repository.saveDecision).not.toHaveBeenCalled();
+    await tools[1]!.execute("valid-external", proposal);
+    expect(vi.mocked(repository.saveDecision).mock.calls[0][3][0].source).toEqual(evidenceCard.source);
+  });
+
+  it("reports all missing actionable judgment fields before saving", async () => {
+    const { tools, repository } = toolsFor();
+    await tools[0]!.execute("read", {});
+    await expect(tools[1]!.execute("incomplete", {
+      ...proposal, confidence: null, counterevidence: [], assumptions: [], uncertainties: [], expectedSignal: "", falsifier: "",
+    })).rejects.toThrow("confidence, counterevidence, assumptions, uncertainties, expectedSignal, falsifier");
+    expect(repository.saveDecision).not.toHaveBeenCalled();
+    await tools[1]!.execute("complete", proposal);
+    expect(repository.saveDecision).toHaveBeenCalledOnce();
   });
 
   it("normalizes the model's literal null only to an unchosen candidate", async () => {
@@ -165,6 +215,7 @@ describe("decision agent tools", () => {
     const context = JSON.parse(content.text);
     expect(context.learning.evidence[0].sourceReference).toBe("合成样本");
     expect(context.learning.truncated).toBe(false);
+    expect(context.lessonSource).toMatchObject({ uri: "lessonup://lesson-files/current", kind: "platform_data" });
     expect(context.learning.evidence[0].sourceUri).toBe("lessonup://learning-evidence/observation-1");
     await tools[1]!.execute("propose", { ...proposal, evidenceCards: [{
       ...evidenceCard, kind: "student_work", level: "synthetic", excerpt: "合成评测，不代表真实学生",
@@ -173,7 +224,37 @@ describe("decision agent tools", () => {
     expect(vi.mocked(repository.saveDecision).mock.calls[0][3][0].source).toMatchObject({
       uri: "lessonup://learning-evidence/synthetic-observation", version: "3",
     });
-    expect(repository.listLearningEvidence).toHaveBeenCalledWith("teacher-1", lessonFileId, 21);
+    expect(repository.listLearningEvidence).toHaveBeenCalledWith("teacher-1", lessonFileId, 21, undefined);
+  });
+
+  it("registers older observations through decision pagination without trusting lookahead rows", async () => {
+    const { repository, tools } = toolsFor();
+    const rows = Array.from({ length: 21 }, (_, index) => ({
+      id: crypto.randomUUID(), documentVersion: 3,
+      observedAt: new Date(Date.UTC(2026, 9, 18, 0, 0, 30 - index)).toISOString(),
+      observation: `第 ${index + 1} 次独立解释观察`, objective: "解释效果", task: "独立解释", criterion: "指出联系", sourceReference: "匿名作答汇总",
+    }));
+    vi.mocked(repository.listLearningEvidence).mockResolvedValueOnce(rows as never);
+    const first = await tools[0]!.execute("page-1", {});
+    if (first.content[0].type !== "text") throw new Error("expected_text");
+    const page = JSON.parse(first.content[0].text);
+    expect(page.learning.evidence).toHaveLength(20);
+    expect(page.learning.next).toEqual({ at: rows[19].observedAt, id: rows[19].id });
+    const oldCard = { ...evidenceCard, kind: "student_work", excerpt: rows[20].observation,
+      source: { uri: `lessonup://learning-evidence/${rows[20].id}`, locator: "observation" } };
+    await expect(tools[1]!.execute("unread-lookahead", { ...proposal, evidenceCards: [oldCard] }))
+      .rejects.toThrow("decision_evidence_source_unknown");
+    vi.mocked(repository.listLearningEvidence).mockResolvedValueOnce([rows[20]] as never);
+    const second = await tools[0]!.execute("page-2", { evidenceBefore: page.learning.next });
+    expect(repository.listLearningEvidence).toHaveBeenLastCalledWith("teacher-1", lessonFileId, 21, page.learning.next);
+    if (second.content[0].type !== "text") throw new Error("expected_text");
+    const older = JSON.parse(second.content[0].text);
+    expect(older.learning.next).toBeNull();
+    expect(older.learning.evidence[0].sourceUri).toBe("lessonup://learning-evidence/observation-21");
+    await tools[1]!.execute("read-old-source", { ...proposal, evidenceCards: [oldCard] });
+    expect(vi.mocked(repository.saveDecision).mock.calls[0][3][0].source).toMatchObject({
+      system: "lessonup", uri: oldCard.source.uri, version: "3",
+    });
   });
   it("reads existing decisions before proposing", async () => {
     const { tools } = toolsFor();

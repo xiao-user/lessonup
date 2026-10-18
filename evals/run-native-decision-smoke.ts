@@ -70,8 +70,34 @@ const cases: Array<{ id: string; prompt: string; taskIntent: AgentTaskIntent }> 
 
 const results: Array<Record<string, unknown>> = [];
 const thinkingLevel = resolveTeacherThinkingLevel(process.env.LESSONUP_EVAL_THINKING_LEVEL);
-const selectedCaseIds = (process.env.LESSONUP_EVAL_CASE_IDS ?? "").split(",").filter(Boolean);
-for (const testCase of cases.filter((item) => !selectedCaseIds.length || selectedCaseIds.includes(item.id))) {
+const selectedCaseIds = (process.env.LESSONUP_EVAL_CASE_IDS ?? "").split(",").map((id) => id.trim()).filter(Boolean);
+if (selectedCaseIds.some((id) => !cases.some((item) => item.id === id))) throw new Error("unknown_smoke_case");
+const repetitions = Number(process.env.LESSONUP_EVAL_REPETITIONS ?? "1");
+if (!Number.isInteger(repetitions) || repetitions < 1 || repetitions > 5) throw new Error("invalid_smoke_repetitions");
+const selectedCases = cases.filter((item) => !selectedCaseIds.length || selectedCaseIds.includes(item.id));
+const schedule = Array.from({ length: repetitions }, (_, index) => selectedCases.map((item) => ({ ...item, attempt: index + 1 }))).flat();
+const startedAt = new Date().toISOString();
+const directory = process.env.LESSONUP_EVAL_OUTPUT_DIR ?? path.join(tmpdir(), "lessonup-evals", "native-decision");
+const reportPath = path.join(directory, `run-${startedAt.replace(/[:.]/g, "-")}.json`);
+await mkdir(directory, { recursive: true });
+async function saveReport(complete: boolean) {
+  const report = `${JSON.stringify({
+    startedAt, updatedAt: new Date().toISOString(), complete, thinkingLevel, repetitions,
+    summary: {
+      planned: schedule.length, completed: results.length, pending: schedule.length - results.length,
+      passed: results.filter((result) => result.passed).length,
+      failed: results.filter((result) => !result.passed).length,
+      proposalAttempts: results.reduce((sum, result) => sum + Number(result.proposalAttempts), 0),
+      failedToolCalls: results.reduce((sum, result) => sum + Number(result.failedToolCalls), 0),
+    },
+    results,
+    boundary: "Live configured model and native Pi with isolated synthetic data. All scheduled attempts are retained, including failures. Small fixed-case samples do not establish a stable success rate, latency percentiles, classroom effectiveness, external expert consensus or teacher usability.",
+  }, null, 2)}\n`;
+  await writeFile(reportPath, report);
+  await writeFile(path.join(directory, "latest.json"), report);
+}
+await saveReport(false);
+for (const testCase of schedule) {
   const { repository, ownerId, notebook, file, baseline } = await createFixture(testCase.id === "goal_evidence");
   const decisions = new DecisionService(repository);
   const coordinator = new PiLessonAgentCoordinator(repository, { embedQuery: null });
@@ -85,6 +111,7 @@ for (const testCase of cases.filter((item) => !selectedCaseIds.length || selecte
   let runId: string | undefined;
   let firstTextMs: number | null = null;
   const started = performance.now();
+  let executionError: string | undefined;
   const timer = setTimeout(() => { if (runId) void coordinator.cancel(ownerId, runId); }, 120_000);
   try {
     await coordinator.start({
@@ -96,6 +123,8 @@ for (const testCase of cases.filter((item) => !selectedCaseIds.length || selecte
       if (event.type === "run.started") runId = event.runId;
       if (event.type === "message.delta" && firstTextMs === null) firstTextMs = Math.round(performance.now() - started);
     });
+  } catch (error) {
+    executionError = error instanceof Error ? error.message : String(error);
   } finally { clearTimeout(timer); }
   await repository.recoverExpiredRuns(ownerId, thread.id);
   const run = await repository.getLatestRun(ownerId, thread.id, branch.id);
@@ -136,7 +165,7 @@ for (const testCase of cases.filter((item) => !selectedCaseIds.length || selecte
     if (!card.source.locator || !card.excerpt.trim() || !card.limitations.length) sourceErrors.push("incomplete_source");
   }
   const evidenceOk = Boolean(proposal) && evidence.length === proposal!.evidenceCardIds.length && sourceErrors.length === 0;
-  const passed = run?.status === "completed" && proposalOk && structureOk && evidenceOk
+  const passed = !executionError && run?.status === "completed" && proposalOk && structureOk && evidenceOk
     && (await repository.getLessonFile(ownerId, file.id))?.documentVersion === 0;
   const session = await repository.getAgentRuntimeSession(ownerId, thread.id, branch.id, "pi");
   const failedToolResults = (session?.messages ?? []).filter((message) => {
@@ -147,7 +176,9 @@ for (const testCase of cases.filter((item) => !selectedCaseIds.length || selecte
     return { toolName: item.toolName, content: item.content };
   });
   results.push({
-    id: testCase.id, passed, status: run?.status, error: run?.error, failedToolResults,
+    id: testCase.id, attempt: testCase.attempt, passed, status: run?.status ?? "not_started", error: executionError ?? run?.error, failedToolResults,
+    proposalAttempts: events.filter((event) => event.type === "tool.started" && event.name === "propose_decision").length,
+    failedToolCalls: toolErrors.length,
     durationMs: Math.round(performance.now() - started), firstTextMs, tokenUsage: run?.tokenUsage,
     toolCalls, toolErrors, sourceErrors,
     reviewMaterial: { prompt: testCase.prompt, document: file.document, baselineEvidence: baseline,
@@ -164,21 +195,15 @@ for (const testCase of cases.filter((item) => !selectedCaseIds.length || selecte
     checks: { proposalOk, structureOk, evidenceOk, documentVersionUnchanged: (await repository.getLessonFile(ownerId, file.id))?.documentVersion === 0 },
     response,
   });
-  console.log(JSON.stringify({ id: testCase.id, passed, status: run?.status, decisionStatus: proposal?.status,
+  console.log(JSON.stringify({ id: testCase.id, attempt: testCase.attempt, passed, status: run?.status, decisionStatus: proposal?.status,
+    proposalAttempts: results.at(-1)!.proposalAttempts, failedToolCalls: toolErrors.length,
     tools: toolCalls.map((call) => call.name), durationMs: results.at(-1)!.durationMs }));
   if (testCase.id === "goal_evidence" && baseline) {
     // Keep the seeded evidence visible in the report so a reviewer can spot unsupported claims.
     results.at(-1)!.baselineEvidence = baseline;
   }
+  await saveReport(false);
 }
 if (!results.length) throw new Error("no_selected_smoke_cases");
-const directory = process.env.LESSONUP_EVAL_OUTPUT_DIR ?? path.join(tmpdir(), "lessonup-evals", "native-decision");
-await mkdir(directory, { recursive: true });
-const report = `${JSON.stringify({
-  thinkingLevel,
-  results,
-  boundary: "Live configured model and native Pi with isolated synthetic data. Not evidence of classroom effectiveness, external expert consensus or teacher usability.",
-}, null, 2)}\n`;
-await writeFile(path.join(directory, `run-${new Date().toISOString().replace(/[:.]/g, "-")}.json`), report);
-await writeFile(path.join(directory, "latest.json"), report);
-if (results.some((result) => !result.passed)) process.exitCode = 1;
+await saveReport(true);
+if (results.length !== schedule.length || results.some((result) => !result.passed)) process.exitCode = 1;
