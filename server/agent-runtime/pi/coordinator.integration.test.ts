@@ -1949,6 +1949,51 @@ describe("Pi coordinator lesson questions, retrieval and diagnostics", () => {
       .toMatchObject({ status: "failed", error: "evidence_required" });
   });
 
+  it("proposes a teacher-defined complete design from blank after an optional empty standards search", async () => {
+    const value = await fixture();
+    const blank = Object.fromEntries(Object.keys(lesson).map((field) => [field, ""])) as LessonPlan;
+    await value.repository.saveLessonDocument({ ownerId, fileId: lessonFileId, baseVersion: 0,
+      document: blank, pageCount: 1, source: "manual", idempotencyKey: "blank-teacher-defined-draft" });
+    value.repository.searchCurriculumStandards = async () => [];
+    const draft: LessonPlan = {
+      unit: "等式与方程", period: "1", totalPeriods: "1", topic: "等式的基本性质",
+      objectives: "学生独立判断等式两边同加、同减、同乘及同除非零数后是否仍相等，并说明条件。",
+      knowledgePoints: "等式两边同作加减运算；同乘或同除非零数；除数不能为零。",
+      continuity: "以等量关系和已有运算经验为起点。", focus: "说明两边相同操作和除数非零条件。",
+      preparation: "教师给定的等式卡与出口条。",
+      process: "导入5分钟：比较两个相等数量。探究12分钟：独立操作并说明两边变化。辨析10分钟：比较只改一边与同改两边、除数为零的情形。独立练习8分钟：判断新等式变形并说明理由。出口条5分钟：独立作答。",
+      assessment: "分别记录变形判断、两边同操作的解释及除数非零条件；只答结论不计为解释达标。",
+      homework: "独立写一例有效变形和一例无效变形并解释。", board: "相等关系→两边相同操作→条件核对",
+      reflection: "待实际实施后记录；这是依据教师要求的设计草稿，未核实课程标准或教材引文，尚无课堂效果记录。",
+    };
+    let turnContext = "";
+    value.faux.setResponses([
+      (context) => {
+        turnContext = turnContextOf(context);
+        return fauxAssistantMessage(fauxToolCall("read_document", {}), { stopReason: "toolUse" });
+      },
+      fauxAssistantMessage(fauxToolCall("search_curriculum_standards", { query: "等式基本性质" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("propose_document_patch", {
+        summary: "按教师给定目标、40分钟任务和独立评价要求起草，待教师核对；未声称课标已核实。",
+        operations: Object.entries(draft).map(([field, replacement]) => ({ field, replacement })),
+      }), { stopReason: "toolUse" }),
+    ]);
+    await start(value, "请完整编写等式基本性质教案并提交确认：40分钟，以独立判断等式变形及说明理由为目标，出口条分别记录判断与解释。不绑定教材页码或课标引文。", { documentVersion: 1 });
+    const run = await value.repository.getLatestRun(ownerId, value.created.thread.id, value.created.branch.id);
+    expect(run).toMatchObject({ status: "completed", capabilityPlan: { evidenceRequired: false, fullRewriteRequested: true } });
+    expect(turnContext).toContain("teacher's stated goals");
+    expect(await value.repository.listRunEvidence(ownerId, run!.id)).toEqual([]);
+    const approvals = await value.repository.listPendingApprovals(ownerId, value.created.thread.id, value.created.branch.id);
+    expect(approvals).toHaveLength(1);
+    const patch = approvals[0].patch;
+    if (!("operations" in patch)) throw new Error("expected_document_patch");
+    expect(patch.operations).toHaveLength(Object.keys(draft).length);
+    expect(patch.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: "reflection", replacement: expect.stringContaining("未核实课程标准") }),
+    ]));
+    expect((await value.repository.getLessonFile(ownerId, lessonFileId))?.document).toEqual(blank);
+  });
+
   it("exposes required sources before authoring and completes honestly when the search is empty", async () => {
     const value = await fixture();
     value.repository.searchCurriculumStandards = async () => [];
@@ -1964,7 +2009,7 @@ describe("Pi coordinator lesson questions, retrieval and diagnostics", () => {
         reason: "当前没有检索到本课必需的课标依据，请先补充可核验的课标来源，再编写完整教案。",
       }), { stopReason: "toolUse" }),
     ]);
-    await start(value, "请完整编写这节课的教案并提交确认");
+    await start(value, "请依据课程标准完整编写这节课的教案并提交确认");
     expect(turnContext).toContain('"required":true');
     expect(turnContext).toContain("curriculum_standard_search");
     expect(turnContext).toContain("do not repeat the same empty searches");
@@ -1991,7 +2036,7 @@ describe("Pi coordinator lesson questions, retrieval and diagnostics", () => {
       fauxAssistantMessage("没有检索到对应的课标条款，我先不改。"),
       fauxAssistantMessage("没有检索到对应的课标条款，我先不改。"),
     ]);
-    await start(value, "请修改评价练习，并对照课标");
+    await start(value, "请完整编写教案，不引用教材原句，但必须对照课标并提交确认");
     // A write is only as good as the source behind it: the proposal was
     // refused with the reads still missing, and no card reached the teacher.
     expect(afterProposal).toContain("evidence_required");

@@ -71,6 +71,18 @@ describe("turn context policy", () => {
     });
   });
 
+  it("distinguishes teacher-defined design drafts from source-bound writes", () => {
+    const draft = lessonTurnContext(lessonContext, [], { ...basePlan, writeMode: "explicit", fullRewriteRequested: true, evidenceRequired: false }, "write");
+    expect(draft.policy.evidence.required).toBe(false);
+    expect(draft.policy.evidence.instruction).toContain("teacher's stated goals");
+    expect(draft.policy.evidence.instruction).toContain("An empty search never establishes source support");
+    expect(draft.policy.evidence.instruction).not.toContain("call complete_without_change");
+    const sourceBound = lessonTurnContext(lessonContext, [], { ...basePlan, writeMode: "explicit", evidenceRequired: true,
+      requiredEvidenceKinds: ["curriculum_standard_search"] }, "write");
+    expect(sourceBound.policy.evidence.instruction).toContain("call complete_without_change");
+    expect(sourceBound.policy.evidence.instruction).toContain("An empty search is not evidence");
+  });
+
   it("keeps open lesson work able to reply or create an approval proposal", () => {
     const open = { ...basePlan, writeMode: "open" } as CapabilityPlan;
     expect(lessonTurnContext(lessonContext, [], open, "write")).toMatchObject({

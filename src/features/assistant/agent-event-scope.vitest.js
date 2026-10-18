@@ -16,8 +16,17 @@ describe("agent event scope", () => {
     );
 
     expect(resolved).toEqual(requestScope);
-    expect(scopes.get("run-a")).toEqual(requestScope);
+    expect(scopes.has("run-a")).toBe(false);
     expect(isAgentEventActive(resolved, "thread-a", "branch-a")).toBe(true);
+  });
+
+  it.each(["approval.decided", "approval.settled", "approval.delivered"])("routes historical %s without registering a completed run", (type) => {
+    const historical = { threadId: "thread-a", branchId: "branch-a" };
+    const active = { threadId: "thread-a", branchId: "branch-a" };
+    const scopes = new Map([["new-run", active]]);
+    expect(resolveAgentEventScope(scopes, { type, runId: "old-run" }, historical)).toBe(historical);
+    expect([...scopes.entries()]).toEqual([["new-run", active]]);
+    expect(resolveAgentEventScope(scopes, { type: "message.delta", runId: "new-run" })).toBe(active);
   });
 
   it("does not treat an unscoped unknown event as belonging to the visible thread", () => {

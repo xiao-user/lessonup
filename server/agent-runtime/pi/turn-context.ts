@@ -60,7 +60,9 @@ export function lessonTurnContext(
         kinds: plan.requiredEvidenceKinds ?? [],
         instruction: plan.taskIntent?.type === "decision_proposal"
           ? "Retrieve available evidence and distinguish document-design observations from student outcomes. Missing required sources must be named in uncertainties and saved via propose_decision with status insufficient_evidence; an evidence-gap candidate records an unresolved judgment, not approval to change the lesson. Never fabricate sources or treat synthetic observations as real classroom evidence. Do not call complete_without_change for this task."
-          : "Required evidence must be retrieved before drafting a proposal. An empty search is not evidence for a write. If required sources are unavailable, read the canonical document and call complete_without_change with kind insufficient_evidence and the specific missing sources; do not repeat the same empty searches or submit unsupported proposals.",
+          : plan.evidenceRequired
+            ? "Required evidence must be retrieved before drafting a proposal. An empty search is not evidence for a write. If required sources are unavailable, read the canonical document and call complete_without_change with kind insufficient_evidence and the specific missing sources; do not repeat the same empty searches or submit unsupported proposals."
+            : "Read the canonical document and use the teacher's stated goals, tasks, timing and constraints to prepare a design draft for teacher approval. Full lesson length does not itself require external citations. Missing optional standards or textbook search results do not block a teacher-defined design draft; state those limits and do not claim standards alignment, textbook quotations, verified facts or student outcomes without supporting sources. An empty search never establishes source support.",
       },
       taskIntent: plan.taskIntent,
       ...(plan.taskIntent?.type === "decision_proposal" ? {

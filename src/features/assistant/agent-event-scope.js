@@ -1,12 +1,7 @@
+// Scope identifies the turn an event belongs to. It is not evidence that the
+// run is active: historical approval delivery also carries an explicit scope.
+// Only run lifecycle owners register entries in the active-run map.
 export function resolveAgentEventScope(scopes, event, explicitScope = null) {
-  if (
-    explicitScope
-    && event.runId
-    && event.runId !== "unknown"
-    && !scopes.has(event.runId)
-  ) {
-    scopes.set(event.runId, explicitScope);
-  }
   return scopes.get(event.runId) ?? explicitScope;
 }
 

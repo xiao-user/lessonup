@@ -135,9 +135,8 @@ describe("deterministic turn policy", () => {
       designBasisWriteRequested: false,
       fullRewriteRequested: true,
       minimalWriteRequested: false,
-      mcpServers: ["knowledge"],
-      evidenceRequired: true,
-      requiredEvidenceKinds: ["curriculum_standard_search"],
+      mcpServers: [],
+      evidenceRequired: false,
     });
     expect(deterministicCapabilityPlan("把这个学生困难保存为教案设计依据")).toMatchObject({
       writeMode: "explicit",
@@ -160,15 +159,14 @@ describe("deterministic turn policy", () => {
     });
   });
 
-  it("treats reorganizing the current lesson as a complete evidence-bound rewrite", () => {
+  it("keeps complete rewrite scope independent from an external source claim", () => {
     expect(deterministicCapabilityPlan("重新整理当前教案")).toMatchObject({
       writeMode: "explicit",
       fullRewriteRequested: true,
       skillIds: [],
       requestedDocumentFields: undefined,
-      mcpServers: ["knowledge"],
-      evidenceRequired: true,
-      requiredEvidenceKinds: ["curriculum_standard_search"],
+      mcpServers: [],
+      evidenceRequired: false,
     });
     for (const message of ["重新编写教案", "请把当前模板教案重编为具体教案"]) {
       expect(deterministicCapabilityPlan(message), message).toMatchObject({
@@ -378,10 +376,50 @@ describe("deterministic turn policy", () => {
       fullRewriteRequested: true,
       designBasisRequested: false,
       designBasisWriteRequested: false,
-      mcpServers: ["knowledge"],
-      evidenceRequired: true,
-      requiredEvidenceKinds: ["curriculum_standard_search"],
+      mcpServers: [],
+      evidenceRequired: false,
     });
+  });
+
+  it("does not turn absent classroom data into a retrieval requirement in the actual teacher request", () => {
+    const message = "请依据教师给定要求，从当前空白文档完整编写全栏教案并提交A4待确认草稿。这是隔离的七年级数学40分钟设计演练，没有真实学生数据，不绑定教材页码或课标引文。主题：等式的基本性质，第1课时，总1课时。先备知识只作为待核对前提：会四则运算，知道等号表示两边相等。目标：能通过等式两边同时作相同运算解释为什么仍相等，识别只改一边的错误，除数不能为0。以x+3=7、2x=10等简单例子，不引入移项口诀或复杂方程。40分钟包括独立初答、天平或等值表示解释、比较正确与错误步骤、撤去支架独立练习、出口条；每段时间合计40分钟。出口条至少一题要求说明理由，评分区分答案正确与理由成立，给出教师据不同回答如何反馈。作业适量，反思写待收集问题，不编造成效。无需PPT。请保留数学条件，明确可核对的任务、学生产出及成功判据；未知情况写待核对。";
+    expect(deterministicCapabilityPlan(message)).toMatchObject({ fullRewriteRequested: true, evidenceRequired: false });
+    expect(deterministicCapabilityPlan(message).requiredEvidenceKinds).toBeUndefined();
+    expect(deterministicCapabilityPlan("没有真实学生数据，请依据课程标准完整编写教案。")).toMatchObject({
+      evidenceRequired: true, requiredEvidenceKinds: ["curriculum_standard_search"],
+    });
+  });
+
+  it.each([
+    "完整编写教案，不能不引用课标。",
+    "完整编写教案，不得不依据课程标准。",
+    "完整编写教案，不要不核验课标。",
+  ])("retains affirmative source requirements expressed as double negatives (%s)", (message) => {
+    expect(deterministicCapabilityPlan(message)).toMatchObject({ evidenceRequired: true, requiredEvidenceKinds: ["curriculum_standard_search"] });
+  });
+
+  it.each([
+    "请完整编写等式基本性质教案：40分钟，以独立判断等式变形及说明理由为目标，出口条分别记录判断与解释，提交审批。",
+    "请依据教师给定要求完整编写教案并提交确认，无需引用课标。",
+    "请依据当前信息完整编写教案，不绑定教材页码或课标引文。",
+    "完整编写教案：按我的目标与任务设计，不引用未核实课标。",
+  ])("allows a teacher-defined design draft without inventing a required source (%s)", (message) => {
+    const plan = deterministicCapabilityPlan(message);
+    expect(plan).toMatchObject({ fullRewriteRequested: true, writeMode: "explicit", evidenceRequired: false, mcpServers: [] });
+    expect(plan.requiredEvidenceKinds).toBeUndefined();
+  });
+
+  it.each([
+    ["完整编写教案，无需引用课标，但须读取附件并核对其中的任务。", ["attachment_read"], ["knowledge"]],
+    ["完整编写教案，不绑定教材页码或课标引文；请联网核验最新统计数据。", ["web_open"], ["knowledge", "web"]],
+    ["完整编写教案，不引用教材原句，但必须对齐课程标准。", ["curriculum_standard_search"], ["knowledge"]],
+    ["仅提交最小修改，不引用课标，并核验作者生平。", undefined, ["knowledge"]],
+    ["完整编写教案，请依据课程标准，同时读取附件。", ["curriculum_standard_search", "attachment_read"], ["knowledge"]],
+  ])("retains adjacent affirmative evidence requirements (%s)", (message, kinds, servers) => {
+    const plan = deterministicCapabilityPlan(message as string, { attachmentSourceIds: ["source-1"] });
+    expect(plan.evidenceRequired).toBe(true);
+    expect(plan.mcpServers).toEqual(servers);
+    expect(plan.requiredEvidenceKinds).toEqual(kinds);
   });
 
   it("requires a scoped curriculum-standard read for explicit standard work", () => {

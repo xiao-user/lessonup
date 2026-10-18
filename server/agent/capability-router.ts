@@ -162,6 +162,7 @@ export const deterministicCapabilityPlan = (
   } = {},
 ): CapabilityPlan => {
   const fullRewriteRequested = fullRewritePattern.test(message);
+  const evidenceRequest = affirmativeEvidenceRequest(message);
   const designBasisDenied = designBasisDeniedPattern.test(message);
   const writebackFeedbackId = parseContinuityWritebackFeedbackId(message);
   const lightweightConversation = !writebackFeedbackId && isConversationalControlMessage(message);
@@ -218,12 +219,12 @@ export const deterministicCapabilityPlan = (
       requestedDocumentFields: undefined,
     });
   }
-  const externalEvidenceRequest = requestsExternalEvidence(message);
+  const externalEvidenceRequest = requestsExternalEvidence(evidenceRequest);
   if (externalEvidenceRequest) {
     plan.mcpServers.push("knowledge");
     plan.evidenceRequired = true;
   }
-  if (curriculumStandardPattern.test(message)) {
+  if (curriculumStandardPattern.test(evidenceRequest)) {
     plan.mcpServers.push("knowledge");
     plan.evidenceRequired = true;
     plan.requiredEvidenceKinds = [...new Set([
@@ -232,20 +233,21 @@ export const deterministicCapabilityPlan = (
     ])];
   }
   if (
-    broadReviewPattern.test(message)
+    !fullRewriteRequested
+    && broadReviewPattern.test(message)
     && documentContainsVerifiableClaims(options.document)
   ) {
     plan.mcpServers.push("knowledge");
     plan.evidenceRequired = true;
   }
-  if (attachmentReferencePattern.test(message)) {
+  if (attachmentReferencePattern.test(evidenceRequest)) {
     plan.mcpServers.push("knowledge");
     plan.evidenceRequired = true;
     if ((options.attachmentSourceIds?.length ?? 0) > 0) {
-      plan.requiredEvidenceKinds = ["attachment_read"];
+      plan.requiredEvidenceKinds = [...new Set([...(plan.requiredEvidenceKinds ?? []), "attachment_read" as const])];
     }
   }
-  if (/联网|搜索|网页|新闻|当前政策/.test(message)) {
+  if (/联网|搜索|网页|新闻|当前政策/.test(evidenceRequest)) {
     plan.mcpServers.push("web");
     plan.evidenceRequired = true;
     plan.requiredEvidenceKinds = [...new Set([
@@ -253,29 +255,12 @@ export const deterministicCapabilityPlan = (
       "web_open" as const,
     ])];
   }
-  // Full authoring retains its evidence contract. Professional judgment is a
-  // shared static policy; content words no longer select Skills or model calls.
-  const lessonAuthoringRun = fullRewriteRequested && plan.writeMode !== "consultative";
-  if (lessonAuthoringRun) {
-    const explicitlyNeedsExternalEvidence = attachmentReferencePattern.test(message)
-      || /联网|搜索网页|新闻|当前政策|课程标准|课标|文献|作品原文|课文原文|出处|作者生平|事实核验|数据核验/.test(message);
-    // A complete lesson must be aligned with the published standard even when
-    // the teacher does not repeat the word “课标” in every generation request.
-    // The MCP itself binds subject/stage/grade, and its exact fresh result can
-    // be reused across turns without another embedding call.
-    plan.mcpServers = [...new Set([...plan.mcpServers, "knowledge"])];
-    plan.evidenceRequired = true;
-    plan.requiredEvidenceKinds = [...new Set([
-      ...(plan.requiredEvidenceKinds ?? []),
-      "curriculum_standard_search" as const,
-    ])];
-    if (!explicitlyNeedsExternalEvidence) {
-      plan.mcpServers = ["knowledge"];
-    }
-  }
+  // The size of a draft does not establish a source claim. Teacher-defined
+  // designs can be proposed for approval; explicit source requirements above
+  // retain their evidence gate regardless of the requested writing scope.
   if (plan.minimalWriteRequested) {
     plan.skillIds = [];
-    if (!attachmentReferencePattern.test(message) && !/联网|搜索网页|课程标准|课标|文献|作品原文|课文原文|出处|作者生平|事实核验|数据核验/.test(message)) {
+    if (!externalEvidenceRequest && !attachmentReferencePattern.test(evidenceRequest) && !/联网|搜索|网页|新闻|当前政策/.test(evidenceRequest)) {
       plan.mcpServers = [];
       plan.evidenceRequired = false;
       plan.requiredEvidenceKinds = undefined;
@@ -288,13 +273,29 @@ export const deterministicCapabilityPlan = (
   });
 };
 
+/** Remove only denied source directives, never an adjacent affirmative request. */
+function affirmativeEvidenceRequest(message: string) {
+  return message.split(/([，,。；;\n]|但是|但|不过|同时|并且|而且|并|且)/u).map((clause) => {
+    // Missing private classroom observations declare a boundary, not a request
+    // to retrieve student data from an external source.
+    const request = clause.replace(/(?:没有|尚无|暂无)(?:任何)?(?:真实的?)?(?:学生|课堂|班级)(?:数据|观察(?:记录)?|反馈(?:记录)?|表现(?:记录)?)/gu, "");
+    if (/(?:不能|不得|不可|不要|不是|并非)不(?:再)?(?:引用|绑定|检索|搜索|联网|对照|依据|核验|核对|使用|提供|补充)/u.test(request)) return request;
+    const denied = request.search(/(?:无需|不必|不用|不要|不需要|不)(?:再)?(?:引用|绑定|检索|搜索|联网|对照|依据|核验|核对|使用|提供|补充)/u);
+    if (denied < 0) return request;
+    const tail = request.slice(denied);
+    return /课标|课程标准|教材|页码|引文|来源|出处|附件|文件|资料|网页|文献|数据|事实|作者|联网/u.test(tail)
+      ? request.slice(0, denied) : request;
+  }).join("");
+}
+
 /**
  * 下列词在 LessonUp 中描述的是教案业务产物，不等于教师要求检索外部出处。
  * 剔除固定业务词后仍命中证据词，才启动知识检索。
  */
 function requestsExternalEvidence(message: string) {
   return externalEvidencePattern.test(
-    message
+    affirmativeEvidenceRequest(message)
+      .replace(/(?:依据|根据|基于)(?:教师|老师|我)?(?:给定的?|提供的?|明确的?|已确定的?)?(?:要求|目标|任务|当前信息|现有信息|当前教案|规范材料)/g, "")
       .replaceAll("教案设计依据", "")
       .replaceAll("设计依据", "")
       .replaceAll("平台知识点", "")
