@@ -41,6 +41,7 @@ export function lessonTurnContext(
     resource: { type: "lesson_file", version: context.documentVersion },
     focus: { sectionId: context.activeSectionId },
     selection: selectionTurnHint(context.selection),
+    confirmedDecision: context.confirmedDecision ?? null,
     attachments: attachments.map((source) => ({ id: source.id, title: source.title })),
     policy: {
       mode: plan.lightweightConversation ? "lightweight"
@@ -64,7 +65,7 @@ export function lessonTurnContext(
       taskIntent: plan.taskIntent,
       ...(plan.taskIntent?.type === "decision_proposal" ? {
         decision: {
-          instruction: "先读取当前教案与 read_decision_context；提出决策候选时必须给出问题、选项与取舍、可定位证据、反例、假设、不确定性、置信度、预期信号与证伪条件。教案原文足以支持目标与评价是否对齐的设计判断，可标 proposed 并明确它只是待教师审阅的设计假设；不能据此声称学生学习已改善。对于学生表现、方案效果或迁移等缺少观察的判断，提交 insufficient_evidence 并列出缺口。合成观察引用必须保留合成标注且证据卡 level=synthetic，不得升级为一手课堂证据，也不得将合成比例作为真实班级的比较基线、改进幅度或目标阈值；预期信号应说明将来怎样采集真实基线并检查。前后比较必须使用同一学习目标、同一成功判据并说明文本难度与提示条件；识别正确率与解释达成率应分别记录，不能相减或直接称为提升。条件变化不能直接作因果归因，没有可比基线就只记录首次真实基线与待收集的信息。应用内引用只需工具提供的 source URI 与 locator，版本和读取时间由服务端补齐；外部来源须完整保留工具返回的出处。excerpt 逐字引用单一字段原文，不拼接推断。无所选项时 chosenOptionId 使用 JSON null，不写字符串。不得替教师确认、实施或审议。",
+          instruction: "先读取当前教案与 read_decision_context，复用本轮已读取的同版本来源。候选用一句具体问题、可区分的选项及成本、逐字证据、关键假设与反例说明判断。必须给出 observationPlan：设计一致性判断用 kind=design_check、method=document_check，核对修订后的目标、任务产出和评分判据是否逐项覆盖；不是以学生成绩替代文档检查。设计判断的证伪必须针对原判断：例如原教案另有可定位评分工具确实覆盖解释目标；不能以修改后的任务取得好成绩，倒推修改前的识别出口条已经足够。学习变化判断用 kind=learning_change，明确同一目标、成功判据、群体、任务难度、提示和取证条件，基线只可引用已读真实记录的id，缺少就为null；后测符合预期也不能作因果归因。不得将识别率与解释达成率相减。合成来源必须保留标注、level=synthetic，不能作为真实改善证据。无依据的学生效果判断用 insufficient_evidence。教案原文足以支持设计错位假设，可 proposed，但不得声称学生已经改善。置信度仅是未校准自评，不是正确概率。教师可见说明用领域语言，不输出工具名、内部字段或source代码；来源定位保留在证据详情。原文证据excerpt逐字引用单字段，应用内元数据由服务端补齐，无选择用JSON null。已有决策应读取最新版本和审议，不能把早先对话里的proposed状态当成当前状态。不得替教师确认、实施或审议。",
         },
       } : {}),
       alternativeCompletion: plan.taskIntent?.type === "decision_proposal"

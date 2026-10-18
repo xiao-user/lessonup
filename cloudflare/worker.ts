@@ -1,3 +1,4 @@
+import { AgentRequestBodyError, ownAgentRequest } from "./agent-request.js";
 import { createWorkerApplication } from "./application.js";
 import { processKnowledgeQueue } from "./knowledge-index.js";
 import { runLessonUpMaintenance } from "../server/maintenance.js";
@@ -34,9 +35,19 @@ export class LessonUpAgentRuntime {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const application = createWorkerApplication(env, "disabled");
-    const target = await agentRuntimeForRequest(request, env, application);
-    if (target) return target.fetch(request);
-    return application.app.fetch(request);
+    try {
+      const owned = new URL(request.url).pathname.startsWith("/api/agent/")
+        ? await ownAgentRequest(request)
+        : { request, json: null };
+      const target = await agentRuntimeForRequest(owned.request, env, application, owned.json);
+      if (target) return target.fetch(owned.request);
+      return application.app.fetch(owned.request);
+    } catch (error) {
+      if (error instanceof AgentRequestBodyError) {
+        return Response.json({ error: error.code }, { status: error.status });
+      }
+      throw error;
+    }
   },
   scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     const database = new D1SqlDatabase(env.LESSONUP_DB);
@@ -51,6 +62,7 @@ async function agentRuntimeForRequest(
   request: Request,
   env: Env,
   application: ReturnType<typeof createWorkerApplication>,
+  json: unknown,
 ) {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/agent/")) return null;
@@ -60,7 +72,7 @@ async function agentRuntimeForRequest(
 
   const start = url.pathname.match(/^\/api\/agent\/threads\/([^/]+)\/runs$/);
   if (request.method === "POST" && start) {
-    const payload = await request.clone().json().catch(() => null) as { branchId?: unknown } | null;
+    const payload = json as { branchId?: unknown } | null;
     if (typeof payload?.branchId !== "string" || !payload.branchId) return null;
     return env.LESSONUP_AGENT_RUNTIME.getByName(runtimeName(userId, decodeURIComponent(start[1])));
   }

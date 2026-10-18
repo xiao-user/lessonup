@@ -1,4 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { DatabaseSync } from "node:sqlite";
+import { readdirSync, readFileSync } from "node:fs";
+import { createD1LessonCoreRepository } from "./d1-lesson-core-repository.js";
+import { MemoryLessonRepository } from "./memory-repository.js";
+import { lessonPlanSchema } from "../domain.js";
+import type { LessonRepository } from "../repository.js";
 import { D1AgentRuntimeStore } from "./d1-agent-runtime-store.js";
 import type { SqlDatabase, SqlStatement } from "../platform/sql-database.js";
 
@@ -353,3 +359,92 @@ const threadRow = {
 };
 const runtimeRow = { owner_id: "owner-1", thread_id: "thread-1", branch_id: "branch-1", runtime: "pi", revision: 4, messages_json: "[]", updated_at: "2026-08-24T00:00:00.000Z" };
 const runRow = { id: "run-1", owner_id: "owner-1", thread_id: "thread-1", branch_id: "branch-1", assistant_message_id: null, model: "test", status: "running", capability_plan_json: null, agent_definition_version: null, skill_versions_json: "{}", attachment_source_ids_json: "[]", token_usage_json: "{}", provider_cost: null, error: null, lease_token: "lease-1", lease_expires_at: "2026-08-24T00:05:00.000Z", heartbeat_at: "2026-08-24T00:00:00.000Z", cancel_requested_at: null, started_at: "2026-08-24T00:00:00.000Z", completed_at: null };
+
+
+async function settlementFixture(kind: "sqlite" | "memory") {
+  let db: DatabaseSync | undefined;
+  let repository: LessonRepository;
+  let beforeSettlement: (() => Promise<void>) | undefined;
+  if (kind === "sqlite") {
+    db = new DatabaseSync(":memory:");
+    const migrations = new URL("../../d1/migrations/", import.meta.url);
+    for (const name of readdirSync(migrations).filter(name => name.endsWith(".sql")).sort()) db.exec(readFileSync(new URL(name, migrations), "utf8"));
+    db.prepare("INSERT INTO users VALUES (?, ?, 'dummy', 'now', 'now')").run("owner-1", "teacher");
+    const execute = (statement: SqlStatement) => {
+      const prepared = db!.prepare(statement.sql);
+      return prepared.columns().length
+        ? { rows: prepared.all(...statement.params ?? []), rowsAffected: 0 }
+        : { rows: [], rowsAffected: Number(prepared.run(...statement.params ?? []).changes) };
+    };
+    const sql = {
+      query: async (statement: SqlStatement) => execute(statement),
+      batch: async (statements: SqlStatement[]) => {
+        if (statements.some(statement => statement.sql.includes("SET status = ?, token_usage_json"))) {
+          const hook = beforeSettlement; beforeSettlement = undefined; await hook?.();
+        }
+        db!.exec("BEGIN");
+        try { const results = statements.map(execute); db!.exec("COMMIT"); return results; }
+        catch (error) { db!.exec("ROLLBACK"); throw error; }
+      },
+    } as SqlDatabase;
+    repository = createD1LessonCoreRepository(sql);
+  } else repository = new MemoryLessonRepository();
+  const document = lessonPlanSchema.parse(Object.fromEntries(["unit", "period", "totalPeriods", "topic", "objectives", "focus", "preparation", "process", "assessment", "homework", "board", "reflection"].map(field => [field, "lesson text"])));
+  const notebook = await repository.createNotebook("owner-1", { title: "语文", className: "一班", year: "2026", subject: "语文", tone: "teal" });
+  const file = await repository.createLessonFile("owner-1", { notebookId: notebook.id, title: "课时", type: "教案", document, pageCount: 1 });
+  const { thread, branch } = await repository.createThread("owner-1", { notebookId: notebook.id, resourceType: "lesson_file", lessonFileId: file.id });
+  const message = await repository.appendMessage({ ownerId: "owner-1", threadId: thread.id, branchId: branch.id, role: "assistant", content: "partial", status: "streaming" });
+  const run = await repository.createRun({ id: "race-run", ownerId: "owner-1", threadId: thread.id, branchId: branch.id, assistantMessageId: message.id,
+    model: "test", status: "running", leaseToken: "race-lease", leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() });
+  await repository.updateThread("owner-1", thread.id, { status: "running" });
+  const settle = (status: "completed" | "cancelled" | "awaiting_approval" = "completed") => repository.settleRun({ ownerId: "owner-1", runId: run.id, leaseToken: "race-lease", status,
+    messageStatus: status === "awaiting_approval" ? "completed" : status, messageContent: status });
+  return { db, repository, run, thread, message, settle,
+    beforeSettlement: (hook: () => Promise<void>) => { beforeSettlement = hook; } };
+}
+
+describe("SQLite settlement cancellation race", () => {
+  for (const status of ["completed", "awaiting_approval"] as const) it(`rejects ${status} when cancellation commits after the settlement read`, async () => {
+    const f = await settlementFixture("sqlite");
+    try {
+      let hookRan = false;
+      f.beforeSettlement(async () => {
+        // settleRun already captured the running row with a live lease and no cancellation.
+        expect(await f.repository.requestRunCancellation("owner-1", f.run.id)).toBe(true);
+        hookRan = true;
+      });
+      await expect(f.settle(status)).rejects.toThrow("run_cancel_requested");
+      expect(hookRan).toBe(true);
+      expect(await f.repository.getRun("owner-1", f.run.id)).toMatchObject({ status: "running", leaseToken: "race-lease", cancelRequestedAt: expect.any(String) });
+      expect(await f.repository.getMessage("owner-1", f.message.id)).toMatchObject({ content: "partial", status: "streaming" });
+      expect(await f.repository.getThread("owner-1", f.thread.id)).toMatchObject({ status: "running" });
+      // Cancellation settlement still owns the valid lease; duplicate delivery is safe.
+      await expect(f.settle("cancelled")).resolves.toMatchObject({ status: "cancelled" });
+      await expect(f.settle("cancelled")).resolves.toMatchObject({ status: "cancelled" });
+      expect(await f.repository.getMessage("owner-1", f.message.id)).toMatchObject({ content: "cancelled", status: "cancelled" });
+    } finally { f.db?.close(); }
+  });
+});
+
+for (const kind of ["sqlite", "memory"] as const) describe(`${kind} cancellation linearization`, () => {
+  it("lets the first cancellation win without permitting a competing completion", async () => {
+    const f = await settlementFixture(kind);
+    try {
+      const cancellation = f.repository.requestRunCancellation("owner-1", f.run.id);
+      const completion = f.settle();
+      expect(await cancellation).toBe(true);
+      await expect(completion).rejects.toThrow("run_cancel_requested");
+      await expect(f.settle("cancelled")).resolves.toMatchObject({ status: "cancelled" });
+    } finally { f.db?.close(); }
+  });
+
+  it("keeps a completed run terminal when a later cancellation arrives and permits exact settlement replay", async () => {
+    const f = await settlementFixture(kind);
+    try {
+      await expect(f.settle()).resolves.toMatchObject({ status: "completed" });
+      expect(await f.repository.requestRunCancellation("owner-1", f.run.id)).toBe(false);
+      await expect(f.settle()).resolves.toMatchObject({ status: "completed" });
+      expect(await f.repository.getMessage("owner-1", f.message.id)).toMatchObject({ content: "completed", status: "completed" });
+    } finally { f.db?.close(); }
+  });
+});

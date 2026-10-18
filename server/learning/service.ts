@@ -5,6 +5,7 @@ import {
   learningReadQuerySchema,
   type LearningCommand, type LearningEvidence, type LearningInquiry, type LearningReview,
 } from "./domain.js";
+import { isSyntheticObservation, normalizeObservationText, observationsComparable } from "./observation-plan.js";
 
 type Scope = { ownerId: string; lessonFileId: string };
 type Origin = { runId: string; threadId: string; branchId: string };
@@ -36,8 +37,12 @@ export class LearningService {
   async read(scope: Scope, rawQuery: unknown = {}) {
     const query = learningReadQuerySchema.parse(rawQuery);
     const file = await this.file(scope);
+    if (query.decisionId) {
+      const decision = await this.repository.getDecision(scope.ownerId, query.decisionId);
+      if (!decision || decision.lessonFileId !== file.id) throw new Error("decision_not_found");
+    }
     const [evidence, inquiries] = await Promise.all([
-      this.repository.listLearningEvidence(scope.ownerId, file.id, 41, query.evidenceBefore),
+      this.repository.listLearningEvidence(scope.ownerId, file.id, 41, query.evidenceBefore, query.decisionId),
       this.repository.listLearningInquiries(scope.ownerId, file.id, 25, query.inquiriesBefore),
     ]);
     const visibleInquiries = await Promise.all(inquiries.slice(0, 24).map(async (inquiry) => {
@@ -86,6 +91,13 @@ export class LearningService {
     if (replay) return replay as LearningEvidence;
     if (file.documentVersion !== input.documentVersion) throw new Error("stale_document");
     if (Date.parse(input.observedAt) > Date.parse(this.clock()) + 60_000) throw new Error("learning_observation_in_future");
+    if (input.decisionId) {
+      const decision = await this.repository.getDecision(scope.ownerId, input.decisionId);
+      if (!decision || decision.lessonFileId !== file.id) throw new Error("decision_not_found");
+      if (decision.version !== input.decisionVersion) throw new Error("stale_decision");
+      if (!decision.observationPlan) throw new Error("decision_observation_plan_required");
+      command.decisionVersion = decision.version;
+    }
     if (input.inquiryId) {
       const inquiry = await this.requireInquiry(scope, input.inquiryId);
       if (inquiry.state !== "implemented") throw new Error("learning_inquiry_not_implemented");
@@ -126,11 +138,16 @@ export class LearningService {
       || followup.id === baseline.id || Date.parse(followup.observedAt) < Date.parse(inquiry.implementedAt!)) {
       throw new Error("learning_evidence_scope_invalid");
     }
-    const normalize = (value: string) => value.normalize("NFKC").trim().replace(/\s+/g, " ");
-    const comparable = ["objective", "criterion", "learnerGroup"].every((key) => (
-      normalize(baseline[key as "objective" | "criterion" | "learnerGroup"]) === normalize(followup[key as "objective" | "criterion" | "learnerGroup"])
-    ));
+    const comparable = observationsComparable(baseline, followup)
+      && normalizeObservationText(baseline.conditions ?? "") !== "";
     if (!comparable && review.outcome !== "inconclusive") throw new Error("learning_evidence_not_comparable");
+    if (review.outcome !== "inconclusive") {
+      if (baseline.method === "document_check" || followup.method === "document_check"
+        || baseline.synthetic !== false || followup.synthetic !== false
+        || isSyntheticObservation(baseline) || isSyntheticObservation(followup)) {
+        throw new Error("learning_evidence_not_comparable");
+      }
+    }
   }
   async act(scope: Scope, inquiryId: string, raw: unknown, idempotencyKey: string, origin?: Origin): Promise<LearningInquiry> {
     const input = learningInquiryActionSchema.parse(raw);

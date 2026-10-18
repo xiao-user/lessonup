@@ -13,6 +13,8 @@
 
   /* Lesson workspace accents */
   --lesson-accent-teal: #82a09b;
+  --lesson-action-foreground: oklch(43% 0.035 175);
+  --lesson-secondary-foreground: oklch(45% 0.008 175);
   --lesson-accent-olive: #918f66;
   --lesson-accent-sand: #c8bcae;
   --lesson-accent-rose: #918989;

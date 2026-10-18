@@ -24,6 +24,23 @@ import { agentApi } from "@/lib/agent-api";
 import { reconcilePresentationMaterial } from "./presentation-material-state.js";
 import { createMeasurementCache } from "./measurement-cache.js";
 import { previewDocumentDraft } from "@/features/assistant/document-draft.js";
+import { createLessonDraft, lessonDraftScope, readLessonDrafts, reconcileLessonDraft, removeLessonDraft, resolveLessonDraftConflict, sameLessonDocument, writeLessonDraft } from "@/lib/lesson-drafts.js";
+
+function loadEditorRecovery(file, notebook, canonical) {
+  const scope = lessonDraftScope(file, notebook);
+  try {
+    if (!scope) return { scope, document: canonical, error: "无法确认当前账号，本机草稿保护不可用；未同步前请勿关闭页面。" };
+    const records = readLessonDrafts(window.localStorage, scope);
+    if (records.length > 1) return { scope, document: canonical, candidates: records };
+    if (!records.length) return { scope, document: canonical };
+    const previous = records[0];
+    const result = reconcileLessonDraft(previous, canonical, file.documentVersion ?? 0);
+    return { scope, ...result, previous, record: result.synchronized ? null : createLessonDraft(scope, result.baseDocument, result.baseVersion, result.document, { id: previous.id, attempt: result.attempt, conflicts: result.conflicts }) };
+  } catch {
+    return { scope, document: canonical, error: "无法读取本机草稿。未同步的修改可能仅保留在此页面，请勿直接关闭。" };
+  }
+}
+
 
 gsap.registerPlugin(useGSAP);
 
@@ -214,7 +231,20 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
     () => file.lessonPlan ?? createLessonPlanDraft(notebook, file),
     [file, notebook],
   );
-  const [plan, setPlan] = useState(initialPlan);
+  const [recovery] = useState(() => loadEditorRecovery(file, notebook, initialPlan));
+  const draftScopeRef = useRef(recovery.scope);
+  const canonicalRef = useRef({ document: initialPlan, documentVersion: file.documentVersion ?? 0 });
+  const localDraftRef = useRef(recovery.record ?? null);
+  const storedDraftRef = useRef(recovery.previous ?? null);
+  const conflictsRef = useRef(recovery.conflicts ?? []);
+  const recoveryHoldRef = useRef(Boolean(recovery.record || recovery.candidates?.length));
+  const needsReconcileRef = useRef(Boolean(recovery.record));
+  const saveBusyRef = useRef(false);
+  const [localDraftError, setLocalDraftError] = useState(recovery.error ?? "");
+  const [draftConflicts, setDraftConflicts] = useState(recovery.conflicts ?? []);
+  const [recoveryCandidates, setRecoveryCandidates] = useState(recovery.candidates ?? []);
+  const [draftNeedsSync, setDraftNeedsSync] = useState(Boolean(recovery.record));
+  const [plan, setPlan] = useState(recovery.document);
   const [agentDraft, setAgentDraft] = useState(null);
   const [showOriginal, setShowOriginal] = useState(false);
   // The same proposal gains an approval id after streaming; keep the teacher's
@@ -228,7 +258,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
   const draftPatch = agentDraft?.patch;
   const draftPlan = useMemo(() => previewDocumentDraft(plan, draftFields || draftPatch ? { fields: draftFields, patch: draftPatch } : null), [plan, draftFields, draftPatch]);
   const displayingDraft = Boolean(agentDraft && draftPlan && !showOriginal);
-  const historyRef = useRef(createLessonHistory(initialPlan));
+  const historyRef = useRef(createLessonHistory(recovery.document));
   const [historyAvailability, setHistoryAvailability] = useState({
     canUndo: false,
     canRedo: false,
@@ -237,7 +267,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
   const [editorReadyRevision, setEditorReadyRevision] = useState(0);
   const [activeSection, setActiveSection] = useState("basics");
   const [previewSectionIndex, setPreviewSectionIndex] = useState(null);
-  const [saveStatus, setSaveStatus] = useState("已自动保存");
+  const [saveStatus, setSaveStatus] = useState(recovery.record ? "已恢复本机草稿，待核对" : recovery.candidates?.length ? "发现多份本机草稿" : "已自动保存");
   const [selectionContext, setSelectionContext] = useState(null);
   const [documentVersion, setDocumentVersion] = useState(file.documentVersion ?? 0);
   const documentVersionRef = useRef(file.documentVersion ?? 0);
@@ -286,51 +316,126 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
     lessonPlanSections.findIndex((section) => section.id === activeSectionData.id),
   );
 
+  const rememberDraft = useCallback((document, attempt = localDraftRef.current?.attempt ?? null) => {
+    const previous = storedDraftRef.current;
+    const current = localDraftRef.current;
+    const conflicts = conflictsRef.current.map((entry) => ({ ...entry, local: document[entry.field] }));
+    try {
+      const next = createLessonDraft(draftScopeRef.current, canonicalRef.current.document, canonicalRef.current.documentVersion, document, {
+        id: current?.id ?? previous?.id, attempt, conflicts,
+      });
+      localDraftRef.current = next;
+      writeLessonDraft(window.localStorage, next, previous);
+      storedDraftRef.current = next;
+      setLocalDraftError("");
+      return next;
+    } catch {
+      setLocalDraftError("本机草稿保护失败，修改可能仅保留在此页面。请保持页面开启并重试同步。");
+      return null;
+    }
+  }, []);
+
+  const acceptCanonical = useCallback((remote) => {
+    const scope = draftScopeRef.current;
+    if (!remote?.document || !Number.isInteger(remote.documentVersion)
+      || remote.id !== file.id || (scope && remote.ownerId !== scope.ownerId)) throw new Error("invalid_canonical_document");
+    const previousCanonical = canonicalRef.current;
+    if (remote.documentVersion < previousCanonical.documentVersion) throw new Error("stale_document");
+    const pending = localDraftRef.current ?? (dirtyPlanRef.current || failedSaveDataRef.current ? {
+      baseDocument: previousCanonical.document, baseVersion: previousCanonical.documentVersion,
+      document: planRef.current, attempt: failedSaveDataRef.current, conflicts: conflictsRef.current,
+    } : null);
+    const result = pending ? reconcileLessonDraft(pending, remote.document, remote.documentVersion) : {
+      document: remote.document, synchronized: true, conflicts: [], attempt: null,
+    };
+    canonicalRef.current = { document: remote.document, documentVersion: remote.documentVersion };
+    documentVersionRef.current = remote.documentVersion;
+    setDocumentVersion(remote.documentVersion);
+    setSelectionContext(null);
+    conflictsRef.current = result.conflicts;
+    setDraftConflicts(result.conflicts);
+    if (!sameLessonDocument(planRef.current, result.document)) {
+      planRef.current = result.document;
+      setPlan(result.document);
+      historyRef.current = createLessonHistory(result.document);
+      setHistoryAvailability({ canUndo: false, canRedo: false });
+      setEditorExternalRevision((revision) => revision + 1);
+    }
+    if (result.synchronized) {
+      if (storedDraftRef.current) {
+        try { removeLessonDraft(window.localStorage, storedDraftRef.current); }
+        catch { setLocalDraftError("内容已同步，但本机草稿清理失败；重新打开时会再核对云端。"); }
+      }
+      setLocalDraftError((current) => current.startsWith("本机草稿保护失败") ? "" : current);
+      localDraftRef.current = null;
+      storedDraftRef.current = null;
+      dirtyPlanRef.current = null;
+      failedSaveDataRef.current = null;
+      pendingSaveDataRef.current = null;
+      recoveryHoldRef.current = false;
+      setDraftNeedsSync(false);
+      setSaveStatus("已自动保存");
+    } else {
+      dirtyPlanRef.current = planRef.current;
+      failedSaveDataRef.current = result.attempt;
+      pendingSaveDataRef.current = { plan: planRef.current, pageCount: remote.pageCount ?? 1, source: pendingSaveSourceRef.current };
+      rememberDraft(planRef.current, result.attempt);
+      if (result.conflicts.length || recoveryHoldRef.current || needsReconcileRef.current) setDraftNeedsSync(true);
+      setSaveStatus(result.conflicts.length ? "存在冲突，待核对" : "本机草稿，待同步");
+    }
+    return result;
+  }, [file.id, rememberDraft]);
+
   const persistPendingSave = useCallback(() => {
     const save = saveInFlightRef.current.catch(() => null).then(async () => {
-      let lastSaved = null;
-      while (failedSaveDataRef.current || pendingSaveDataRef.current) {
-        const candidate = failedSaveDataRef.current ?? pendingSaveDataRef.current;
-        const pendingSave = candidate.idempotencyKey
-          ? candidate
-          : {
-              ...candidate,
-              baseDocumentVersion: documentVersionRef.current,
-              idempotencyKey: crypto.randomUUID(),
-            };
-        if (failedSaveDataRef.current === candidate) failedSaveDataRef.current = null;
-        if (pendingSaveDataRef.current === candidate) pendingSaveDataRef.current = null;
-        if (dirtyPlanRef.current === pendingSave.plan) dirtyPlanRef.current = null;
-
-        if (pendingSave.source === "agent-local") {
-          setSaveStatus("已自动保存");
-          continue;
+      if (recoveryHoldRef.current) throw new Error("draft_review_required");
+      if (conflictsRef.current.length) throw new Error("draft_conflict");
+      saveBusyRef.current = true;
+      try {
+        if (needsReconcileRef.current || failedSaveDataRef.current) {
+          acceptCanonical(await agentApi.getLessonFile(file.id));
+          needsReconcileRef.current = false;
         }
-        try {
-          const saved = await onSaveRef.current(
-            pendingSave.plan,
-            pendingSave.pageCount,
-            pendingSave.source,
-            pendingSave.baseDocumentVersion,
-            pendingSave.idempotencyKey,
-          );
-          if (saved?.documentVersion !== undefined) {
-            documentVersionRef.current = saved.documentVersion;
-            setDocumentVersion(saved.documentVersion);
+        let staleRetries = 0;
+        let lastSaved = null;
+        while (failedSaveDataRef.current || pendingSaveDataRef.current || dirtyPlanRef.current) {
+          if (conflictsRef.current.length) throw new Error("draft_conflict");
+          const candidate = localDraftRef.current?.attempt ?? failedSaveDataRef.current ?? pendingSaveDataRef.current ?? {
+            plan: planRef.current, pageCount: 1, source: pendingSaveSourceRef.current,
+          };
+          const pendingSave = candidate.idempotencyKey ? candidate : {
+            ...candidate, baseDocumentVersion: documentVersionRef.current, idempotencyKey: crypto.randomUUID(),
+          };
+          if (pendingSave.source === "agent-local") {
+            pendingSaveDataRef.current = null;
+            dirtyPlanRef.current = null;
+            continue;
           }
-          setSaveStatus("已自动保存");
-          lastSaved = saved;
-        } catch (error) {
+          rememberDraft(planRef.current, pendingSave);
           failedSaveDataRef.current = pendingSave;
-          setSaveStatus("保存失败");
-          throw error;
+          setSaveStatus("正在同步…");
+          try {
+            const saved = await onSaveRef.current(pendingSave.plan, pendingSave.pageCount, pendingSave.source, pendingSave.baseDocumentVersion, pendingSave.idempotencyKey);
+            acceptCanonical(saved);
+            lastSaved = saved;
+          } catch (error) {
+            needsReconcileRef.current = true;
+            if (error?.message === "stale_document" && staleRetries++ < 2) {
+              acceptCanonical(await agentApi.getLessonFile(file.id));
+              needsReconcileRef.current = false;
+              continue;
+            }
+            setDraftNeedsSync(true);
+            setSaveStatus("同步未确认，请重试");
+            throw error;
+          }
         }
-      }
-      return lastSaved;
+        return lastSaved;
+      } finally { saveBusyRef.current = false; }
     });
     saveInFlightRef.current = save;
     return save;
-  }, []);
+  }, [acceptCanonical, file.id, rememberDraft]);
   persistPendingSaveRef.current = persistPendingSave;
 
   const measureAndPaginateRef = useRef(() => {});
@@ -385,7 +490,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
     window.clearTimeout(saveTimerRef.current);
     await persistPendingSaveRef.current();
     await saveInFlightRef.current;
-    return { documentVersion: documentVersionRef.current };
+    return { documentVersion: documentVersionRef.current, document: canonicalRef.current.document };
   }, []);
 
   const presentationErrorMessage = useCallback((error, action) => {
@@ -603,6 +708,39 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
     };
   }, [editorReadyRevision, pages]);
 
+  useEffect(() => {
+    if (recovery.previous && !recovery.record) {
+      try { removeLessonDraft(window.localStorage, recovery.previous); storedDraftRef.current = null; }
+      catch { setLocalDraftError("内容已同步，但本机草稿暂时无法清理。"); }
+    } else if (recovery.record) rememberDraft(planRef.current, recovery.record.attempt);
+  }, [recovery, rememberDraft]);
+
+  useEffect(() => {
+    // App updates lessonPlan optimistically; only a strictly newer version can
+    // be treated as canonical, and the save response owns its in-flight update.
+    if (!saveBusyRef.current && file.documentVersion > canonicalRef.current.documentVersion && file.lessonPlan) {
+      try { acceptCanonical({ ...file, document: file.lessonPlan }); }
+      catch { setLocalDraftError("云端内容已变化，请先重试同步并核对草稿。"); }
+    }
+  }, [acceptCanonical, file]);
+
+  useEffect(() => {
+    const protect = (event) => {
+      tiptapBridgeRef.current?.flush();
+      if (!dirtyPlanRef.current && !localDraftRef.current && !failedSaveDataRef.current && !saveBusyRef.current) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    const reconnect = () => {
+      if (recoveryHoldRef.current || conflictsRef.current.length || (!dirtyPlanRef.current && !failedSaveDataRef.current)) return;
+      needsReconcileRef.current = true;
+      persistPendingSaveRef.current().catch(() => null);
+    };
+    window.addEventListener("beforeunload", protect);
+    window.addEventListener("online", reconnect);
+    return () => { window.removeEventListener("beforeunload", protect); window.removeEventListener("online", reconnect); };
+  }, []);
+
   useEffect(() => () => {
     window.clearTimeout(saveTimerRef.current);
     persistPendingSaveRef.current().catch(() => null);
@@ -619,6 +757,8 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
   };
 
   const persistPlan = useCallback((nextPlan, transaction = null) => {
+    rememberDraft(nextPlan);
+    setSelectionContext((current) => current && nextPlan[current.field] !== current.fieldSnapshot ? null : current);
     const nextHistory = recordLessonChange(
       historyRef.current,
       nextPlan,
@@ -629,12 +769,12 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
     planRef.current = nextPlan;
     dirtyPlanRef.current = nextPlan;
     pendingSaveSourceRef.current = transaction?.kind === "agent" ? "agent-local" : "manual";
-    setSaveStatus("正在保存…");
+    setSaveStatus(recoveryHoldRef.current || conflictsRef.current.length ? "本机草稿，待核对" : "正在保存…");
     setPlan(nextPlan);
     if (transaction?.origin !== "tiptap") {
       setEditorExternalRevision((version) => version + 1);
     }
-  }, []);
+  }, [rememberDraft]);
 
   const commitEditorFragment = useCallback((edit, transaction) => {
     const currentPlan = planRef.current;
@@ -653,6 +793,8 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
       : redoLessonChange(currentHistory);
     if (nextHistory === currentHistory) return;
 
+    rememberDraft(nextHistory.present);
+    setSelectionContext(null);
     historyRef.current = nextHistory;
     updateHistoryAvailability(nextHistory);
     planRef.current = nextHistory.present;
@@ -728,17 +870,16 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
       canonicalFile.documentVersion === documentVersionRef.current
       && JSON.stringify(canonicalFile.document) === JSON.stringify(planRef.current)
     ) return;
-    documentVersionRef.current = canonicalFile.documentVersion;
-    setDocumentVersion(canonicalFile.documentVersion);
-    pendingAgentCommitRef.current = {
-      plan: canonicalFile.document,
+    const previousHistory = historyRef.current;
+    const result = acceptCanonical(canonicalFile);
+    const adoptedHistory = recordLessonChange(previousHistory, planRef.current, { field: "document", kind: "agent" });
+    historyRef.current = adoptedHistory;
+    updateHistoryAvailability(adoptedHistory);
+    if (result.synchronized) pendingAgentCommitRef.current = {
+      plan: planRef.current,
       documentVersion: canonicalFile.documentVersion,
     };
-    persistPlan(
-      canonicalFile.document,
-      { field: "document", kind: "agent" },
-    );
-  }, [file.id]);
+  }, [acceptCanonical, file.id]);
 
   const closeWorkspace = async () => {
     if (closingRef.current) return;
@@ -781,6 +922,59 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
     setSidecarView("assistant");
     setMobileRail("assistant");
   }, []);
+
+  const chooseRecovery = (id) => {
+    try {
+      const record = readLessonDrafts(window.localStorage, draftScopeRef.current).find((entry) => entry.id === id);
+      if (!record) throw new Error("draft_missing");
+      localDraftRef.current = record;
+      storedDraftRef.current = record;
+      const result = acceptCanonical({ ...canonicalRef.current, id: file.id, ownerId: draftScopeRef.current?.ownerId });
+      recoveryHoldRef.current = !result.synchronized;
+      needsReconcileRef.current = true;
+      setRecoveryCandidates((current) => current.filter((entry) => entry.id !== id));
+    } catch { setLocalDraftError("无法恢复这份本机草稿，原记录仍保留，请勿覆盖或清除浏览器数据。"); }
+  };
+  const resolveConflict = (field, value) => {
+    const current = localDraftRef.current;
+    if (!current) return;
+    const resolved = resolveLessonDraftConflict(current, field, value);
+    conflictsRef.current = resolved.conflicts;
+    setDraftConflicts(resolved.conflicts);
+    localDraftRef.current = resolved;
+    planRef.current = resolved.document;
+    dirtyPlanRef.current = resolved.document;
+    historyRef.current = createLessonHistory(resolved.document);
+    setHistoryAvailability({ canUndo: false, canRedo: false });
+    setPlan(resolved.document);
+    setSelectionContext(null);
+    setEditorExternalRevision((revision) => revision + 1);
+    rememberDraft(resolved.document, null);
+    setDraftNeedsSync(true);
+  };
+  const retryDocumentSync = async () => {
+    if (conflictsRef.current.length) return;
+    recoveryHoldRef.current = false;
+    needsReconcileRef.current = true;
+    try { await flushDocumentBeforeAgentRun(); }
+    catch { setSaveStatus(conflictsRef.current.length ? "存在冲突，待核对" : "同步未完成，请重试"); }
+  };
+  const handleSelectionChange = useCallback((selection) => {
+    setSelectionContext(selection ? {
+      ...selection,
+      fieldSnapshot: planRef.current[selection.field],
+      baseDocumentVersion: documentVersionRef.current,
+    } : null);
+  }, []);
+
+  const prepareDecisionRevision = useCallback((decision) => {
+    if (!["teacher_confirmed", "implemented"].includes(decision.status) || !decision.chosenOptionId) return;
+    setSelectionContext(null);
+    requestDecisionAgent({
+      taskIntent: { type: "document_write", decisionRef: { id: decision.id, version: decision.version, chosenOptionId: decision.chosenOptionId } },
+      prompt: "请读取当前教案以及本次已确认的教学判断，仅落实教师已选方案，准备最小充分的教案修改提案供我核对。核对判断前提和取证安排，保留无关内容，不替我采用修改、登记实施或审议；不能根据历史对话重新选择方案。",
+    });
+  }, [requestDecisionAgent]);
 
   return (
     <section
@@ -834,7 +1028,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
             </span>
           </Button>
           <div className="lesson-file-identity">
-            <p className="lesson-save-status"><Check aria-hidden="true" /> {saveStatus}</p>
+            <p className="lesson-save-status" role="status" aria-live="polite">{saveStatus === "已自动保存" ? <Check aria-hidden="true" /> : null} {saveStatus}</p>
             <div className="lesson-history-actions" aria-label="编辑历史">
               <Button
                 variant="outline"
@@ -903,6 +1097,22 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
           aria-label="A4教案编辑区"
         >
           <p className="lesson-mobile-document-hint">上下滚动查看完整教案</p>
+          {localDraftError || draftNeedsSync || recoveryCandidates.length ? <section className="mx-auto mb-4 w-full max-w-3xl space-y-3 rounded-lg border bg-background p-4 text-sm" aria-label="本机草稿与同步">
+            {localDraftError ? <p role="alert">{localDraftError}</p> : draftNeedsSync ? <p role="status">未同步修改已保留在本机。请核对恢复内容后同步；云端同时变化的段落需要逐项选择。</p> : null}
+            {recoveryCandidates.length ? <div className="space-y-2">
+              <p>发现 {recoveryCandidates.length} 份本机草稿，未自动覆盖当前教案。请选择要核对的草稿，其他草稿仍会保留。</p>
+              {recoveryCandidates.map((record, index) => <Button key={record.id} variant="outline" size="sm" onClick={() => chooseRecovery(record.id)}>恢复草稿 {index + 1} · {new Date(record.updatedAt).toLocaleString("zh-CN")}</Button>)}
+              {!localDraftRef.current ? <Button variant="ghost" size="sm" onClick={() => { setRecoveryCandidates([]); recoveryHoldRef.current = false; setSaveStatus("已载入云端内容，本机草稿保留"); }}>暂用云端内容</Button> : null}
+            </div> : null}
+            {draftConflicts.map((conflict) => <details key={conflict.field} open className="space-y-2">
+              <summary>{lessonPlanSections.find((section) => section.id === conflict.field)?.label ?? ({ unit: "单元", period: "课时", totalPeriods: "总课时", topic: "课题" })[conflict.field]}存在同时修改，请选择</summary>
+              <p><strong>当前编辑</strong></p><p className="whitespace-pre-wrap break-words">{plan[conflict.field] || "（空）"}</p>
+              <p><strong>云端内容</strong></p><p className="whitespace-pre-wrap break-words">{conflict.remote || "（空）"}</p>
+              <Button variant="outline" size="sm" onClick={() => resolveConflict(conflict.field, planRef.current[conflict.field])}>采用当前编辑</Button>{" "}
+              <Button variant="outline" size="sm" onClick={() => resolveConflict(conflict.field, conflict.remote)}>采用云端内容</Button>
+            </details>)}
+            {draftNeedsSync || localDraftError ? <Button size="sm" disabled={draftConflicts.length > 0} onClick={() => { void retryDocumentSync(); }}>核对并重试同步</Button> : null}
+          </section> : null}
           {displayingDraft ? <LessonPlanTiptapEditor
             key="agent-draft"
             plan={draftPlan}
@@ -929,7 +1139,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
             onEditorReady={handleTiptapEditorReady}
             onFieldChange={commitEditorFragment}
             onFieldFocus={setActiveSection}
-            onSelectionChange={setSelectionContext}
+            onSelectionChange={handleSelectionChange}
             presentationMaterial={editablePresentationMaterial}
           />
           </div>
@@ -967,7 +1177,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
           <Button id="decisions-tab" role="tab" tabIndex={sidecarView === "decisions" ? 0 : -1} aria-selected={sidecarView === "decisions"} aria-controls="decisions-tab-panel" size="sm" variant="ghost" onClick={() => setSidecarView("decisions")}>教学决策</Button>
         </div>
         <div id="decisions-tab-panel" role="tabpanel" aria-labelledby="decisions-tab" hidden={sidecarView !== "decisions"} className="lesson-sidecar-content">
-          {sidecarView === "decisions" ? <Suspense fallback={<p role="status">正在读取教学决策…</p>}><DecisionWorkbench file={{ ...file, documentVersion }} onAgentRequest={requestDecisionAgent} /></Suspense> : null}
+          {sidecarView === "decisions" ? <Suspense fallback={<p role="status">正在读取教学决策…</p>}><DecisionWorkbench file={{ ...file, documentVersion }} onBeforeWrite={flushDocumentBeforeAgentRun} onPrepareDecisionRevision={prepareDecisionRevision} onAgentRequest={requestDecisionAgent} /></Suspense> : null}
         </div>
         <div id="learning-tab-panel" role="tabpanel" aria-labelledby="learning-tab" hidden={sidecarView !== "learning"} className="lesson-sidecar-content">
           {sidecarView === "learning" ? <Suspense fallback={<p role="status">正在读取学习记录…</p>}><LearningWorkbench file={{ ...file, documentVersion }} notebook={notebook} plan={plan} onBeforeWrite={flushDocumentBeforeAgentRun} onAgentRequest={requestLearningAgent} /></Suspense> : null}

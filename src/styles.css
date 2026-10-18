@@ -1818,7 +1818,7 @@
 }
 
 .lesson-outline-back-copy small {
-  color: var(--gray-700);
+  color: var(--lesson-secondary-foreground);
   font-family: var(--font-mono);
   font-size: var(--text-label-12);
   font-weight: 400;
@@ -1837,7 +1837,7 @@
   justify-self: start;
   gap: 6px;
   margin: 0;
-  color: var(--gray-800);
+  color: var(--lesson-secondary-foreground);
   font-size: var(--text-label-12);
   line-height: var(--text-label-12--line-height);
 }
@@ -2215,8 +2215,8 @@
 }
 
 .lesson-presentation-material-action.is-primary {
-  border-color: var(--lesson-accent-teal);
-  color: var(--lesson-accent-teal);
+  border-color: var(--lesson-action-foreground);
+  color: var(--lesson-action-foreground);
 }
 
 .lesson-presentation-material-action.is-destructive {

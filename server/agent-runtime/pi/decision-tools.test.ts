@@ -25,11 +25,13 @@ const context = {
 } satisfies LessonAgentContext;
 
 function repository() {
+  const listLearningEvidence = vi.fn(async () => []);
   return {
     getLessonFileContext: vi.fn(async () => ({
       id: lessonFileId, ownerId: "teacher-1", notebookId: "notebook-1", documentVersion: 3, contextProfile: {},
     })),
     getLessonFile: vi.fn(async () => ({
+      id: lessonFileId, ownerId: "teacher-1", notebookId: "notebook-1", documentVersion: 3,
       document: { objectives: "体会其表达效果。", assessment: "出口条只要求找出反复。" },
     })),
     getRun: vi.fn(async () => ({ id: "run-1", ownerId: "teacher-1", threadId: "thread-1", branchId: "branch-1", status: "running" })),
@@ -37,7 +39,16 @@ function repository() {
     getBranch: vi.fn(async () => ({ id: "branch-1", ownerId: "teacher-1", threadId: "thread-1" })),
     listDecisions: vi.fn(async () => []),
     listDecisionEvidenceCards: vi.fn(async () => []),
-    listLearningEvidence: vi.fn(async () => []),
+    listLearningEvidence,
+    getLearningEvidence: vi.fn(async (_ownerId, id) => {
+      for (const result of [...listLearningEvidence.mock.results].reverse()) {
+        const rows = await result.value as Array<Record<string, unknown>>;
+        const evidence = rows.find((item) => item.id === id);
+        if (evidence) return { objective: "解释表达效果", task: "独立解释", criterion: "指出联系", learnerGroup: "本班",
+          lessonFileId, ownerId: "teacher-1", ...evidence };
+      }
+      return null;
+    }),
     getDecisionCommandResult: vi.fn(async () => null),
     replayDecisionCommand: vi.fn(async () => null),
     saveDecision: vi.fn(async (record) => record),
@@ -64,19 +75,25 @@ const evidenceCard = {
 
 const proposal = {
   decisionType: "goal_evidence",
-  question: "本课的达成证据是什么？",
+  question: "出口条是否检验了目标要求的表达效果解释？",
   options: [
-    { id: "opt_a", statement: "出口条复述", tradeoffs: ["易评分", "不能区分理解"] },
-    { id: "opt_b", statement: "无提示新段落解释", tradeoffs: ["更接近迁移", "评分成本高"] },
+    { id: "opt_a", statement: "出口条只保留识别，并将目标限定为识别", tradeoffs: ["易评分", "需要同步收窄教学目标"] },
+    { id: "opt_b", statement: "出口条增加表达效果解释及独立评分判据", tradeoffs: ["评价与现有解释目标对齐", "评分成本高"] },
   ],
   chosenOptionId: "opt_b",
-  rationale: "目标指向理解。",
-  counterevidence: ["上次只能复述。"],
-  assumptions: ["学生已能找出重复词句。"],
-  uncertainties: ["新段落难度可能增加负担。"],
+  rationale: "目标要求体会表达效果，当前出口条只要求识别。",
+  counterevidence: ["五分钟内完成解释的时间容量尚未验证。"],
+  assumptions: ["教师保留体会表达效果这一目标。"],
+  uncertainties: ["解释任务的表述和评分成本尚需教师核对。"],
   confidence: 0.72,
-  expectedSignal: "独立解释比例上升。",
-  falsifier: "若比例未上升，则决策不成立。",
+  expectedSignal: "修订后出口条明确要求解释，并有对应判据；这只验证设计对齐。",
+  falsifier: "若教师核实原有独立任务已要求解释且有对应判据，则该设计缺口判断不成立。",
+  observationPlan: {
+    kind: "design_check", objective: "核对目标与评价的解释要求是否一致。",
+    task: "并列核对教案目标、出口条任务和评分判据。", criterion: "出口条要求解释表达效果，并对解释而非仅识别设独立判据。",
+    learnerGroup: "本课教案，不采集学生表现", method: "document_check",
+    conditions: "核对同一版本教案，设计对齐不证明真实学生达成。", baselineEvidenceId: null,
+  },
   reviewAt: null,
   evidenceCards: [evidenceCard],
   status: "proposed",
@@ -93,10 +110,20 @@ describe("decision agent tools", () => {
     const schema = JSON.parse(JSON.stringify(tools[1]!.parameters));
     expect(schema.required).not.toContain("evidenceCards");
     expect(schema.required).not.toContain("chosenOptionId");
+    expect(schema.required).not.toContain("confidence");
     expect(schema.properties.evidenceCards.items.required).not.toContain("supports");
-    expect(schema.properties.evidenceCards.items.required).toContain("confidence");
+    expect(schema.properties.evidenceCards.items.required).not.toContain("confidence");
+    expect(schema.properties.evidenceCards.items.properties.confidence.anyOf).toContainEqual({ type: "null" });
+    expect(schema.properties).not.toHaveProperty("lessonEvidence");
     expect(schema.properties.evidenceCards.items.properties.source.required).toEqual(["uri", "locator"]);
   });
+  it.each([undefined, null])("stores an omitted or null evidence confidence without inventing a probability (%s)", async (confidence) => {
+    const { tools, repository } = toolsFor();
+    await tools[0]!.execute("read", {});
+    await tools[1]!.execute("propose", { ...proposal, evidenceCards: [{ ...evidenceCard, confidence }] });
+    expect(vi.mocked(repository.saveDecision).mock.calls[0][3][0].confidence).toBeNull();
+  });
+
   it("resolves the current-lesson alias to server-owned metadata", async () => {
     const { tools, repository } = toolsFor();
     await tools[0]!.execute("read", {});
@@ -146,12 +173,22 @@ describe("decision agent tools", () => {
     expect(vi.mocked(repository.saveDecision).mock.calls[0][3][0].source).toEqual(evidenceCard.source);
   });
 
+  it("proposes an actionable candidate with a complete observation plan and null confidence", async () => {
+    const { tools, getDecisionProposal } = toolsFor();
+    await tools[0]!.execute("read", {});
+    await tools[1]!.execute("propose", { ...proposal, confidence: null });
+    expect(getDecisionProposal()).toMatchObject({
+      status: "proposed", confidence: null, observationPlan: { kind: "design_check", method: "document_check" },
+      provenance: { confirmedBy: null },
+    });
+  });
+
   it("reports all missing actionable judgment fields before saving", async () => {
     const { tools, repository } = toolsFor();
     await tools[0]!.execute("read", {});
     await expect(tools[1]!.execute("incomplete", {
-      ...proposal, confidence: null, counterevidence: [], assumptions: [], uncertainties: [], expectedSignal: "", falsifier: "",
-    })).rejects.toThrow("confidence, counterevidence, assumptions, uncertainties, expectedSignal, falsifier");
+      ...proposal, confidence: null, counterevidence: [], assumptions: [], uncertainties: [], expectedSignal: "", falsifier: "", observationPlan: null,
+    })).rejects.toThrow("counterevidence, assumptions, uncertainties, expectedSignal, falsifier, observationPlan");
     expect(repository.saveDecision).not.toHaveBeenCalled();
     await tools[1]!.execute("complete", proposal);
     expect(repository.saveDecision).toHaveBeenCalledOnce();
@@ -225,6 +262,39 @@ describe("decision agent tools", () => {
       uri: "lessonup://learning-evidence/synthetic-observation", version: "3",
     });
     expect(repository.listLearningEvidence).toHaveBeenCalledWith("teacher-1", lessonFileId, 21, undefined);
+  });
+
+  it.each([
+    { synthetic: true, observation: "30份演示回答中9份满足判据。", sourceReference: "QA fixture" },
+    { synthetic: false, observation: "【合成验收】30份演示回答中9份满足判据。", sourceReference: "验收演示材料" },
+  ])("does not relabel declared synthetic observation as primary (%j)", async (observation) => {
+    const { repository, tools } = toolsFor();
+    vi.mocked(repository.listLearningEvidence).mockResolvedValueOnce([
+      { id: "synthetic-observation", documentVersion: 3, ...observation } as never,
+    ]);
+    await tools[0]!.execute("read", {});
+    const card = { ...evidenceCard, kind: "student_work", level: "primary", excerpt: observation.observation,
+      source: { uri: "lessonup://learning-evidence/observation-1", locator: "observation" } };
+    await expect(tools[1]!.execute("mislabelled", { ...proposal, evidenceCards: [card] })).rejects.toThrow(/synthetic/);
+    expect(repository.saveDecision).not.toHaveBeenCalled();
+    await tools[1]!.execute("corrected", { ...proposal, evidenceCards: [{ ...card, level: "synthetic" }] });
+    expect(vi.mocked(repository.saveDecision).mock.calls[0][3][0]).toMatchObject({
+      level: "synthetic", excerpt: observation.observation,
+      source: { uri: "lessonup://learning-evidence/synthetic-observation" },
+    });
+  });
+
+  it("does not mistake a chemistry synthesis topic for a synthetic-data declaration", async () => {
+    const { repository, tools } = toolsFor();
+    const observation = "学生在合成反应实验中记录了温度变化，并用数据解释反应现象。";
+    vi.mocked(repository.listLearningEvidence).mockResolvedValueOnce([
+      { id: "chemistry-observation", documentVersion: 3, synthetic: false, observation,
+        sourceReference: "本班化学实验报告的匿名汇总" } as never,
+    ]);
+    await tools[0]!.execute("read", {});
+    await tools[1]!.execute("propose", { ...proposal, evidenceCards: [{ ...evidenceCard, kind: "student_work", level: "primary", excerpt: observation,
+      source: { uri: "lessonup://learning-evidence/observation-1", locator: "observation" } }] });
+    expect(vi.mocked(repository.saveDecision).mock.calls[0][3][0].level).toBe("primary");
   });
 
   it("registers older observations through decision pagination without trusting lookahead rows", async () => {

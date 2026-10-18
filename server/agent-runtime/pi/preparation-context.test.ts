@@ -35,6 +35,8 @@ function lessonRepository() {
       contextProfile: { subject: "语文" },
       document: { topic: "春" },
     }),
+    getDecision: vi.fn(),
+    getRun: vi.fn(),
     getLessonDesignBasis: vi.fn().mockResolvedValue({
       basis: { version: 2, frameworkId: "framework-1" },
       entries: [],
@@ -43,6 +45,50 @@ function lessonRepository() {
 }
 
 describe("loadPreparationContext", () => {
+  const decision = () => ({ id: "decision-1", ownerId: "user-1", notebookId: "notebook-1", lessonFileId: "file-1",
+    version: 2, status: "teacher_confirmed", question: "目标与评价如何对齐？", chosenOptionId: "option-1",
+    options: [{ id: "option-1", statement: "增加解释型出口条", tradeoffs: ["增加评分时间"] }], assumptions: ["教师保留解释目标"],
+    provenance: { confirmedBy: "user-1", modelRunId: "origin-run" } });
+  const handoff = () => input({ taskIntent: { type: "document_write", decisionRef: { id: "decision-1", version: 2, chosenOptionId: "option-1" } } });
+
+  it("prepares only the canonical teacher-confirmed option and assumptions", async () => {
+    const repository = lessonRepository();
+    repository.getDecision.mockResolvedValue(decision());
+    repository.getRun.mockResolvedValue({ id: "origin-run", ownerId: "user-1", threadId: "thread-1", status: "completed" });
+    const loaded = await loadPreparationContext(repository as unknown as LessonRepository, handoff());
+    expect(loaded.context).toMatchObject({ confirmedDecision: { id: "decision-1", version: 2,
+      chosenOption: { id: "option-1", statement: "增加解释型出口条" }, assumptions: ["教师保留解释目标"] } });
+    expect(loaded.context).not.toHaveProperty("confirmedDecision.provenance");
+  });
+
+  it.each([
+    { ownerId: "other" }, { lessonFileId: "other" }, { notebookId: "other" }, { version: 3 },
+    { status: "proposed" }, { status: "reviewed" }, { chosenOptionId: "other" }, { options: [] },
+    { provenance: { confirmedBy: "other", modelRunId: "origin-run" } },
+  ])("rejects stale or unconfirmed handoff %j", async patch => {
+    const repository = lessonRepository(); repository.getDecision.mockResolvedValue({ ...decision(), ...patch });
+    await expect(loadPreparationContext(repository as unknown as LessonRepository, handoff())).rejects.toThrow("decision_context_stale");
+  });
+
+  it.each(["running", "cancelled", "failed"])("rejects a %s model origin", async status => {
+    const repository = lessonRepository(); repository.getDecision.mockResolvedValue(decision());
+    repository.getRun.mockResolvedValue({ ownerId: "user-1", threadId: "thread-1", status });
+    await expect(loadPreparationContext(repository as unknown as LessonRepository, handoff())).rejects.toThrow("decision_context_stale");
+  });
+
+  it("allows a teacher-authored implemented decision without a model origin", async () => {
+    const repository = lessonRepository(); repository.getDecision.mockResolvedValue({ ...decision(), status: "implemented",
+      provenance: { confirmedBy: "user-1", modelRunId: null } });
+    expect((await loadPreparationContext(repository as unknown as LessonRepository, handoff())).context).toHaveProperty("confirmedDecision.id", "decision-1");
+    expect(repository.getRun).not.toHaveBeenCalled();
+  });
+
+  it("rejects handoff on semester resources and absent decisions", async () => {
+    const repository = lessonRepository(); repository.getDecision.mockResolvedValue(null);
+    await expect(loadPreparationContext(repository as unknown as LessonRepository, handoff())).rejects.toThrow("decision_context_stale");
+    repository.getThread.mockResolvedValue({ id: "thread-1", resourceType: "semester_framework", notebookId: "notebook-1", semesterFrameworkId: "framework" });
+    await expect(loadPreparationContext(repository as unknown as LessonRepository, handoff())).rejects.toThrow("decision_context_stale");
+  });
   it("uses the light lesson projection and skips design-basis I/O for Fast turns", async () => {
     const repository = lessonRepository();
     const loaded = await loadPreparationContext(

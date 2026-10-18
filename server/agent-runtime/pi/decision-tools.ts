@@ -7,6 +7,7 @@ import type { LessonRepository } from "../../repository.js";
 import { decisionEvidenceInputSchema, proposeDecisionSchema } from "../../decisions/commands.js";
 import type { DecisionRecord } from "../../decisions/contracts.js";
 import { DecisionService } from "../../decisions/service.js";
+import { isSyntheticObservation } from "../../learning/observation-plan.js";
 import { typeBoxFromZod } from "./schema-adapter.js";
 
 const text = (value: unknown, terminate = false) => ({
@@ -14,7 +15,7 @@ const text = (value: unknown, terminate = false) => ({
 });
 
 const decisionToolInputSchema = proposeDecisionSchema.omit({
-  contextVersion: true, createdBy: true, sourceRunId: true,
+  contextVersion: true, createdBy: true, sourceRunId: true, lessonEvidence: true,
 }).extend({
   evidenceCards: z.array(decisionEvidenceInputSchema.extend({
     kind: decisionEvidenceInputSchema.shape.kind.describe("Classify the source, not the claim. For lessonSource use its kind (platform_data), never curriculum_standard/textbook/student_work. For learning observations classify the actual observed source; synthetic observations remain level=synthetic."),
@@ -36,6 +37,7 @@ export function createPiDecisionTools(repository: LessonRepository, context: Les
   const lessonSourceAlias = "lessonup://lesson-files/current";
   const observationSources = new Map<string, { uri: string; version: string; capturedAt: string }>();
   const observationExcerpts = new Map<string, string[]>();
+  const observationSynthetic = new Map<string, boolean>();
   let lessonExcerpts: string[] = [];
   const exactExcerpt = (excerpt: string, originals: string[]) => excerpt.trim().length > 0
     && originals.some((original) => original.replace(/\s+/g, "").includes(excerpt.replace(/\s+/g, "")));
@@ -72,7 +74,9 @@ export function createPiDecisionTools(repository: LessonRepository, context: Les
         observationSources.set(sourceUri, { uri, version: String(item.documentVersion), capturedAt });
         observationExcerpts.set(uri, [item.observation, item.objective, item.task, item.criterion, item.sourceReference]
           .filter((value) => typeof value === "string"));
-        return { ...item, sourceUri };
+        const synthetic = isSyntheticObservation(item);
+        observationSynthetic.set(uri, synthetic);
+        return { ...item, sourceUri, synthetic };
       });
       decisionContextRead = true;
       return text({
@@ -115,6 +119,9 @@ export function createPiDecisionTools(repository: LessonRepository, context: Les
             if (!exactExcerpt(card.excerpt, observationExcerpts.get(observation.uri) ?? [])) {
               throw new Error("decision_evidence_excerpt_not_exact:copy an exact contiguous excerpt from the observed record; keep interpretations in claim");
             }
+            if (observationSynthetic.get(observation.uri) && card.level !== "synthetic") {
+              throw new Error("decision_evidence_synthetic_required:this teacher record is declared synthetic; keep level=synthetic and preserve the synthetic label. Never present synthetic records as real classroom evidence");
+            }
             return { ...card, source: { ...card.source, system: "lessonup", ...observation } };
           }
           if (uri.startsWith("lessonup://")) {
@@ -137,12 +144,12 @@ export function createPiDecisionTools(repository: LessonRepository, context: Les
         }
         if (candidate.status === "proposed" && candidate.decisionType !== "no_change") {
           const missing = [
-            candidate.confidence === null ? "confidence" : null,
             !candidate.counterevidence.length ? "counterevidence" : null,
             !candidate.assumptions.length ? "assumptions" : null,
             !candidate.uncertainties.length ? "uncertainties" : null,
             !candidate.expectedSignal.trim() ? "expectedSignal" : null,
             !candidate.falsifier.trim() ? "falsifier" : null,
+            !candidate.observationPlan ? "observationPlan" : null,
           ].filter(Boolean);
           if (missing.length) throw new Error(`decision_proposal_incomplete:actionable proposed candidates require ${missing.join(", ")}; supply explicit evidence-grounded values, or use insufficient_evidence if the judgment cannot yet be supported`);
         }

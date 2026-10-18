@@ -319,9 +319,13 @@ describe("Pi production coordinator", () => {
   });
 
   it("sends only an address for a large selected excerpt", async () => {
-    const { created, faux, coordinator } = await fixture();
+    const { repository, created, faux, coordinator } = await fixture();
     const largeSelection = "不要注入到 provider context 的选区正文。".repeat(180);
+    await repository.saveLessonDocument({ ownerId, fileId: lessonFileId, baseVersion: 0,
+      document: { ...lesson, process: largeSelection }, pageCount: 1, source: "manual", idempotencyKey: "large-selection-source" });
+    let inspected = false;
     faux.setResponses([(context) => {
+      inspected = true;
       const turnContext = turnContextOf(context);
       expect(turnContext).toContain('"preloaded":false');
       expect(turnContext).toContain(`"originalLength":${largeSelection.length}`);
@@ -335,10 +339,13 @@ describe("Pi production coordinator", () => {
       branchId: created.branch.id,
       message: "分析我选中的教学过程。",
       activeSectionId: "process",
-      documentVersion: 0,
-      selection: { field: "process", start: 0, end: largeSelection.length, text: largeSelection },
+      documentVersion: 1,
+      selection: { field: "process", start: 0, end: largeSelection.length, text: largeSelection,
+        ...{ fieldSnapshot: largeSelection, baseDocumentVersion: 1, documentVersion: 1 } },
       attachmentIds: [],
     }, () => undefined);
+    expect(inspected).toBe(true);
+    expect((await repository.getLatestRun(ownerId, created.thread.id, created.branch.id))?.status).not.toBe("failed");
   });
 
   it("claims a durable lesson-generation intent only after its run and transcript exist", async () => {
@@ -2103,7 +2110,7 @@ describe("Pi grounded completion and learning proposals", () => {
     const service = new LearningService(repository);
     const baseline = await service.recordEvidence({ ownerId, lessonFileId }, {
       documentVersion: 0, objective: "解释文本证据如何支持温晴", task: "独立解释一处景物证据", criterion: "说清证据与判断的联系",
-      learnerGroup: "一班", observation: "能够圈画但解释不充分", method: "student_work",
+      learnerGroup: "一班", conditions: "同等难度新语句、独立完成、无提示、同一判据", synthetic: false, observation: "能够圈画但解释不充分", method: "student_work",
       observedAt: new Date(Date.now() - 60_000).toISOString(), sourceReference: "课堂解释卡",
     }, "pi-learning-baseline");
     faux.setResponses([
@@ -2134,7 +2141,7 @@ describe("Pi grounded completion and learning proposals", () => {
     const implemented = await service.act({ ownerId, lessonFileId }, inquiry.id, { action: "implement", expectedVersion: 1 }, "implement");
     const followup = await service.recordEvidence({ ownerId, lessonFileId }, {
       documentVersion: 0, objective: baseline.objective, task: "独立解释另一处词句", criterion: baseline.criterion,
-      learnerGroup: baseline.learnerGroup, observation: "能解释证据与结论的联系", method: "student_work",
+      learnerGroup: baseline.learnerGroup, conditions: baseline.conditions, synthetic: false, observation: "能解释证据与结论的联系", method: "student_work",
       observedAt: new Date().toISOString(), sourceReference: "后续独立解释卡", inquiryId: inquiry.id,
     }, "followup");
     faux.setResponses([
@@ -2157,7 +2164,8 @@ describe("Pi grounded completion and learning proposals", () => {
   it("recovers from an attempted no-change completion and persists an evidence-gap decision", async () => {
     const { repository, created, faux, coordinator } = await fixture();
     const file = await repository.getLessonFile(ownerId, lessonFileId);
-    const [field, excerpt] = Object.entries(file!.document).find(([, value]) => value.trim().length > 0)!;
+    const field = "assessment";
+    const excerpt = file!.document.assessment;
     faux.setResponses([
       (context) => {
         expect(turnContextOf(context)).toContain("never complete_without_change");
@@ -2174,8 +2182,18 @@ describe("Pi grounded completion and learning proposals", () => {
         ],
         rationale: "尚缺实际独立作答证据，记录问题供教师核对。",
         uncertainties: ["缺少本班学生在新任务上的实际表现"],
+        observationPlan: {
+          kind: "learning_change", objective: "独立解释景物描写的表达效果。",
+          task: "在同等难度的未讲解段落中独立选取证据并解释表达效果。",
+          criterion: "引文准确，并解释关键词与景物特征的联系；识别与解释分开记录。",
+          learnerGroup: "本课原班级，尚无实际作答记录", method: "student_work",
+          conditions: "同一群体、同一判据、同等难度且无提示；先收集真实基线，不与合成数据比较。",
+          baselineEvidenceId: null,
+        },
+        expectedSignal: "先采集符合相同判据与条件的真实基线，尚不能判断迁移表现变化。",
+        falsifier: "若任务难度或提示条件不一致，则不能用前后差异支持此学习变化判断。",
         evidenceCards: [{
-          kind: "assessment_item", level: "primary",
+          kind: "platform_data", level: "primary",
           source: { uri: "lessonup://lesson-files/current", locator: field },
           excerpt, claim: "教案文本只能说明设计，不能证明学生学习效果。", applicability: "本课教案设计",
           limitations: ["尚无学生观察"], confidence: 0.8,
@@ -2195,7 +2213,10 @@ describe("Pi grounded completion and learning proposals", () => {
     expect(completions).toContainEqual({ name: "propose_decision", ok: true });
     const candidates = await repository.listDecisions(ownerId, lessonFileId, 20);
     expect(candidates).toHaveLength(1);
-    expect(candidates[0]).toMatchObject({ status: "insufficient_evidence", provenance: { createdBy: "agent", confirmedBy: null } });
+    expect(candidates[0]).toMatchObject({ status: "insufficient_evidence",
+      observationPlan: { kind: "learning_change", baselineEvidenceId: null, method: "student_work" },
+      provenance: { createdBy: "agent", confirmedBy: null, modelRunId: run!.id } });
+    expect((await repository.getRun(ownerId, candidates[0].provenance.modelRunId!))?.status).toBe("completed");
     const cards = await repository.listDecisionEvidenceCards(ownerId, lessonFileId, candidates[0].evidenceCardIds);
     expect(cards[0].source).toMatchObject({ system: "lessonup", uri: `lessonup://lesson-files/${lessonFileId}`, version: "0", locator: field });
     expect((await repository.getLessonFile(ownerId, lessonFileId))?.documentVersion).toBe(0);

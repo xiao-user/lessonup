@@ -45,7 +45,7 @@ describe("canonical lesson teaching context", () => {
     for (const file of [files[2]!, files[4]!]) {
       const lessonScope = { ownerId: scope.ownerId, lessonFileId: file.id };
       const evidence = { documentVersion: 0, objective: "用数轴解释大小", task: "独立标点并解释", criterion: "说明位置与大小的联系",
-        learnerGroup: "一班", observation: "部分只能给结论", method: "assessment", observedAt: new Date(Date.now() - 60_000).toISOString(), sourceReference: "解释卡" };
+        learnerGroup: "一班", conditions: "独立完成、无提示、相同时间限制与判据", synthetic: false, observation: "部分只能给结论", method: "assessment", observedAt: new Date(Date.now() - 60_000).toISOString(), sourceReference: "解释卡" };
       const baseline = await service.recordEvidence(lessonScope, evidence, `baseline-${file.id}`);
       const inquiry = await service.propose(lessonScope, { documentVersion: 0, baselineEvidenceId: baseline.id,
         hypothesis: "可能尚未建立位置关系", alternativeExplanation: "也可能受表达负担影响", intervention: "比较反例后独立解释",

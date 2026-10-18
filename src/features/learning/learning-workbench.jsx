@@ -4,15 +4,19 @@ import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { agentApi } from "@/lib/agent-api";
+import { LearningEvidenceForm, evidencePayload, evidenceMethods } from "./evidence-form";
+import { readWorkbenchDraft, writeWorkbenchDraft } from "../decisions/workbench-draft";
+import "../decisions/decision-workbench.css";
 
 const BusyContext = createContext(false);
 const states = { proposed: "待采用", adopted: "已采用，待实施", implemented: "已实施，待复测", reviewed: "已审议", dismissed: "未采用" };
 const outcomes = { supported: "符合预期", not_supported: "未见预期", inconclusive: "证据不足" };
-const methods = { student_work: "学生作品", assessment: "评价任务", teacher_observation: "教师观察" };
+const methods = evidenceMethods;
 const errors = {
+  invalid_request: "信息校验未通过。请核对必填字段、时间与合成数据声明；输入已保留。演示或明确标注非真实学生的观察请勾选合成数据。",
   stale_document: "教案版本已变化，请同步当前教案后重新核对。",
   stale_learning_inquiry: "记录已变化，已同步最新状态，请核对后再操作。",
-  learning_evidence_not_comparable: "目标、判据或观察群体不同，目前只能记录为证据不足。",
+  learning_evidence_not_comparable: "目标、判据、观察群体、取证方式或条件不同，或缺少明确的真实证据声明，目前只能记录为证据不足。",
   learning_evidence_before_implementation: "复测时间必须晚于本次方案的实施时间。",
   learning_proposal_not_delivered: "助手尚未完成这份方案，请等待结果后再采用。",
   learning_implementation_time_invalid: "实施时间应晚于基线观察，且不能晚于当前时间。",
@@ -45,23 +49,25 @@ function EvidenceSummary({ title, evidence }) {
   </dl></details>;
 }
 
-export function LearningWorkbench({ file, notebook, plan, onBeforeWrite, onAgentRequest }) {
+export function LearningWorkbench({ file, notebook, plan, ownerId = file.ownerId, onBeforeWrite, onAgentRequest }) {
+  const [restored] = useState(() => readWorkbenchDraft("learning", file.id, ownerId));
   const [progress, setProgress] = useState({ evidence: [], inquiries: [], truncated: {} });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
-  const [mode, setMode] = useState(null);
-  const [implementationTimes, setImplementationTimes] = useState({});
-  const [selectedEvidence, setSelectedEvidence] = useState("");
-  const [evidenceForm, setEvidenceForm] = useState(null);
-  const [proposalForm, setProposalForm] = useState(null);
-  const [reviewForm, setReviewForm] = useState(null);
-  const [pending, setPending] = useState(null);
+  const [mode, setMode] = useState(restored?.mode ?? null);
+  const [implementationTimes, setImplementationTimes] = useState(restored?.implementationTimes ?? {});
+  const [selectedEvidence, setSelectedEvidence] = useState(restored?.selectedEvidence ?? "");
+  const [evidenceForm, setEvidenceForm] = useState(restored?.evidenceForm ?? null);
+  const [proposalForm, setProposalForm] = useState(restored?.proposalForm ?? null);
+  const [reviewForm, setReviewForm] = useState(restored?.reviewForm ?? null);
+  const [pending, setPending] = useState(restored?.pending ?? null);
   const mounted = useRef(true);
   const busyRef = useRef(false);
   const recoveryId = useRef(null);
   const blocked = busy || Boolean(pending);
+  useEffect(() => { writeWorkbenchDraft("learning", file.id, ownerId, { mode, implementationTimes, selectedEvidence, evidenceForm, proposalForm, reviewForm, pending }); }, [file.id, ownerId, mode, implementationTimes, selectedEvidence, evidenceForm, proposalForm, reviewForm, pending]);
   const revision = useRef(0);
   const pendingKey = `lessonup:learning-command:${file.id}`;
   const refresh = useCallback(async () => {
@@ -78,7 +84,7 @@ export function LearningWorkbench({ file, notebook, plan, onBeforeWrite, onAgent
     if (key) void agentApi.getLearningCommandResult(file.id, key).then((result) => {
       if (!mounted.current) return;
       setNotice(result ? "已同步上次保存的结果。" : "上次保存尚未找到结果。重新录入会复用上次请求标识，避免重复建立记录。");
-      if (result) sessionStorage.removeItem(pendingKey);
+      if (result) { sessionStorage.removeItem(pendingKey); recoveryId.current = null; setPending(null); setMode(null); setEvidenceForm(null); setProposalForm(null); setReviewForm(null); }
       else recoveryId.current = key;
     }).catch(() => { if (mounted.current) { recoveryId.current = key; setError("上次保存结果尚未确认，请先同步记录。"); } });
     const update = (event) => {
@@ -89,7 +95,7 @@ export function LearningWorkbench({ file, notebook, plan, onBeforeWrite, onAgent
   }, [file.id, pendingKey, refresh]);
 
   const finish = async (command) => {
-    sessionStorage.removeItem(pendingKey); recoveryId.current = null; setPending(null); command.onSuccess?.();
+    sessionStorage.removeItem(pendingKey); recoveryId.current = null; setPending(null); if (command.onSuccess) command.onSuccess(); else if (command.request) { setMode(null); setEvidenceForm(null); setProposalForm(null); setReviewForm(null); }
     setNotice("已保存，可继续核对学习证据。");
     try { await refresh(); } catch { setError("保存已完成，最新记录读取失败，请同步。 "); }
   };
@@ -98,8 +104,13 @@ export function LearningWorkbench({ file, notebook, plan, onBeforeWrite, onAgent
     busyRef.current = true;
     setBusy(true); setError(""); setNotice(""); setPending(command);
     sessionStorage.setItem(pendingKey, command.id);
+    writeWorkbenchDraft("learning", file.id, ownerId, { mode, implementationTimes, selectedEvidence, evidenceForm, proposalForm, reviewForm, pending: command });
     try {
-      await command.perform(command.id);
+      if (command.perform) await command.perform(command.id);
+      else if (command.request?.operation === "evidence") await agentApi.recordLearningEvidence(file.id, command.request.input, command.id);
+      else if (command.request?.operation === "propose") await agentApi.proposeLearningInquiry(file.id, command.request.input, command.id);
+      else if (command.request?.operation === "action") await agentApi.actOnLearningInquiry(file.id, command.request.recordId, command.request.input, command.id);
+      else throw new Error("learning_pending_request_missing");
       if (mounted.current) await finish(command);
     } catch (cause) {
       try {
@@ -117,7 +128,7 @@ export function LearningWorkbench({ file, notebook, plan, onBeforeWrite, onAgent
       }
     } finally { busyRef.current = false; if (mounted.current) setBusy(false); }
   };
-  const save = (perform, onSuccess) => { if (!pending) return execute({ id: recoveryId.current ?? crypto.randomUUID(), perform, onSuccess }); };
+  const save = (perform, onSuccess, request) => { if (!pending) return execute({ id: recoveryId.current ?? crypto.randomUUID(), perform, onSuccess, request }); };
   const synchronize = async () => {
     setError("");
     try {
@@ -130,10 +141,10 @@ export function LearningWorkbench({ file, notebook, plan, onBeforeWrite, onAgent
       await refresh();
     } catch { setError("仍无法确认保存结果，请稍后同步。"); }
   };
-  const action = (inquiry, type) => save((id) => agentApi.actOnLearningInquiry(file.id, inquiry.id, {
-    action: type, expectedVersion: inquiry.version,
-    ...(type === "implement" && implementationTimes[inquiry.id] ? { implementedAt: new Date(implementationTimes[inquiry.id]).toISOString() } : {}),
-  }, id));
+  const action = (inquiry, type) => {
+    const input = { action: type, expectedVersion: inquiry.version, ...(type === "implement" && implementationTimes[inquiry.id] ? { implementedAt: new Date(implementationTimes[inquiry.id]).toISOString() } : {}) };
+    return save((id) => agentApi.actOnLearningInquiry(file.id, inquiry.id, input, id), undefined, { operation: "action", recordId: inquiry.id, input });
+  };
   const baseline = progress.evidence.find((item) => item.id === selectedEvidence) ?? progress.evidence[0];
   const continueInquiry = async (inquiry) => {
     try {
@@ -168,11 +179,11 @@ export function LearningWorkbench({ file, notebook, plan, onBeforeWrite, onAgent
     }
     setEvidenceForm({ objective: source?.objective ?? plan.objectives ?? "", task: "", criterion: source?.criterion ?? "",
       learnerGroup: source?.learnerGroup ?? notebook.className ?? "", observation: "", method: source?.method ?? "teacher_observation",
-      observedAt: localDateTime(), sourceReference: "", sampleSize: "", meetingCriterion: "", inquiryId: inquiry?.id });
+      observedAt: localDateTime(), sourceReference: "", sampleSize: "", meetingCriterion: "", conditions: source?.conditions ?? "", synthetic: false, inquiryId: inquiry?.id });
     setMode("evidence");
   };
   const requestInquiry = () => {
-    if (!baseline) return;
+    if (!baseline || baseline.method === "document_check") return;
     onAgentRequest({ prompt: "请读取当前教案和所选真实学习证据，比较一个主要解释与替代解释，提出可执行的教学调整、预期信号及复测办法。只准备待采用方案，不替教师确认实施或效果。",
       taskIntent: { type: "learning_inquiry", evidenceId: baseline.id } });
   };
@@ -204,38 +215,23 @@ export function LearningWorkbench({ file, notebook, plan, onBeforeWrite, onAgent
     </div></div> : null}
     <div className="learning-actions"><Button size="sm" disabled={blocked} onClick={() => beginEvidence()}>记录学习证据</Button></div>
     {!progress.evidence.length && !loading ? <p className="learning-empty">先记录一次真实作答或课堂观察，包括任务、成功判据与证据来源。助手会据此提出可检验的调整。</p> : null}
-    {mode === "evidence" && evidenceForm ? <form className="learning-form" onSubmit={async (event) => {
+    {mode === "evidence" && evidenceForm ? <LearningEvidenceForm title={evidenceForm.inquiryId ? "记录实施后的复测" : "记录学习证据"} value={evidenceForm} onChange={setEvidenceForm} busy={blocked} onCancel={() => { setMode(null); setEvidenceForm(null); }} onSubmit={async (event) => {
       event.preventDefault();
-      const snapshot = { ...evidenceForm };
       let canonical;
       try { canonical = await onBeforeWrite?.(); } catch { setError("教案尚未保存，请先完成保存再记录证据。"); return; }
-      const input = { ...snapshot, documentVersion: canonical?.documentVersion ?? file.documentVersion,
-        observedAt: new Date(snapshot.observedAt).toISOString(),
-        sampleSize: snapshot.sampleSize === "" ? undefined : Number(snapshot.sampleSize),
-        meetingCriterion: snapshot.meetingCriterion === "" ? undefined : Number(snapshot.meetingCriterion) };
-      await save((id) => agentApi.recordLearningEvidence(file.id, input, id), () => { setMode(null); setEvidenceForm(null); });
-    }}>
-      <h3>{evidenceForm.inquiryId ? "记录实施后的复测" : "记录基线证据"}</h3>
-      {[["objective", "本次学习目标"], ["task", "学生完成的任务"], ["criterion", "成功判据"], ["learnerGroup", "观察群体"], ["observation", "实际观察"], ["sourceReference", "证据来源与定位"]].map(([key, label]) => <TextField key={key} label={label} required maxLength={key === "observation" ? 4000 : key === "objective" ? 500 : key === "learnerGroup" ? 300 : 1000}
-        multiline={["task", "observation"].includes(key)} value={evidenceForm[key]} onChange={(value) => setEvidenceForm((current) => ({ ...current, [key]: value }))} />)}
-      <Choice label="取证方式" value={evidenceForm.method} onChange={(method) => setEvidenceForm((current) => ({ ...current, method }))}>{Object.entries(methods).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</Choice>
-      <TextField label="观察时间" type="datetime-local" step="any" required value={evidenceForm.observedAt} onChange={(observedAt) => setEvidenceForm((current) => ({ ...current, observedAt }))} />
-      <details><summary>补充人数（可选）</summary><div className="learning-form">
-        <TextField label="观察人数" type="number" min="1" max="10000" value={evidenceForm.sampleSize} onChange={(sampleSize) => setEvidenceForm((current) => ({ ...current, sampleSize }))} />
-        <TextField label="达到判据人数" type="number" min="0" max={evidenceForm.sampleSize || "10000"} value={evidenceForm.meetingCriterion} onChange={(meetingCriterion) => setEvidenceForm((current) => ({ ...current, meetingCriterion }))} />
-      </div></details>
-      <div className="learning-actions"><Button size="sm" type="submit" disabled={blocked}>{busy ? "正在保存…" : "保存证据"}</Button><Button size="sm" variant="ghost" type="button" disabled={blocked} onClick={() => setMode(null)}>取消</Button></div>
-    </form> : null}
+      const input = evidencePayload(evidenceForm, canonical?.documentVersion ?? file.documentVersion);
+      await save((id) => agentApi.recordLearningEvidence(file.id, input, id), () => { setMode(null); setEvidenceForm(null); }, { operation: "evidence", input });
+    }} /> : null}
     {progress.evidence.length ? <div className="learning-section">
       <h3>选择诊断起点</h3><Choice label="基线证据" value={baseline?.id ?? ""} onChange={setSelectedEvidence}>{progress.evidence.map((item) => <option key={item.id} value={item.id}>{item.inquiryId ? "复测" : "初次观察"} · {item.objective} · {new Date(item.observedAt).toLocaleDateString()}</option>)}</Choice>
       {baseline ? <p className="learning-observation">{baseline.observation}<small>{methods[baseline.method]} · {baseline.sourceReference}</small></p> : null}
-      <div className="learning-actions"><Button size="sm" variant="outline" disabled={blocked} onClick={requestInquiry}>请助手提出改进方案</Button><Button size="sm" variant="ghost" disabled={blocked} onClick={() => { setProposalForm({ hypothesis: "", alternativeExplanation: "", intervention: "", expectedSignal: "", checkPlan: "" }); setMode("proposal"); }}>自行记录方案</Button></div>
+      <div className="learning-actions"><Button size="sm" variant="outline" disabled={blocked || baseline?.method === "document_check"} onClick={requestInquiry}>请助手提出改进方案</Button><Button size="sm" variant="ghost" disabled={blocked || baseline?.method === "document_check"} onClick={() => { setProposalForm({ hypothesis: "", alternativeExplanation: "", intervention: "", expectedSignal: "", checkPlan: "" }); setMode("proposal"); }}>自行记录方案</Button></div>
     </div> : null}
     {mode === "proposal" && proposalForm && baseline ? <form className="learning-form" onSubmit={async (event) => {
       event.preventDefault(); let canonical;
       try { canonical = await onBeforeWrite?.(); } catch { setError("教案尚未保存，请先完成保存。"); return; }
       const input = { ...proposalForm, baselineEvidenceId: baseline.id, documentVersion: canonical?.documentVersion ?? file.documentVersion };
-      await save((id) => agentApi.proposeLearningInquiry(file.id, input, id), () => setMode(null));
+      await save((id) => agentApi.proposeLearningInquiry(file.id, input, id), () => setMode(null), { operation: "propose", input });
     }}><h3>待检验的教学调整</h3>{[["hypothesis", "主要解释（待检验）"], ["alternativeExplanation", "另一种可能解释"], ["intervention", "准备怎样调整"], ["expectedSignal", "预期看到的信号"], ["checkPlan", "后续怎样检查"]].map(([key, label]) => <TextField key={key} label={label} multiline required maxLength={key === "intervention" ? 4000 : 2000} value={proposalForm[key]} onChange={(value) => setProposalForm((current) => ({ ...current, [key]: value }))} />)}
       <div className="learning-actions"><Button type="submit" size="sm" disabled={blocked}>保存待采用方案</Button><Button type="button" variant="ghost" size="sm" disabled={blocked} onClick={() => setMode(null)}>取消</Button></div>
     </form> : null}
@@ -259,7 +255,8 @@ export function LearningWorkbench({ file, notebook, plan, onBeforeWrite, onAgent
     </div>
     {mode === "review" && reviewForm ? <form className="learning-form" onSubmit={async (event) => {
       event.preventDefault(); const { inquiryId, expectedVersion, ...review } = reviewForm;
-      await save((id) => agentApi.actOnLearningInquiry(file.id, inquiryId, { action: "review", expectedVersion, review }, id), () => setMode(null));
+      const input = { action: "review", expectedVersion, review };
+      await save((id) => agentApi.actOnLearningInquiry(file.id, inquiryId, input, id), () => setMode(null), { operation: "action", recordId: inquiryId, input });
     }}><h3>核对复测证据</h3>
       <Choice label="后测证据" required value={reviewForm.evidenceId} onChange={(evidenceId) => setReviewForm((current) => ({ ...current, evidenceId }))}><option value="">选择一条后测证据</option>{progress.evidence.filter((item) => item.inquiryId === reviewForm.inquiryId).map((item) => <option key={item.id} value={item.id}>{item.observation}</option>)}</Choice>
       <EvidenceSummary title="核对原始基线" evidence={progress.evidence.find((item) => item.id === reviewInquiry?.baselineEvidenceId)} />

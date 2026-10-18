@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { dashiJsonValueSchema, type DashiGoal } from "./presentations/dashi-goal.js";
+import type { DecisionOption } from "./decisions/contracts.js";
+import type { ObservationPlan } from "./learning/observation-plan.js";
 
 export const lessonFieldSchema = z.enum([
   "unit",
@@ -645,6 +647,12 @@ export type LessonAgentSelection = {
   start: number;
   end: number;
   text: string;
+  documentVersion?: number;
+};
+
+export type ConfirmedDecisionContext = {
+  id: string; version: number; question: string; chosenOption: DecisionOption;
+  assumptions: string[]; observationPlan?: ObservationPlan | null;
 };
 
 type PreparationAgentContextBase = {
@@ -663,6 +671,7 @@ export type LessonAgentContext = PreparationAgentContextBase & {
   lessonFileId: string;
   activeSectionId: string;
   selection?: LessonAgentSelection;
+  confirmedDecision?: ConfirmedDecisionContext;
   documentVersion: number;
   designBasisVersion: number;
   contextProfile: LessonContextProfile;
@@ -893,7 +902,9 @@ export type AgentApprovalRecord = {
 
 export const agentTaskIntentSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("analysis") }).strict(),
-  z.object({ type: z.literal("document_write"), fields: z.array(lessonFieldSchema).min(1).max(14).optional() }).strict(),
+  z.object({ type: z.literal("document_write"), fields: z.array(lessonFieldSchema).min(1).max(14).optional(),
+    decisionRef: z.object({ id: z.string().uuid(), version: z.number().int().positive(), chosenOptionId: z.string().trim().min(1).max(64) }).strict().optional(),
+  }).strict(),
   z.object({ type: z.literal("learning_inquiry"), evidenceId: z.string().uuid() }).strict(),
   z.object({ type: z.literal("learning_review"), inquiryId: z.string().uuid(), evidenceId: z.string().uuid(), expectedVersion: z.number().int().nonnegative() }).strict(),
   z.object({ type: z.literal("decision_proposal") }).strict(),

@@ -40,6 +40,11 @@ const conflicts = new Set([
   "duplicate_lesson_blueprint_identity",
   "lesson_blueprint_lesson_exists",
   "stale_decision",
+  "decision_lesson_excerpt_stale",
+  "decision_proposal_not_delivered",
+  "decision_revision_after_confirmation",
+  "selection_context_stale",
+  "decision_context_stale",
   "decision_transition_forbidden",
 ]);
 
@@ -99,6 +104,20 @@ const badRequest = new Set([
   "decision_review_evidence_before_implementation",
   "decision_review_evidence_duplicated",
   "decision_action_unsupported",
+  "decision_observation_plan_required",
+  "decision_baseline_not_found",
+  "decision_baseline_not_comparable",
+  "decision_baseline_after_implementation",
+  "decision_review_baseline_required",
+  "decision_review_conditions_required",
+  "decision_review_evidence_unlinked",
+  "decision_review_evidence_not_comparable",
+  "decision_review_synthetic_learning",
+  "decision_evidence_limit",
+  "decision_evidence_source_invalid",
+  "decision_evidence_excerpt_not_exact",
+  "decision_synthetic_evidence_declared_real",
+  "decision_teacher_source_selection_required",
   "decision_limit_invalid",
 ]);
 

@@ -111,6 +111,7 @@ test("cancels a long streaming draft without an adoptable result, write or resen
   await expect(page.getByText("正在生成草稿…", { exact: true })).toBeVisible();
   const stopped = performance.now();
   await page.getByRole("button", { name: "停止生成", exact: true }).click();
+  // A cancelled draft disappears entirely; no pending, adoptable result remains.
   await expect(page.getByLabel("A4 草稿操作")).toHaveCount(0);
   await expect(page.getByLabel("向备课助手提问")).toBeEnabled();
   const cancellationMs = performance.now() - stopped;

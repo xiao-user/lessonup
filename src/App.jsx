@@ -247,7 +247,7 @@ function CollectionApp() {
         const notebook = await agentApi.createNotebook({
           title: values.title,
           className: values.className,
-          year: "2025—2026 学年",
+          year: values.year,
           subject: values.subject,
           stage: values.stage,
           grade: values.grade,

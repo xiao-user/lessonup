@@ -18,6 +18,7 @@ type StartInput = {
   activeSectionId: string;
   documentVersion: number;
   attachmentIds: string[];
+  clientCommandId?: string;
 };
 
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -63,6 +64,7 @@ export class DeterministicAgentHarness {
       threadId: thread.id,
       branchId: branch.id,
       model: "deterministic-agent-e2e",
+      clientCommandId: input.clientCommandId,
       status: "running",
       capabilityPlan: {
         skillIds: [],

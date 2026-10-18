@@ -4,6 +4,12 @@ import { describe, expect, it } from "vitest";
 import { MemoryLessonRepository } from "../repositories/memory-repository.js";
 import { DecisionService } from "./service.js";
 import type { LearningEvidence } from "../learning/domain.js";
+import type { ObservationPlan } from "../learning/observation-plan.js";
+
+const learningPlan: ObservationPlan = {
+  kind: "learning_change", objective: "解释反复", task: "无提示新段落解释", criterion: "说出强调与情感",
+  learnerGroup: "全班", method: "student_work", conditions: "同等文本难度、独立作答、无提示", baselineEvidenceId: null,
+};
 
 const ownerId = "owner-1";
 const notebookId = "notebook-1";
@@ -82,6 +88,7 @@ function proposal(overrides: Record<string, unknown> = {}) {
     confidence: 0.72,
     expectedSignal: "独立解释比例上升。",
     falsifier: "若比例未上升，则决策不成立。",
+    observationPlan: learningPlan,
     reviewAt: null,
     evidenceCards: [evidenceCard],
     status: "proposed",
@@ -133,7 +140,17 @@ describe("DecisionService", () => {
 
   it("confirms, implements and reviews with real learning evidence", async () => {
     const { repository, service } = await setup();
-    const decision = await service.propose({ ownerId, lessonFileId }, proposal(), "propose-5");
+    const baseline: LearningEvidence = {
+      id: randomUUID(), ownerId, notebookId, lessonFileId, documentVersion: 0,
+      objective: learningPlan.objective, task: learningPlan.task, criterion: learningPlan.criterion,
+      learnerGroup: learningPlan.learnerGroup, conditions: learningPlan.conditions, method: learningPlan.method, synthetic: false,
+      observation: "同一判据下基线12/30能独立解释", observedAt: "2026-10-18T00:30:00Z",
+      sourceReference: "教师实际采集的基线出口条", createdAt: "2026-10-18T00:30:00Z",
+    };
+    await repository.saveLearningEvidence(baseline, { idempotencyKey: "baseline-1", fingerprint: "baseline", documentVersion: 0 });
+    const decision = await service.propose({ ownerId, lessonFileId }, proposal({
+      observationPlan: { ...learningPlan, baselineEvidenceId: baseline.id },
+    }), "propose-5");
     const confirmed = await service.act({ ownerId, lessonFileId }, decision.id, {
       action: "confirm", expectedVersion: 1, chosenOptionId: "opt_b", confidence: 0.8,
     }, "confirm-1");
@@ -153,12 +170,14 @@ describe("DecisionService", () => {
 
     const evidence: LearningEvidence = {
       id: randomUUID(), ownerId, notebookId, lessonFileId, documentVersion: 0,
-      objective: "解释反复", task: "新段落解释", criterion: "说出强调与情感",
-      learnerGroup: "全班", observation: "18/30 能独立解释", method: "student_work",
+      objective: learningPlan.objective, task: learningPlan.task, criterion: learningPlan.criterion,
+      learnerGroup: learningPlan.learnerGroup, conditions: learningPlan.conditions, synthetic: false,
+      decisionId: decision.id, decisionVersion: implemented.version,
+      observation: "18/30 能独立解释", method: "student_work",
       observedAt: "2026-10-18T01:15:00Z", sourceReference: "出口条", createdAt: "2026-10-18T01:15:00Z",
     };
     await repository.saveLearningEvidence(evidence, {
-      idempotencyKey: "evidence-1", fingerprint: "fingerprint", documentVersion: 0,
+      idempotencyKey: "evidence-1", fingerprint: "fingerprint", documentVersion: 0, decisionVersion: implemented.version,
     });
 
     const reviewed = await service.act({ ownerId, lessonFileId }, decision.id, {

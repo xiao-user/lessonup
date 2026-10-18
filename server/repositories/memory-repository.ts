@@ -131,8 +131,9 @@ export class MemoryLessonRepository implements LessonRepository {
     return structuredClone(this.learningReceipts.get(key(ownerId, idempotencyKey))?.record ?? null);
   }
   async replayLearningCommand(ownerId: string, command: LearningCommand) { return this.replayLearningNow(ownerId, command); }
-  async listLearningEvidence(ownerId: string, fileId: string, limit: number, before?: LearningCursor) {
+  async listLearningEvidence(ownerId: string, fileId: string, limit: number, before?: LearningCursor, decisionId?: string) {
     return structuredClone([...this.learningEvidence.values()].filter((item) => item.ownerId === ownerId && item.lessonFileId === fileId && this.files.has(key(ownerId, fileId)))
+      .filter((item) => !decisionId || item.decisionId === decisionId)
       .filter((item) => !before || item.observedAt < before.at || (item.observedAt === before.at && item.id < before.id))
       .sort((a, b) => b.observedAt.localeCompare(a.observedAt) || b.id.localeCompare(a.id)).slice(0, limit));
   }
@@ -162,6 +163,10 @@ export class MemoryLessonRepository implements LessonRepository {
     if (record.inquiryId) {
       const inquiry = this.learningInquiries.get(key(record.ownerId, record.inquiryId));
       if (!inquiry || inquiry.lessonFileId !== record.lessonFileId || inquiry.state !== "implemented" || inquiry.version !== command.inquiryVersion) throw new Error("stale_learning_inquiry");
+    }
+    if (record.decisionId) {
+      const decision = this.decisions.get(key(record.ownerId, record.decisionId));
+      if (!decision || decision.lessonFileId !== record.lessonFileId || decision.version !== command.decisionVersion) throw new Error("stale_decision");
     }
     if (this.learningEvidence.has(key(record.ownerId, record.id))) throw new Error("idempotency_conflict");
     this.learningEvidence.set(key(record.ownerId, record.id), structuredClone(record));
@@ -228,6 +233,17 @@ export class MemoryLessonRepository implements LessonRepository {
     const file = this.files.get(key(record.ownerId, record.lessonFileId));
     if (!file || file.notebookId !== record.notebookId) throw new Error("stale_decision");
     if (command.documentVersion !== undefined && file.documentVersion !== command.documentVersion) throw new Error("stale_document");
+    if (expectedVersion === null && (record.provenance.createdBy === "agent" || record.provenance.modelRunId !== null)) {
+      const origin = command.agentRun;
+      const run = origin && this.runs.get(origin.runId);
+      const thread = origin && this.threads.get(origin.threadId);
+      const branch = origin && this.branches.get(origin.branchId);
+      if (!origin || origin.runId !== record.provenance.modelRunId || !run || !thread || !branch
+        || run.ownerId !== record.ownerId || thread.ownerId !== record.ownerId || branch.ownerId !== record.ownerId
+        || run.threadId !== thread.id || run.branchId !== branch.id || branch.threadId !== thread.id
+        || thread.resourceType !== "lesson_file" || thread.lessonFileId !== record.lessonFileId
+        || run.status !== "running" || run.cancelRequestedAt) throw new Error("decision_scope_invalid");
+    }
     const current = this.decisions.get(key(record.ownerId, record.id));
     if (expectedVersion === null ? Boolean(current) : !current || current.version !== expectedVersion) {
       throw new Error("stale_decision");
@@ -1459,8 +1475,10 @@ export class MemoryLessonRepository implements LessonRepository {
   }
 
   async settleRun(args: Parameters<LessonRepository["settleRun"]>[0]) {
-    const run = await this.getRun(args.ownerId, args.runId);
-    if (!run) throw new Error("run_not_found");
+    // No await between reading the run and committing its terminal state.
+    const run = this.runs.get(args.runId);
+    if (!run || run.ownerId !== args.ownerId) throw new Error("run_not_found");
+    if (run.cancelRequestedAt && args.status !== "cancelled") throw new Error("run_cancel_requested");
     if (run.status === args.status && !run.leaseToken) return structuredClone(run);
     if (
       (run.status !== "queued" && run.status !== "running")
@@ -1470,11 +1488,8 @@ export class MemoryLessonRepository implements LessonRepository {
     ) {
       throw new Error("run_lease_lost");
     }
-    if (run.cancelRequestedAt && args.status !== "cancelled") {
-      throw new Error("run_cancel_requested");
-    }
-
-    const updated = await this.updateRun(args.ownerId, args.runId, {
+    const updated: AgentRunRecord = {
+      ...run,
       status: args.status,
       tokenUsage: args.tokenUsage ?? run.tokenUsage,
       error: args.error,
@@ -1482,7 +1497,8 @@ export class MemoryLessonRepository implements LessonRepository {
       leaseToken: undefined,
       leaseExpiresAt: undefined,
       heartbeatAt: now(),
-    });
+    };
+    this.runs.set(args.runId, updated);
     if (run.assistantMessageId && args.messageStatus) {
       const messagePatch: Partial<AgentMessageRecord> = {
         status: args.messageStatus,
@@ -1502,15 +1518,15 @@ export class MemoryLessonRepository implements LessonRepository {
   }
 
   async requestRunCancellation(ownerId: string, runId: string) {
-    const run = await this.getRun(ownerId, runId);
-    if (!run) throw new Error("run_not_found");
+    const run = this.runs.get(runId);
+    if (!run || run.ownerId !== ownerId) throw new Error("run_not_found");
     if (run.status === "cancelled") return true;
     if (run.status !== "queued" && run.status !== "running") return false;
-    const updated = await this.updateRun(ownerId, runId, {
-      cancelRequestedAt: run.cancelRequestedAt ?? now(),
-    });
+    const updated = { ...run, cancelRequestedAt: run.cancelRequestedAt ?? now() };
+    this.runs.set(runId, updated);
     if (!updated.leaseExpiresAt || new Date(updated.leaseExpiresAt).getTime() <= Date.now()) {
-      await this.updateRun(ownerId, runId, {
+      this.runs.set(runId, {
+        ...updated,
         status: "cancelled",
         completedAt: now(),
         leaseToken: undefined,

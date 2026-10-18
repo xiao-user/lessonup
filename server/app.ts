@@ -54,7 +54,10 @@ const selectionSchema = z.object({
   field: z.enum(["unit", "period", "totalPeriods", "topic", "objectives", "knowledgePoints", "continuity", "focus", "preparation", "process", "assessment", "homework", "board", "reflection"]),
   start: z.number().int().nonnegative(),
   end: z.number().int().nonnegative(),
-  text: z.string(),
+  text: z.string().max(200_000),
+  fieldSnapshot: z.string().max(200_000).optional(),
+  baseDocumentVersion: z.number().int().nonnegative().optional(),
+  documentVersion: z.number().int().nonnegative().optional(),
 }).refine((value) => value.end >= value.start, "invalid_selection_range");
 
 const runInputSchema = z.object({
@@ -1228,6 +1231,24 @@ export function createApp(
         if (failures.length) console.error("Agent event delivery failed", failures.length);
       }
     });
+  });
+
+  app.get("/api/agent/threads/:id/run-commands/:commandId", async (c) => {
+    const userId = c.get("userId");
+    const threadId = c.req.param("id");
+    const branchId = z.string().min(1).parse(c.req.query("branchId"));
+    const commandId = z.string().uuid().parse(c.req.param("commandId"));
+    const [thread, branch] = await Promise.all([
+      repository.getThread(userId, threadId),
+      repository.getBranch(userId, threadId, branchId),
+    ]);
+    if (!thread || !branch) return c.json({ error: "thread_scope_invalid" }, 403);
+    const run = await repository.getRunByClientCommand(userId, threadId, commandId);
+    if (run && run.branchId !== branchId) return c.json({ error: "thread_scope_invalid" }, 403);
+    return c.json({ run: run ? {
+      id: run.id, threadId: run.threadId, branchId: run.branchId, status: run.status,
+      clientCommandId: run.clientCommandId,
+    } : null });
   });
 
   app.post("/api/agent/runs/:id/cancel", async (c) => {

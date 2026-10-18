@@ -253,17 +253,18 @@ test("replays the same save transaction after a committed response is lost", asy
   const firstEdit = `${initialObjective}（首次保存）`;
   await objectivesEditor(page).fill(firstEdit);
   await objectivesEditor(page).blur();
-  await expect(page.getByText("保存失败", { exact: true })).toBeVisible();
+  await expect(page.getByText("同步未确认，请重试", { exact: false })).toBeVisible();
 
   const secondEdit = `${initialObjective}（响应丢失后继续编辑）`;
   await objectivesEditor(page).fill(secondEdit);
   await objectivesEditor(page).blur();
   await expect(page.getByText("已自动保存", { exact: false })).toBeVisible();
 
-  expect(requestKeys.length).toBeGreaterThanOrEqual(3);
+  // The first transaction committed but its response was lost. Its exact payload
+  // must not be replayed; the next edit is a distinct transaction.
+  expect(requestKeys).toHaveLength(2);
   expect(requestKeys[0]).toBeTruthy();
-  expect(requestKeys[1]).toBe(requestKeys[0]);
-  expect(requestKeys[2]).not.toBe(requestKeys[0]);
+  expect(requestKeys[1]).not.toBe(requestKeys[0]);
   const canonical = await page.request.get(`/api/lesson-files/${lessonFileId}`);
   expect(canonical.ok()).toBeTruthy();
   expect((await canonical.json()).document.objectives).toBe(secondEdit);

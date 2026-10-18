@@ -147,7 +147,7 @@ for (const testCase of schedule) {
   const structureOk = Boolean(proposal) && (testCase.id === "goal_evidence"
     ? proposal!.status === "proposed" && proposal!.options.length >= 2 && evidence.length > 0
       && proposal!.counterevidence.length > 0 && proposal!.uncertainties.length > 0
-      && Boolean(proposal!.falsifier.trim() && proposal!.expectedSignal.trim()) && proposal!.confidence !== null
+      && Boolean(proposal!.falsifier.trim() && proposal!.expectedSignal.trim()) && proposal!.observationPlan != null
     : proposal!.status === "insufficient_evidence" && proposal!.uncertainties.length > 0);
   const sourceErrors: string[] = [];
   const normalize = (value: string) => value.replace(/\s+/g, "");
@@ -188,7 +188,7 @@ for (const testCase of schedule) {
       question: proposal.question, options: proposal.options, chosenOptionId: proposal.chosenOptionId,
       rationale: proposal.rationale, counterevidence: proposal.counterevidence,
       assumptions: proposal.assumptions, uncertainties: proposal.uncertainties,
-      confidence: proposal.confidence, expectedSignal: proposal.expectedSignal,
+      confidence: proposal.confidence, observationPlan: proposal.observationPlan, expectedSignal: proposal.expectedSignal,
       falsifier: proposal.falsifier, evidenceCards: evidence,
       provenance: proposal.provenance,
     } : null,

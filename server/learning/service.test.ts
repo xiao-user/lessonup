@@ -13,6 +13,7 @@ const baselineInput = {
   documentVersion: 0, objective: "用数轴解释有理数大小", task: "独立在数轴标点并解释比较依据", criterion: "能说明方向与位置的比较依据",
   learnerGroup: "七年级一班全班", observation: "12名学生中4名能独立解释，其余主要复述结论", method: "assessment" as const,
   observedAt: "2026-10-17T01:00:00.000Z", sourceReference: "课堂出口条汇总", sampleSize: 12, meetingCriterion: 4,
+  synthetic: false, conditions: "同等难度数轴任务、独立作答、无提示、5分钟",
 };
 const proposal = {
   documentVersion: 0, hypothesis: "学生还没有把左右位置与大小关系联系起来", alternativeExplanation: "也可能是书面表达负担而非概念不理解",

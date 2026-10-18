@@ -27,6 +27,7 @@ import {
   formatTextbookVolumeLabel,
 } from "@/features/curriculum/labels";
 import { agentApi } from "@/lib/agent-api";
+import { currentSchoolYear } from "@/lib/school-year";
 
 const NONE = "__none__";
 const formatNotebookLabel = (notebook) => {
@@ -42,6 +43,7 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
   const isNotebook = kind === "notebook";
   const [title, setTitle] = useState("");
   const [className, setClassName] = useState("七年级（1）班");
+  const [year, setYear] = useState(currentSchoolYear);
   const [stage, setStage] = useState("初中");
   const [grade, setGrade] = useState("七年级");
   const [subject, setSubject] = useState("语文");
@@ -241,6 +243,7 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
         const values = {
           title: title.trim(),
           className,
+          year: year.trim(),
           subject,
           stage: stage === NONE ? "" : stage,
           grade: grade === NONE ? "" : grade,
@@ -313,6 +316,10 @@ export function CreateDialog({ kind, notebooks, initialNotebookId, onClose, onCr
 
             {isNotebook ? (
               <>
+                <Field>
+                  <FieldLabel htmlFor="school-year">学年</FieldLabel>
+                  <Input id="school-year" value={year} maxLength={80} required onChange={(event) => setYear(event.target.value)} />
+                </Field>
                 <Field>
                   <FieldLabel htmlFor="class-name">班级</FieldLabel>
                   <Input

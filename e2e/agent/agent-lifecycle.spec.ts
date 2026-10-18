@@ -105,6 +105,7 @@ test("covers empty state, streaming, tools, sources, sessions, retry, cancel and
 
   await createThread(page);
   await sendPrompt(page, "请等待取消");
+  await expect(page.getByText("正在生成可取消的内容。", { exact: false })).toBeVisible();
   await expect(page.getByRole("button", { name: "停止生成" })).toBeVisible();
   await page.getByRole("button", { name: "停止生成" }).click();
   await expect(page.getByRole("button", { name: "停止生成" })).toHaveCount(0);

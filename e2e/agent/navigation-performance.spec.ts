@@ -86,7 +86,7 @@ test("return flushes the last edit and retains the editor when saving fails", as
   const assessment = page.locator('.lesson-tiptap-field[aria-label="评价练习"]:visible').first();
   await assessment.fill("导航保存验收：最后一次编辑不能丢失。");
   await page.goBack();
-  await expect(page.locator(".lesson-save-status")).toContainText("保存失败");
+  await expect(page.locator(".lesson-save-status")).toContainText("同步未确认，请重试");
   await expect(page.locator(".lesson-file-workspace")).toBeVisible();
   await expect(page).toHaveURL(`/lesson-files/${lessonFileId}`);
   failSave = false;

@@ -124,9 +124,9 @@ describe("decision records", () => {
       .toContain("decision.evidence_required");
   });
 
-  it("requires confidence and a teacher identity once confirmed", () => {
+  it("requires a teacher identity but not a fabricated confidence number once confirmed", () => {
     expect(validateDecisionRecord(baseDecision({ status: "teacher_confirmed", confidence: null })))
-      .toContain("decision.confidence_required");
+      .not.toContain("decision.confidence_required");
     expect(validateDecisionRecord(baseDecision({
       status: "teacher_confirmed",
       provenance: { ...baseDecision().provenance, confirmedBy: null },
@@ -216,6 +216,16 @@ describe("decision diff", () => {
     expect(diff.confidenceDelta).toBe(0.09);
     expect(diff.statusFrom).toBe("proposed");
     expect(diff.statusTo).toBe("teacher_confirmed");
+  });
+
+  it("reports a changed observation plan without requiring another wording change", () => {
+    const previous = baseDecision({ observationPlan: {
+      kind: "design_check", objective: "核对目标与评价对齐", task: "核对出口条",
+      criterion: "要求解释表达效果", learnerGroup: "当前教案", method: "document_check",
+      conditions: "当前文档版本", baselineEvidenceId: null,
+    } });
+    const next = baseDecision({ observationPlan: { ...previous.observationPlan!, criterion: "要求独立解释并说明依据" } });
+    expect(diffDecisions(previous, next).changed).toEqual(["observationPlan"]);
   });
 
   it("reports no change for an identical record", () => {

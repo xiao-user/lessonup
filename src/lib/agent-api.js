@@ -327,6 +327,9 @@ export const agentApi = {
   listMessages: (threadId, branchId) => request(`/api/agent/threads/${threadId}/messages?branchId=${branchId}`),
   listApprovals: (threadId, branchId) => request(`/api/agent/threads/${threadId}/approvals?branchId=${branchId}`),
   createBranch: (messageId, input) => request(`/api/agent/messages/${messageId}/branch`, { method: "POST", body: JSON.stringify(input) }),
+  getRunCommand: (threadId, branchId, commandId) => request(
+    `/api/agent/threads/${encodeURIComponent(threadId)}/run-commands/${encodeURIComponent(commandId)}?branchId=${encodeURIComponent(branchId)}`,
+  ),
   cancelRun: (runId) => request(`/api/agent/runs/${runId}/cancel`, { method: "POST", body: JSON.stringify({}) }),
   queueRunInput: (runId, input) => request(`/api/agent/runs/${runId}/input`, {
     method: "POST",

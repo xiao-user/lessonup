@@ -266,6 +266,7 @@ export class PiLessonAgentCoordinator {
       const skipDesignBasis = isFastExecution(initialPlan, effectiveInput, continuationRun);
       const contextP = loadPreparationContext(this.repository, {
         ...effectiveInput,
+        taskIntent: initialPlan.taskIntent ?? effectiveInput.taskIntent,
         runId,
         signal: controller.signal,
         skipDesignBasis,
@@ -480,6 +481,7 @@ export class PiLessonAgentCoordinator {
       const decisionCompletionPrompt = [
         "你还没有完成教学决策候选。",
         "先调用 read_decision_context 读取当前教案、已有决策与学习证据，再调用 propose_decision 提交一个可检查的候选：明确问题、至少两个选项（保留现稿除外）、可定位证据、反例、假设、不确定性、置信度、预期信号与证伪条件。",
+        "可行动候选还须 observationPlan：设计检查用 design_check/document_check 核对目标—任务—评分覆盖；学习变化用 learning_change 并写明可比判据、群体与条件。设计反例针对原稿，不得用改后的结果倒推原稿有效。",
         "证据不足时提交 status=insufficient_evidence 的候选，不要编造课标条款、学生表现或效果数据。不得替教师确认、实施或审议。",
       ].join("\n");
       const requiredCompletion = fastLane

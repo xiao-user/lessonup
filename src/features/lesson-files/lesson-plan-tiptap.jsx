@@ -155,9 +155,9 @@ function EditableLessonField({
         field: rangeRef.current.field,
         offset: rangeRef.current.start + startOffset,
       });
-      if (from === to) return;
+      if (from === to) { callbacksRef.current.onSelectionChange(null); return; }
       const text = instance.state.doc.textBetween(from, to, "\n");
-      if (!text) return;
+      if (!text) { callbacksRef.current.onSelectionChange(null); return; }
       callbacksRef.current.onSelectionChange({
         field: rangeRef.current.field,
         start: rangeRef.current.start + startOffset,

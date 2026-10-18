@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import { agentApi, consumeAgentStream } from "@/lib/agent-api";
+import { readPendingCancellation, persistPendingCancellation, clearPendingCancellation, reconcileCancellation } from "./run-cancellation.js";
+import { prepareSelectionSnapshot } from "./selection-snapshot.js";
 import { persistThinkingLevel, readStoredThinkingLevel } from "@/lib/thinking-level.js";
 import {
   activeApprovalFrom,
@@ -12,7 +14,6 @@ import {
   resetAgentConversationState,
   queuedInputsFromEvents,
   resolveBranchSourceMessage,
-  stopAgentRun,
   synchronizeCompletedAgentTurn,
 } from "./agent-run-control.js";
 import {
@@ -125,6 +126,8 @@ export function useAgentChat({
   const approvalsRef = useRef([]);
   const runScopesRef = useRef(new Map());
   const streamControllersRef = useRef(new Map());
+  const startingCommandsRef = useRef(new Map());
+  const cancellationReadsRef = useRef(new Map());
   const starterRequestsRef = useRef(new Set());
   const starterSuggestionsEnabledRef = useRef(starterSuggestionsEnabled);
   const uploadsRef = useRef([]);
@@ -921,8 +924,67 @@ export function useAgentChat({
     };
   }, [activeBranchId, activeThreadId, applyBranchPresentation, loadMessages, synchronizeConversation, runId, status, transportRevision]);
 
+  const settleCancellation = useCallback(async (command) => {
+    const key = `${command.threadId}:${command.branchId}`;
+    if (cancellationReadsRef.current.has(key)) return cancellationReadsRef.current.get(key);
+    const pending = (async () => {
+      try {
+        const result = await reconcileCancellation(command, {
+          getRunCommand: agentApi.getRunCommand, cancelRun: agentApi.cancelRun, loadMessages,
+        });
+        if (result.phase === "terminal") {
+          command.phase = "terminal";
+          clearPendingCancellation(command.threadId, command.branchId);
+          const local = startingCommandsRef.current.get(command.threadId);
+          if (local?.branchId === command.branchId) {
+            local.phase = "terminal";
+            startingCommandsRef.current.delete(command.threadId);
+          }
+          runScopesRef.current.delete(result.run.id);
+          command.controller?.abort();
+          if (command.controller && streamControllersRef.current.get(command.threadId) === command.controller) {
+            streamControllersRef.current.delete(command.threadId);
+          }
+          if (activeThreadRef.current === command.threadId && activeBranchRef.current === command.branchId) {
+            setError(null);
+            applyBranchPresentation(command.threadId, command.branchId, result.loaded);
+          }
+          void agentApi.listThreads(resourceScope).then((records) => {
+            threadsRef.current = records;
+            setThreads(records);
+          }).catch(() => undefined);
+          return true;
+        }
+      } catch { /* A lost reply leaves the outcome unknown. */ }
+      if (activeThreadRef.current === command.threadId && activeBranchRef.current === command.branchId) {
+        setStatus("syncing");
+        setError("正在确认停止结果；恢复连接后会继续核对，不会重新发送生成请求。");
+      }
+      return false;
+    })();
+    cancellationReadsRef.current.set(key, pending);
+    try { return await pending; } finally { cancellationReadsRef.current.delete(key); }
+  }, [applyBranchPresentation, loadMessages, resourceScope]);
+
+  useEffect(() => {
+    if (!activeThreadId || !activeBranchId) return undefined;
+    let disposed = false;
+    let timer;
+    const poll = async () => {
+      const local = startingCommandsRef.current.get(activeThreadId);
+      const command = local?.branchId === activeBranchId && local.cancelRequested && local.submitted
+        ? local : readPendingCancellation(activeThreadId, activeBranchId);
+      if (!command || disposed) return;
+      const settled = await settleCancellation(command);
+      if (!settled && !disposed) timer = window.setTimeout(poll, 1_500);
+    };
+    void poll();
+    return () => { disposed = true; window.clearTimeout(timer); };
+  }, [activeThreadId, activeBranchId, settleCancellation, transportRevision]);
+
   const send = useCallback(async (message = draft, options = {}) => {
-    if (statusRef.current === "syncing") return;
+    if (statusRef.current === "syncing"
+      || (activeThreadId && activeBranchId && readPendingCancellation(activeThreadId, activeBranchId))) return;
     const pendingInteractionSnapshot = pendingInteraction;
     if (agentInputDisposition(statusRef.current, pendingInteractionSnapshot) === "queue") {
       const content = message.trim();
@@ -967,8 +1029,11 @@ export function useAgentChat({
       )));
     }
     const requestSectionId = activeSectionId;
-    const requestSelection = selection;
+    let requestSelection = selection;
     const controller = new AbortController();
+    const command = { ...requestScope, clientCommandId: crypto.randomUUID(), controller,
+      phase: "starting", submitted: false, cancelRequested: false, runId: null };
+    startingCommandsRef.current.set(requestScope.threadId, command);
     streamControllersRef.current.set(requestScope.threadId, controller);
     bumpTransportRevision();
     setDraft("");
@@ -1004,7 +1069,12 @@ export function useAgentChat({
         ? flushed?.framework?.version ?? flushed?.frameworkVersion ?? resourceVersionRef.current
         : flushed?.documentVersion ?? resourceVersionRef.current;
       resourceVersionRef.current = requestResourceVersion;
-    } catch {
+      if (resourceType === "lesson_file" && !command.cancelRequested && requestSelection) {
+        const currentDocument = flushed?.document
+          ?? (await agentApi.getLessonFile(resourceId))?.document;
+        requestSelection = prepareSelectionSnapshot(requestSelection, currentDocument, requestResourceVersion);
+      }
+    } catch (preflightError) {
       setMessages((current) => current.filter((item) => (
         item.id !== optimisticUserId && item.id !== optimisticAssistantId
       )));
@@ -1016,12 +1086,24 @@ export function useAgentChat({
         )));
       }
       streamControllersRef.current.delete(requestScope.threadId);
-      setError("document_save_failed");
+      startingCommandsRef.current.delete(requestScope.threadId);
+      setError(preflightError.message === "selection_context_stale" ? "selection_context_stale" : "document_save_failed");
       setStatus("error");
       return;
     }
+    if (command.cancelRequested) {
+      startingCommandsRef.current.delete(requestScope.threadId);
+      streamControllersRef.current.delete(requestScope.threadId);
+      setMessages(current => current.filter(item => item.id !== optimisticUserId && item.id !== optimisticAssistantId));
+      if (!continuation) setDraft(message);
+      replaceUploads(uploadDraftSnapshot);
+      setError(null);
+      setStatus(runtimeRef.current?.agent ? "ready" : "unconfigured");
+      return;
+    }
     try {
-      const clientCommandId = crypto.randomUUID();
+      const clientCommandId = command.clientCommandId;
+      command.submitted = true;
       await consumeAgentStream(`/api/agent/threads/${requestScope.threadId}/runs`, {
         branchId: requestScope.branchId,
         message: prompt,
@@ -1036,10 +1118,26 @@ export function useAgentChat({
         thinkingLevel,
         taskIntent: options.taskIntent,
         clientCommandId,
-      }, (event) => handleEvent(event, requestScope), {
+      }, (event) => {
+        if (event.type === "run.started") {
+          command.runId = event.runId;
+        }
+        // Keep listening until the matching durable run has reached a terminal
+        // state, but do not revive cancelled previews with late stream events.
+        if (command.phase === "terminal") return;
+        handleEvent(event, requestScope);
+        if (command.cancelRequested) {
+          setStatus("syncing");
+          void settleCancellation(command);
+        }
+      }, {
         signal: controller.signal,
         idempotencyKey: clientCommandId,
       });
+      if (command.cancelRequested) {
+        await settleCancellation(command);
+        return;
+      }
       const records = await synchronizeCompletedAgentTurn({
         threadId: requestScope.threadId,
         branchId: requestScope.branchId,
@@ -1048,7 +1146,12 @@ export function useAgentChat({
       });
       setThreads(records);
     } catch (streamError) {
-      if (streamError.name !== "AbortError") {
+      if (command.cancelRequested) {
+        if (command.phase !== "terminal") {
+          persistPendingCancellation(command);
+          await settleCancellation(command);
+        }
+      } else if (streamError.name !== "AbortError") {
         try {
           if (
             activeThreadRef.current !== requestScope.threadId
@@ -1081,6 +1184,9 @@ export function useAgentChat({
         }
       }
     } finally {
+      if (!command.cancelRequested && startingCommandsRef.current.get(requestScope.threadId) === command) {
+        startingCommandsRef.current.delete(requestScope.threadId);
+      }
       if (streamControllersRef.current.get(requestScope.threadId) === controller) {
         streamControllersRef.current.delete(requestScope.threadId);
         bumpTransportRevision();
@@ -1093,7 +1199,7 @@ export function useAgentChat({
         // reconciles the server-owned interaction without reviving stale UI.
       }
     }
-  }, [activeBranchId, activeSectionId, activeThreadId, activeUnitId, draft, handleEvent, loadMessages, onBeforeRun, pendingInteraction, queueDelivery, replaceUploads, resourceScope, resourceType, runId, runtime?.agent, selection, setDraft, thinkingLevel, uploads]);
+  }, [activeBranchId, activeSectionId, activeThreadId, activeUnitId, draft, handleEvent, loadMessages, onBeforeRun, pendingInteraction, queueDelivery, replaceUploads, resourceId, resourceScope, resourceType, runId, runtime?.agent, selection, setDraft, settleCancellation, thinkingLevel, uploads]);
 
   const clearQueuedInputs = useCallback(async (delivery = "all") => {
     if (!runId) return;
@@ -1104,33 +1210,24 @@ export function useAgentChat({
   }, [runId]);
 
   const stop = useCallback(async () => {
-    const stoppedRunId = runId;
-    const stoppedThreadId = activeThreadId;
-    const stoppedBranchId = activeBranchId;
-    await stopAgentRun({
-      runId: stoppedRunId,
-      cancelRun: agentApi.cancelRun,
-      controller: streamControllersRef.current.get(stoppedThreadId),
-      reloadMessages: () => stoppedThreadId && stoppedBranchId
-        ? loadMessages(stoppedThreadId, stoppedBranchId)
-        : Promise.resolve(),
-    });
-    if (stoppedRunId) runScopesRef.current.delete(stoppedRunId);
-    if (stoppedThreadId) streamControllersRef.current.delete(stoppedThreadId);
-    const nextThreads = threadsRef.current.map((thread) => (
-      thread.id === stoppedThreadId ? { ...thread, status: "idle" } : thread
-    ));
-    threadsRef.current = nextThreads;
-    setThreads(nextThreads);
-    if (activeThreadRef.current === stoppedThreadId) {
-      setRunId(null);
-      setError(null);
-      setStatus(runtimeRef.current?.agent ? "ready" : "unconfigured");
-    }
-    const persistedThreads = await agentApi.listThreads(resourceScope);
-    threadsRef.current = persistedThreads;
-    setThreads(persistedThreads);
-  }, [activeBranchId, activeThreadId, loadMessages, resourceScope, runId, runtime?.agent]);
+    if (!activeThreadId || !activeBranchId) return;
+    const starting = startingCommandsRef.current.get(activeThreadId);
+    const command = starting?.branchId === activeBranchId ? starting : runId ? {
+      threadId: activeThreadId, branchId: activeBranchId, runId, submitted: true,
+      controller: streamControllersRef.current.get(activeThreadId),
+    } : null;
+    if (!command || command.phase === "terminal") return;
+    command.cancelRequested = true;
+    command.phase = "cancel_pending";
+    startingCommandsRef.current.set(activeThreadId, command);
+    setStatus("syncing");
+    setError("正在停止本轮并核对服务端结果。");
+    // Before dispatch there is no server run; send() will skip the POST.
+    if (!command.submitted) return;
+    persistPendingCancellation(command);
+    bumpTransportRevision();
+    await settleCancellation(command);
+  }, [activeBranchId, activeThreadId, runId, settleCancellation]);
 
   const respondApproval = useCallback(async (approved, selectedApproval = approval) => {
     const approval = selectedApproval;

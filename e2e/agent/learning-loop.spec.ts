@@ -16,6 +16,7 @@ test("records evidence, adopts and implements a plan, then reviews actual follow
   await workbench.getByLabel("成功判据", { exact: true }).fill("解释词句与意象之间的联系");
   await workbench.getByLabel("实际观察", { exact: true }).fill("学生能找词句，但多数解释只复述句意");
   await workbench.getByLabel("证据来源与定位", { exact: true }).fill("第一课时出口条汇总");
+  await workbench.getByLabel("取证条件", { exact: true }).fill("同一任务、同一出口条判据、独立完成、无提示");
   await workbench.getByRole("button", { name: "保存证据", exact: true }).click();
   await expect(workbench.getByText("学生能找词句，但多数解释只复述句意", { exact: false })).toBeVisible();
   await workbench.getByRole("button", { name: "自行记录方案", exact: true }).click();
@@ -33,6 +34,7 @@ test("records evidence, adopts and implements a plan, then reviews actual follow
   await workbench.getByLabel("学生完成的任务", { exact: true }).fill("独立解释另一处词句的作用");
   await workbench.getByLabel("实际观察", { exact: true }).fill("更多学生能解释词句与意象的联系，仍有几份只复述句意");
   await workbench.getByLabel("证据来源与定位", { exact: true }).fill("第二次独立解释卡汇总");
+  await workbench.getByLabel("取证条件", { exact: true }).fill("同一任务、同一出口条判据、独立完成、无提示");
   await workbench.getByLabel("观察时间", { exact: true }).fill(localTime());
   await workbench.getByRole("button", { name: "保存证据", exact: true }).click();
   await workbench.getByRole("button", { name: "审议复测", exact: true }).click();
@@ -105,7 +107,7 @@ test("starts the assistant with a bound learning intent and flushes pending edit
       observation: "只能复述句意", method: "student_work", observedAt: new Date().toISOString(), sourceReference: "解释卡汇总",
     },
   }).then((response) => response.json());
-  const edit = page.locator('.lesson-tiptap-field[aria-label="评价练习"]:visible').first();
+  const edit = page.locator('.lesson-tiptap-field[contenteditable="true"][aria-label="评价练习"]:visible').first();
   await edit.fill("独立选择另一处词句并解释作用");
   await page.getByRole("tab", { name: "学习验证", exact: true }).click();
   await page.route("**/api/agent/threads/*/runs", (route) => route.abort("failed"));

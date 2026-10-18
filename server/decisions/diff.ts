@@ -27,6 +27,7 @@ export function diffDecisions(previous: DecisionRecord, next: DecisionRecord): D
   compare("expectedSignal", previous.expectedSignal, next.expectedSignal);
   compare("falsifier", previous.falsifier, next.falsifier);
   compare("reviewAt", previous.reviewAt, next.reviewAt);
+  compare("observationPlan", previous.observationPlan, next.observationPlan);
   compare("status", previous.status, next.status);
 
   return {

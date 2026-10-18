@@ -342,7 +342,7 @@ export class D1AgentRuntimeStore implements AgentRuntimeStore {
   async settleRun(args: Parameters<LessonRepository["settleRun"]>[0]) {
     const current = await this.requireRun(args.ownerId, args.runId);
     const now = this.clock();
-    if (current.cancelRequestedAt && args.status !== "cancelled" && current.status !== args.status) {
+    if (current.cancelRequestedAt && args.status !== "cancelled") {
       throw new Error("run_cancel_requested");
     }
     const runSettled = {
@@ -350,13 +350,13 @@ export class D1AgentRuntimeStore implements AgentRuntimeStore {
         SET status = ?, token_usage_json = ?, error = ?,
             completed_at = CASE WHEN ? = 'awaiting_approval' THEN NULL ELSE COALESCE(completed_at, ?) END,
             lease_token = NULL, lease_expires_at = NULL, heartbeat_at = ?
-        WHERE owner_id = ? AND id = ? AND (
+        WHERE owner_id = ? AND id = ? AND (? = 'cancelled' OR cancel_requested_at IS NULL) AND (
           (lease_token = ? AND status IN ('queued', 'running') AND lease_expires_at > ?)
           OR (status = ? AND lease_token IS NULL)
         )`,
       params: [
         args.status, JSON.stringify(args.tokenUsage ?? current.tokenUsage ?? {}), args.error ?? current.error ?? null,
-        args.status, now, now, args.ownerId, args.runId, args.leaseToken, now, args.status,
+        args.status, now, now, args.ownerId, args.runId, args.status, args.leaseToken, now, args.status,
       ],
     } satisfies SqlStatement;
     const statements: SqlStatement[] = [runSettled];
@@ -398,7 +398,11 @@ export class D1AgentRuntimeStore implements AgentRuntimeStore {
       ],
     });
     const results = await this.database.batch(statements);
-    if (!results[0]?.rowsAffected) throw new Error("run_lease_lost");
+    if (!results[0]?.rowsAffected) {
+      const latest = await this.requireRun(args.ownerId, args.runId);
+      if (latest.cancelRequestedAt && args.status !== "cancelled") throw new Error("run_cancel_requested");
+      throw new Error("run_lease_lost");
+    }
     return this.requireRun(args.ownerId, args.runId);
   }
 

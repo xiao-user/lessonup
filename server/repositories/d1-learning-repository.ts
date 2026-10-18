@@ -17,14 +17,15 @@ export class D1LearningRepository implements LearningRepository {
     });
     return result.rows.map((row) => learningReviewContext(JSON.parse(row.inquiry), JSON.parse(row.baseline), JSON.parse(row.followup)));
   }
-  private async list<T>(table: "learning_evidence" | "learning_inquiries", ownerId: string, fileId: string, limit: number, before?: LearningCursor): Promise<T[]> {
+  private async list<T>(table: "learning_evidence" | "learning_inquiries", ownerId: string, fileId: string, limit: number, before?: LearningCursor, decisionId?: string): Promise<T[]> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("learning_limit_invalid");
     const order = table === "learning_evidence" ? "observed_at" : "updated_at";
     const delivered = table === "learning_inquiries" ? " AND (source_run_id IS NULL OR EXISTS (SELECT 1 FROM agent_runs r WHERE r.owner_id = learning_inquiries.owner_id AND r.id = learning_inquiries.source_run_id AND r.status = 'completed'))" : "";
     const cursor = before ? ` AND (${order}, id) < (?, ?)` : "";
+    const decision = decisionId ? " AND json_extract(record_json, '$.decisionId') = ?" : "";
     const result = await this.database.query<{ record_json: string }>({
-      sql: `SELECT record_json FROM ${table} WHERE owner_id = ? AND lesson_file_id = ?${delivered}${cursor} ORDER BY ${order} DESC, id DESC LIMIT ?`,
-      params: [ownerId, fileId, ...(before ? [before.at, before.id] : []), limit],
+      sql: `SELECT record_json FROM ${table} WHERE owner_id = ? AND lesson_file_id = ?${delivered}${decision}${cursor} ORDER BY ${order} DESC, id DESC LIMIT ?`,
+      params: [ownerId, fileId, ...(decisionId ? [decisionId] : []), ...(before ? [before.at, before.id] : []), limit],
     });
     return result.rows.map((row) => JSON.parse(row.record_json) as T);
   }
@@ -32,7 +33,7 @@ export class D1LearningRepository implements LearningRepository {
     const result = await this.database.query<{ record_json: string }>({ sql: `SELECT record_json FROM ${table} WHERE owner_id = ? AND id = ?`, params: [ownerId, id] });
     return result.rows[0] ? JSON.parse(result.rows[0].record_json) as T : null;
   }
-  listLearningEvidence(ownerId: string, fileId: string, limit: number, before?: LearningCursor) { return this.list<LearningEvidence>("learning_evidence", ownerId, fileId, limit, before); }
+  listLearningEvidence(ownerId: string, fileId: string, limit: number, before?: LearningCursor, decisionId?: string) { return this.list<LearningEvidence>("learning_evidence", ownerId, fileId, limit, before, decisionId); }
   listLearningInquiries(ownerId: string, fileId: string, limit: number, before?: LearningCursor) { return this.list<LearningInquiry>("learning_inquiries", ownerId, fileId, limit, before); }
   getLearningEvidence(ownerId: string, id: string) { return this.get<LearningEvidence>("learning_evidence", ownerId, id); }
   getLearningInquiry(ownerId: string, id: string) { return this.get<LearningInquiry>("learning_inquiries", ownerId, id); }
@@ -74,12 +75,14 @@ export class D1LearningRepository implements LearningRepository {
   }
   saveLearningEvidence(record: LearningEvidence, command: LearningCommand) {
     const inquiryGuard = record.inquiryId ? " AND EXISTS (SELECT 1 FROM learning_inquiries WHERE owner_id = ? AND id = ? AND lesson_file_id = ? AND state = 'implemented' AND version = ?)" : "";
+    const decisionGuard = record.decisionId ? " AND EXISTS (SELECT 1 FROM lesson_decisions WHERE owner_id = ? AND id = ? AND lesson_file_id = ? AND version = ?)" : "";
     return this.persist(record, command, [{
       sql: `INSERT INTO learning_evidence (id, owner_id, notebook_id, lesson_file_id, inquiry_id, observed_at, created_at, record_json)
-        SELECT ?, ?, ?, ?, ?, ?, ?, ? FROM lesson_files WHERE owner_id = ? AND id = ? AND notebook_id = ? AND document_version = ?${inquiryGuard}`,
+        SELECT ?, ?, ?, ?, ?, ?, ?, ? FROM lesson_files WHERE owner_id = ? AND id = ? AND notebook_id = ? AND document_version = ?${inquiryGuard}${decisionGuard}`,
       params: [record.id, record.ownerId, record.notebookId, record.lessonFileId, record.inquiryId ?? null, record.observedAt,
         record.createdAt, JSON.stringify(record), record.ownerId, record.lessonFileId, record.notebookId, command.documentVersion ?? -1,
-        ...(record.inquiryId ? [record.ownerId, record.inquiryId, record.lessonFileId, command.inquiryVersion ?? -1] : [])],
+        ...(record.inquiryId ? [record.ownerId, record.inquiryId, record.lessonFileId, command.inquiryVersion ?? -1] : []),
+        ...(record.decisionId ? [record.ownerId, record.decisionId, record.lessonFileId, command.decisionVersion ?? -1] : [])],
     }]);
   }
   saveLearningInquiry(record: LearningInquiry, expectedVersion: number | null, command: LearningCommand) {

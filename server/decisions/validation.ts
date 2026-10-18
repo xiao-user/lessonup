@@ -40,7 +40,7 @@ export function validateEvidenceCard(card: EvidenceCard): string[] {
   if (!Array.isArray(card.limitations) || card.limitations.length === 0) errors.push("evidence.limitations_required");
   if (!Array.isArray(card.supports)) errors.push("evidence.supports_invalid");
   if (!Array.isArray(card.conflictsWith)) errors.push("evidence.conflicts_with_invalid");
-  if (!ratio(card.confidence)) errors.push("evidence.confidence_invalid");
+  if (card.confidence !== null && !ratio(card.confidence)) errors.push("evidence.confidence_invalid");
   if (!PII_LEVELS.has(card.piiLevel)) errors.push("evidence.pii_level_invalid");
   if (card.piiLevel === "student" && !/^r2:\/\//.test(card.source?.uri ?? "")) {
     errors.push("evidence.student_data_requires_private_object");
@@ -92,7 +92,6 @@ export function validateDecisionRecord(record: DecisionRecord): string[] {
 
   if (record.confidence !== null && !ratio(record.confidence)) errors.push("decision.confidence_invalid");
   if (CONFIRMED_STATUSES.has(record.status)) {
-    if (record.confidence === null) errors.push("decision.confidence_required");
     if (record.status === "no_change") {
       if (record.chosenOptionId !== null && !optionIds.has(record.chosenOptionId)) {
         errors.push("decision.chosen_option_invalid");

@@ -20,6 +20,8 @@ const publicErrorCodes = new Set([
   "approval_not_found",
   "approval_resume_failed",
   "document_context_stale",
+  "selection_context_stale",
+  "decision_context_stale",
   "design_basis_context_stale",
   "resource_context_stale",
   "evidence_required",

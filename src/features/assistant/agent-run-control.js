@@ -175,6 +175,14 @@ export function presentAgentError(error) {
       message: "当前页面不是云端最新教案。为避免助手基于错误内容回答，请关闭并重新打开这份教案。",
       retryLabel: "重新打开后再试",
     },
+    selection_context_stale: {
+      message: "选区对应的教案内容已变化，请重新选择当前文字后发送。",
+      retryLabel: "重新选择后再试",
+    },
+    decision_context_stale: {
+      message: "所选教学判断已更新，请回到教学决策核对最新取舍后再准备修改。",
+      retryLabel: "核对决策后再试",
+    },
     design_basis_context_stale: {
       message: "教案设计依据已在其他会话中更新。为避免把过期判断写入教案，本轮已停止。",
       retryLabel: "基于最新依据重新生成",

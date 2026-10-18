@@ -10,6 +10,7 @@ export function registerLearningRoutes(app: Hono<AppBindings>, repository: Lesso
   app.get("/api/lesson-files/:id/learning", async (c) => c.json(await service.read({ ownerId: c.get("userId"), lessonFileId: c.req.param("id") }, {
     evidenceBefore: cursor(c.req.query("evidenceBefore")),
     inquiriesBefore: cursor(c.req.query("inquiriesBefore")),
+    decisionId: cursor(c.req.query("decisionId")),
   })));
   app.get("/api/lesson-files/:id/learning/inquiries/:inquiryId", async (c) => c.json(await service.readContext(
     { ownerId: c.get("userId"), lessonFileId: c.req.param("id") }, { inquiryId: c.req.param("inquiryId") },

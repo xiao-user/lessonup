@@ -1,3 +1,5 @@
+import type { ObservationPlan } from "../learning/observation-plan.js";
+
 /** Decision records are the unit of teaching judgment; documents are their expression. */
 
 export const DECISION_TYPES = [
@@ -73,6 +75,8 @@ export interface DecisionCommand {
   fingerprint: string;
   documentVersion?: number;
   expectedVersion?: number;
+  /** Checked atomically with an agent proposal insert, after service preflight. */
+  agentRun?: { runId: string; threadId: string; branchId: string };
 }
 
 export interface DecisionCursor {
@@ -129,7 +133,8 @@ export interface EvidenceCard {
   applicability: string;
   limitations: string[];
   conflictsWith: string[];
-  confidence: number;
+  /** An optional relevance self-assessment, never a calibrated truth probability. */
+  confidence: number | null;
   expiresAt: string | null;
   piiLevel: "none" | "teacher" | "student";
 }
@@ -174,6 +179,8 @@ export interface DecisionRecord {
   expectedSignal: string;
   /** What observation would make this decision wrong; required to avoid unfalsifiable advice. */
   falsifier: string;
+  /** Optional on historical/draft records; required before a new actionable confirmation. */
+  observationPlan?: ObservationPlan | null;
   reviewAt: string | null;
   status: DecisionStatus;
   version: number;

@@ -1,0 +1,39 @@
+.decision-workbench > header { display: block; }
+.decision-workbench > header > .decision-actions { margin-top: 12px; }
+.decision-workbench .decision-detail { border-top: 0; padding-top: 0; }
+.decision-heading-line { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px; color: var(--secondary); font-size: 12px; margin-bottom: 8px; }
+.decision-workbench h3.decision-question { font-size: 15px; line-height: 1.65; font-weight: 600; margin: 0 0 10px; overflow-wrap: anywhere; }
+.decision-workbench h3.decision-question.is-condensed { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.decision-workbench .decision-judgment { margin: 0 0 16px; }
+.decision-preconditions { margin: 16px 0; }
+.decision-workbench .decision-preconditions h4, .decision-workbench .decision-comparison h4, .decision-workbench .decision-next-step h4 { color: var(--primary); font-size: 13px; margin: 0 0 8px; }
+.decision-preconditions ul, .decision-comparison ul, .decision-disclosure ul { padding-left: 18px; margin: 6px 0; }
+.decision-preconditions li, .decision-comparison li, .decision-disclosure li { margin: 5px 0; overflow-wrap: anywhere; }
+.decision-comparison { margin: 16px 0; }
+.decision-comparison-item { padding: 10px 0; border-bottom: 1px solid var(--gray-300); }
+.decision-workbench .decision-option-label { color: var(--secondary); font-size: 12px; margin: 0 0 4px; }
+.decision-workbench .decision-option-statement { font-weight: 600; }
+.decision-option-more { padding: 4px 0; }
+.decision-option-more summary { color: var(--secondary); cursor: pointer; }
+.decision-text-button { display: inline-block; min-height: 32px; padding: 4px 0; background: transparent; color: var(--primary); text-align: left; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; font: inherit; border: 0; }
+.decision-text-button:focus-visible, .decision-workbench summary:focus-visible { outline: 2px solid var(--tertiary); outline-offset: 3px; }
+.decision-next-step { margin: 20px 0; padding: 12px 0; border-block: 1px solid var(--gray-300); }
+.decision-next-step > p { color: var(--secondary); }
+.decision-workbench .decision-inspection .decision-evidence details, .decision-disclosure { padding: 12px 0; border: 0; border-bottom: 1px solid var(--gray-300); border-radius: 0; margin: 0; background: transparent; }
+.decision-disclosure summary, .decision-workbench .decision-evidence summary { cursor: pointer; font-weight: 500; }
+.decision-workbench .decision-evidence h4 { color: var(--primary); font-size: 13px; margin-top: 22px; }
+.decision-workbench .decision-excerpt { border-left: 2px solid var(--gray-300); padding-left: 10px; margin: 12px 0; font: inherit; }
+.decision-context-note { color: var(--secondary); font-size: 12px; line-height: 1.65; }
+.decision-form > details > .decision-form { border: 0; padding-top: 10px; margin-top: 0; }
+.decision-record-picker { margin-bottom: 18px; }
+.decision-inline-form { margin: 12px 0 22px; }
+.decision-inline-form h3 { font-size: 14px; }
+.decision-linked-observation { margin: 16px 0; }
+.decision-plan-fields { display: grid; gap: 12px; }
+fieldset.decision-plan-fields { border: 0; padding: 0; margin: 0; min-inline-size: 0; }
+.decision-plan-fields > legend { padding: 0; margin-bottom: 10px; }
+.decision-synthetic-label { display: flex; align-items: flex-start; gap: 8px; line-height: 1.6; }
+.decision-synthetic-label input { margin-top: 4px; }
+.decision-plan-fields .decision-plan-heading { color: var(--primary); font-size: 13px; margin: 0; }
+.decision-field-help { color: var(--secondary); font-size: 12px; margin: 4px 0 0; }
+@media (min-width: 760px) { .decision-workbench[data-wide="true"] .decision-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 18px; } .decision-workbench[data-wide="true"] .decision-comparison > h4, .decision-workbench[data-wide="true"] .decision-comparison > button { grid-column: 1 / -1; } }
