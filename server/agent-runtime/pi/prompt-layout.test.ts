@@ -43,6 +43,18 @@ describe("provider-bound prompt layout", () => {
     expect(STATIC_SYSTEM_INSTRUCTIONS).not.toContain("优先用简短标题");
   });
 
+  it("keeps importance-first marker composition in the shared authoring instructions", () => {
+    expect(STATIC_SYSTEM_INSTRUCTIONS).toContain("先辨认真正支撑本课理解与实施的重要内容");
+    expect(STATIC_SYSTEM_INSTRUCTIONS).toContain("最短但语义完整片段");
+    expect(STATIC_SYSTEM_INSTRUCTIONS).toContain("与正文一次生成");
+    expect(STATIC_SYSTEM_INSTRUCTIONS).toContain("不要留到教师要求涂色时才处理");
+    expect(STATIC_SYSTEM_INSTRUCTIONS).toContain("保留教师已有标记");
+    expect(STATIC_SYSTEM_INSTRUCTIONS).toContain("不规定数量、密度、每栏必标");
+    for (const example of ["==文字==", "=={pink}文字==", "=={green}文字==", "=={blue}文字==", "=={red}文字=="]) {
+      expect(STATIC_SYSTEM_INSTRUCTIONS).toContain(example);
+    }
+  });
+
   it("appends the current turn context after history so two turns share a prefix", () => {
     const history = [userMessage("教学过程写得怎么样？"), fauxAssistantMessage("已经完整。")];
     const first = bindProviderContext({ messages: history, turnContext: { focus: { sectionId: "process" } } });

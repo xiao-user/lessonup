@@ -89,7 +89,7 @@ export function createPiDocumentProposalTool(args: {
   const tool: AgentTool<typeof parameters> = {
     name: "propose_document_patch",
     label: "准备教案修改确认",
-    description: "提交当前 A4 教案的语义字段修改供教师确认。每项 operation 提交完整字段 replacement，当前原文快照由服务端绑定；未经批准不会写入。",
+    description: "提交当前 A4 教案的完整 Markdown 字段正文供教师确认。按本课重要性将适合局部强调的重点直接写成 ==重点==、=={pink}重点== 等荧光或 =={blue}重点== 等划线，遵守系统 A4 阅读指导，不以加粗替代或机械涂色；保留无关原文与教师标记。每项 operation 为完整字段 replacement，当前原文快照由服务端绑定；未经批准不会写入。",
     parameters,
     executionMode: "sequential",
     execute: async (toolCallId, raw) => {
