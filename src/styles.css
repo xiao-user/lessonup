@@ -2416,14 +2416,14 @@
 
 .lesson-tiptap-field mark {
   padding-inline: 1px;
-  border-radius: 2px;
-  background: linear-gradient(176deg, transparent 34%, var(--lesson-mark-yellow) 38%, var(--lesson-mark-yellow) 86%, transparent 94%);
+  border-radius: 0;
+  background-color: var(--lesson-mark-yellow);
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
   color: inherit;
 }
-.lesson-tiptap-field mark[data-tone="pink"] { background-image: linear-gradient(177deg, transparent 33%, var(--lesson-mark-pink) 39%, var(--lesson-mark-pink) 86%, transparent 94%); }
-.lesson-tiptap-field mark[data-tone="green"] { background-image: linear-gradient(175deg, transparent 34%, var(--lesson-mark-green) 39%, var(--lesson-mark-green) 87%, transparent 94%); }
+.lesson-tiptap-field mark[data-tone="pink"] { background-color: var(--lesson-mark-pink); }
+.lesson-tiptap-field mark[data-tone="green"] { background-color: var(--lesson-mark-green); }
 .lesson-tiptap-field mark[data-tone="blue"],
 .lesson-tiptap-field mark[data-tone="red"] {
   padding-inline: 0;
