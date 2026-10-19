@@ -239,6 +239,18 @@ export function presentAgentError(error) {
       message: "助手没有完成教师要求的修改提案，因此没有创建确认项，也没有写入内容。",
       retryLabel: "从已有读取继续",
     },
+    presentation_task_stale: {
+      message: "原演示任务对应的教案或版本已变化，本轮没有继续。请基于当前教案重新发起演示生成。",
+      retryLabel: "基于当前教案重新生成",
+    },
+    presentation_theme_binding_failed: {
+      message: "演示主题未能保存，本轮已停止。当前演示任务已保留，可以稍后继续。",
+      retryLabel: "继续当前演示",
+    },
+    presentation_planning_blocked: {
+      message: "演示主题校验重复失败，本轮已停止。请核对主题后继续当前演示任务。",
+      retryLabel: "核对主题后继续",
+    },
     presentation_proposal_missing: {
       message: "助手已完成部分演示规划，但没有提交可确认的最终 Dashi 演示内容。",
       retryLabel: "继续完成演示",

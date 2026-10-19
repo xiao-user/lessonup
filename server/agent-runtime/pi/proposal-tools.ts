@@ -21,8 +21,13 @@ import { findKnownLessonContentIssues } from "../../agent/lesson-content-validat
 import { evidenceRequiredToolError, validateObservedEvidence } from "../../agent/evidence-validation.js";
 import { assertDocumentWriteScope } from "../../agent/write-scope.js";
 import { validateLessonDesignProposalReferences } from "../../agent/design-basis-validation.js";
-import { typeBoxFromZod } from "./schema-adapter.js";
-import { dashiGoalSchema, type DashiGoal } from "../../presentations/dashi-goal.js";
+import { typeBoxFromZod } from "./schema-adapter.js";import { dashiGoalSchema, type DashiGoal } from "../../presentations/dashi-goal.js";
+import { readingEmphasisSchema, verifyReadingEmphasis } from "./reading-emphasis.js";
+import { documentDeliveryReceipt } from "./document-delivery-receipt.js";
+
+const documentAuthoringToolSchema = documentFieldPatchToolSchema.extend({
+  readingEmphasis: readingEmphasisSchema.describe("随正文生成的阅读设计。marked 时列出所有 replacement 中实际标记的 field、原文 text 和 tone；不需要笔迹时用 not_needed 并说明内容原因。不是每栏配额，不包括未修改栏目。"),
+});
 
 export type PiCapturedProposal = {
   /**
@@ -85,18 +90,22 @@ export function createPiDocumentProposalTool(args: {
   plan: CapabilityPlan;
 }) {
   const slot = captureSlot();
-  const parameters = typeBoxFromZod(documentFieldPatchToolSchema);
+  // Provider-side validation sees the same shape the business validator parses.
+  // An output-mode schema would reject the call before any handler can explain
+  // the problem to the model.
+  const parameters = typeBoxFromZod(documentAuthoringToolSchema, "input");
   const tool: AgentTool<typeof parameters> = {
     name: "propose_document_patch",
     label: "准备教案修改确认",
-    description: "提交当前 A4 教案的完整 Markdown 字段正文供教师确认。按本课重要性将适合局部强调的重点直接写成 ==重点==、=={pink}重点== 等荧光或 =={blue}重点== 等划线，遵守系统 A4 阅读指导，不以加粗替代或机械涂色；保留无关原文与教师标记。每项 operation 为完整字段 replacement，当前原文快照由服务端绑定；未经批准不会写入。",
+    description: "提交当前 A4 教案的完整 Markdown 字段正文供教师确认。按本课重要性将适合局部强调的重点直接写成 ==重点==、=={pink}重点== 等荧光或 =={blue}重点== 等划线，遵守系统 A4 阅读指导，不以加粗替代或机械涂色；保留无关原文与教师标记。readingEmphasis 必须与正文中所有实际笔迹逐项对应；不需要笔迹时明确说明原因。交付摘要由服务端按实际修改栏目与已验证标记生成，不由说明文字决定。每项 operation 为完整字段 replacement，当前原文快照由服务端绑定；未经批准不会写入。",
     parameters,
     executionMode: "sequential",
     execute: async (toolCallId, raw) => {
       if (args.plan.writeMode === "consultative") {
         throw new Error("document_write_not_requested");
       }
-      const proposal = documentFieldPatchToolSchema.parse(raw);
+      const proposal = documentAuthoringToolSchema.parse(raw);
+      const readingEmphasis = verifyReadingEmphasis(proposal.readingEmphasis, proposal.operations);
       assertDocumentWriteScope(proposal, args.plan.requestedDocumentFields);
       if (args.plan.minimalWriteRequested && proposal.operations.length > 1) {
         throw new Error("too_many_document_operations");
@@ -107,7 +116,7 @@ export function createPiDocumentProposalTool(args: {
         throw new Error("document_context_stale");
       }
       const patch = materializeDocumentPatchProposal({
-        proposal,
+        proposal: { summary: documentDeliveryReceipt(proposal.operations, readingEmphasis), operations: proposal.operations },
         fileId: file.id,
         documentVersion: file.documentVersion,
         plan: file.document,
@@ -131,7 +140,7 @@ export function createPiDocumentProposalTool(args: {
         baseResourceVersion: file.documentVersion,
         documentVersion: file.documentVersion,
       });
-      return pendingResult(patch.summary);
+      return { ...pendingResult(patch.summary), details: { readingEmphasis } };
     },
   };
   return { tool, getProposal: slot.get };

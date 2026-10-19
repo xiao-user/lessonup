@@ -28,9 +28,15 @@ export function parseDashiTheme(message: string): DashiThemeId | null {
   // The theme picker is numbered, so a teacher naturally replies with "02"
   // or "2". Treat a standalone catalog number exactly like theme02; do not
   // interpret numbers embedded in a longer ordinary message as a choice.
-  const id = value.match(/^0?([1-9])$|^(1[0-2])$/)?.slice(1).find(Boolean)
-    ?? value.match(/theme(0?[1-9]|1[0-2])/i)?.[1];
-  if (id) return `theme${String(Number(id)).padStart(2, "0")}` as DashiThemeId;
+  const numericChoice = value.match(/^(?:0?[1-9]|1[0-2])$/)?.[0];
+  // Match complete identifiers, with two-digit alternatives first. A partial
+  // match of theme10 as theme1 silently changed the teacher's explicit choice.
+  const explicitIds = [...message.matchAll(/(?:^|[^a-z0-9])theme[\s_-]*(1[0-2]|0?[1-9])(?![a-z0-9])/giu)]
+    .map((match) => `theme${String(Number(match[1])).padStart(2, "0")}` as DashiThemeId);
+  if (new Set(explicitIds).size > 1) return null;
+  if (numericChoice) return `theme${String(Number(numericChoice)).padStart(2, "0")}` as DashiThemeId;
+  if (explicitIds[0]) return explicitIds[0];
+  if (/theme[\s_-]*\d/iu.test(message)) return null;
   return dashiThemeCatalog.find((theme) => value.includes(normalized(theme.name)))?.id ?? null;
 }
 

@@ -3,9 +3,9 @@ import StarterKit from "@tiptap/starter-kit";
 import { MarkdownManager } from "@tiptap/markdown";
 import Highlight from "@tiptap/extension-highlight";
 import { TableKit } from "@tiptap/extension-table";
-import { Marked } from "marked";
+import { createLessonMarkdownParser, lessonHighlightTones, tokenizeLessonHighlight } from "./lesson-selection-text.js";
 
-export const lessonHighlightTones = ["yellow", "pink", "green", "blue", "red"];
+export { lessonHighlightTones } from "./lesson-selection-text.js";
 
 const LessonHighlight = Highlight.extend({
   addAttributes() {
@@ -32,17 +32,7 @@ const LessonHighlight = Highlight.extend({
     level: "inline",
     start: (source) => source.indexOf("=="),
     tokenize(source, _, helpers) {
-      const match = /^==(?:\{(yellow|pink|green|blue|red)\})?([^=\n]+)==/.exec(source);
-      if (!match) return undefined;
-      const text = match[2].trim();
-      if (!text) return undefined;
-      return {
-        type: "highlight",
-        raw: match[0],
-        text,
-        tone: match[1] || "yellow",
-        tokens: helpers.inlineTokens(text),
-      };
+      return tokenizeLessonHighlight(source, text => helpers.inlineTokens(text));
     },
   },
 });
@@ -53,7 +43,6 @@ export const lessonFieldExtensions = [
   TableKit.configure({ table: { resizable: false, renderWrapper: false } }),
 ];
 
-const createLessonMarkdownParser = () => new Marked({ breaks: true });
 const emptyParagraphMarker = "\u2063";
 const lessonMarkdownManager = new MarkdownManager({
   // In an editable lesson plan a teacher's Enter is a real visual line break.

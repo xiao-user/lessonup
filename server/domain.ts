@@ -796,6 +796,10 @@ export type AgentPendingInteraction = {
   documentVersion: number;
   requestedAt: string;
   confirmedTheme?: string;
+  /** The pending task is scoped to its canonical lesson, not the visible tab. */
+  resourceId?: string;
+  /** A later ordinary turn makes a bare “continue” ambiguous. */
+  resumeReferenceRequired?: boolean;
 };
 
 export type AgentMessageRecord = {

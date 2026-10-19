@@ -13,6 +13,7 @@ import type {
   AgentApprovalRecord,
   AgentBranchRecord,
   AgentMessageRecord,
+  AgentPendingInteraction,
   AgentRunRecord,
   AgentRunEvidenceKind,
   AgentRunEvidenceRecord,
@@ -123,6 +124,35 @@ export type AgentRuntimeSessionSnapshot = {
   revision: number;
   messages: unknown[];
   updatedAt: string;
+};
+
+export type BindPresentationThemeInput = {
+  ownerId: string;
+  threadId: string;
+  branchId: string;
+  runId: string;
+  leaseToken: string;
+  fileId: string;
+  documentVersion: number;
+  expectedPending: AgentPendingInteraction;
+  theme: string;
+};
+
+/** A presentation-task write is only valid while its run still owns the branch
+ * and the lesson snapshot has not moved. */
+export type UpdatePresentationTaskInput = Omit<BindPresentationThemeInput, "theme" | "expectedPending"> & {
+  /** The task this run read before deciding, or null when the branch had none.
+   * Concurrent writes compare against this, not against the new task. */
+  previousPending: AgentPendingInteraction | null;
+  pendingInteraction: AgentPendingInteraction | null;
+  /** Clearing a task whose lesson moved on is safe because it starts no work;
+   * the branch must still hold exactly that previous task. */
+  allowStaleSnapshot?: boolean;
+};
+
+/** Ownership guards shared by every presentation-task write. */
+export type PresentationTaskOwnerInput = Omit<BindPresentationThemeInput, "theme" | "expectedPending"> & {
+  expectedPending: AgentPendingInteraction;
 };
 
 export interface LessonRepository extends LearningRepository, DecisionRepository {
@@ -302,6 +332,9 @@ export interface LessonRepository extends LearningRepository, DecisionRepository
     AgentBranchRecord,
     "pendingInteraction"
   >>): Promise<AgentBranchRecord>;
+  /** Atomically binds the first theme while this exact task/run lease/version still owns the branch. */
+  bindPresentationTheme(args: BindPresentationThemeInput): Promise<boolean>;
+  updatePresentationTask(args: UpdatePresentationTaskInput): Promise<boolean>;
   listMessages(ownerId: string, threadId: string, branchId: string, cursor?: string, limit?: number): Promise<AgentMessageRecord[]>;
   getMessage(ownerId: string, messageId: string): Promise<AgentMessageRecord | null>;
   appendMessage(input: Omit<AgentMessageRecord, "id" | "createdAt"> & { id?: string }): Promise<AgentMessageRecord>;

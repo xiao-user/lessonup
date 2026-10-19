@@ -12,6 +12,15 @@ describe("canonical selection preparation", () => {
       expect(() => prepareCurrentSelection(selection, doc(), 2)).toThrow("selection_context_stale");
     }
   });
+  it("verifies the editor's once-decoded entity text without decoding the selection twice", () => {
+    const field = "讨论 &amp;lt;原句&amp;gt; 的作用";
+    const text = "&lt;原句&gt;";
+    expect(prepareCurrentSelection(quote(field, { text }), doc(field), 2)?.text).toBe(text);
+  });
+  it.each(["`==代码示例==`", "\\==代码示例=="])("preserves visible marker syntax in code or escaped text: %s", field => {
+    const text = "==代码示例==";
+    expect(prepareCurrentSelection(quote(field, { text }), doc(field), 2)?.text).toBe(text);
+  });
   it("validates visible Markdown across formatting rather than slicing editor offsets", () => {
     const field = "**独立**解释[表达效果](https://example.test)";
     expect(prepareCurrentSelection(quote(field, { text: "独立解释表达效果" }), doc(field), 2)?.text).toBe("独立解释表达效果");

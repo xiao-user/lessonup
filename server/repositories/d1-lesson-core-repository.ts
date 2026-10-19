@@ -95,7 +95,7 @@ const workspaceMethods = [
 
 const runtimeMethods = [
   "listThreads", "createThread", "getThread", "getConversationSnapshot", "updateThread", "createBranch", "listBranches",
-  "getBranch", "updateBranch", "listMessages", "getMessage", "appendMessage", "updateMessage",
+  "getBranch", "updateBranch", "bindPresentationTheme", "updatePresentationTask", "listMessages", "getMessage", "appendMessage", "updateMessage",
   "createRun", "createRunWithInitialMessages", "getRun", "getRunByClientCommand", "getLatestRun", "getLatestCompletedRun", "updateRun", "heartbeatRun",
   "settleRun", "requestRunCancellation", "recoverExpiredRuns", "appendRunEvent", "listRunEvents",
   "getSessionItems", "getSessionItemsAfter", "getSessionItemCount", "addSessionItems",

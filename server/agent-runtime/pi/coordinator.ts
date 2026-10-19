@@ -386,10 +386,15 @@ export class PiLessonAgentCoordinator {
         if (plan.taskIntent && branch.pendingInteraction) {
           await this.repository.updateBranch(input.userId, input.threadId, input.branchId, { pendingInteraction: null });
         }
+        const scopedPending = branch.pendingInteraction && !branch.pendingInteraction.resourceId
+          && branch.pendingInteraction.documentVersion === currentLesson.documentVersion
+          ? { ...branch.pendingInteraction, resourceId: currentLesson.lessonFileId }
+          : branch.pendingInteraction;
         const presentationTurn = continuationRun || plan.taskIntent ? null : resolvePresentationTurn({
           message: input.message,
           routedPlan: plan,
-          pendingInteraction: branch.pendingInteraction,
+          pendingInteraction: scopedPending,
+          resourceId: currentLesson.lessonFileId,
           documentVersion: currentLesson.documentVersion,
         });
         if (presentationTurn) plan = presentationTurn.plan;
@@ -397,9 +402,29 @@ export class PiLessonAgentCoordinator {
           ?? branch.pendingInteraction?.originalRequest
           ?? input.message;
         if (presentationTurn && JSON.stringify(branch.pendingInteraction ?? null) !== JSON.stringify(presentationTurn.pendingInteraction)) {
-          await this.repository.updateBranch(input.userId, input.threadId, input.branchId, {
+          const transitioned = await this.repository.updatePresentationTask({
+            ownerId: input.userId, threadId: input.threadId, branchId: input.branchId,
+            runId, leaseToken, fileId: currentLesson.lessonFileId,
+            documentVersion: currentLesson.documentVersion,
+            previousPending: scopedPending ?? branch.pendingInteraction ?? null,
             pendingInteraction: presentationTurn.pendingInteraction,
-          });
+          }).catch(() => false);
+          // A cancelled or replaced run must not write a late task over the
+          // current one; refusing here is safer than a blind branch update.
+          if (!transitioned) controller.signal.throwIfAborted();
+        }
+        if (presentationTurn?.expiredInteraction) {
+          // The stale task cannot be resumed against a newer snapshot, so it
+          // must not stay behind and report the same failure on every retry.
+          await this.repository.updatePresentationTask({
+            ownerId: input.userId, threadId: input.threadId, branchId: input.branchId,
+            runId, leaseToken, fileId: currentLesson.lessonFileId,
+            documentVersion: currentLesson.documentVersion,
+            previousPending: scopedPending ?? branch.pendingInteraction ?? null,
+            pendingInteraction: null,
+            allowStaleSnapshot: true,
+          }).catch(() => false);
+          throw new Error("presentation_task_stale");
         }
         if (plan.presentationRequested && !this.dashi) {
           throw new Error("presentation_renderer_unavailable");
@@ -434,6 +459,23 @@ export class PiLessonAgentCoordinator {
             resolvedTurn.toolSurface,
             runId,
             presentationLanguageForRequest(presentationRequest),
+            async (theme) => {
+              const pendingTask = presentationTurn?.pendingInteraction ?? scopedPending;
+              if (!pendingTask || pendingTask.kind !== "presentation_generation"
+                || pendingTask.resourceId !== currentLesson.lessonFileId
+                || pendingTask.documentVersion !== currentLesson.documentVersion) {
+                throw new Error("presentation_task_stale");
+              }
+              const bound = await this.repository.bindPresentationTheme({
+                ownerId: input.userId, threadId: input.threadId, branchId: input.branchId,
+                runId, leaseToken, fileId: currentLesson.lessonFileId,
+                documentVersion: currentLesson.documentVersion,
+                expectedPending: pendingTask, theme,
+              });
+              if (!bound) throw new Error("presentation_task_stale");
+              plan.confirmedPresentationTheme = theme;
+              await this.repository.updateRun(input.userId, runId, { capabilityPlan: plan });
+            },
           );
           runtimeTurnContext = lessonTurnContext(
             currentLesson,
@@ -460,8 +502,10 @@ export class PiLessonAgentCoordinator {
           { content: snapshot, status: "streaming" },
         ),
       });
-      const presentationCompletionPrompt = [
-        "你还没有完成教师要求的课堂演示任务。",
+      // Narration from a document turn is evidence of reasoning, not proof of
+      // delivery; it is released only when the run ends without an artifact.
+      let pendingNarration = "";
+      const presentationCompletionPrompt = [        "你还没有完成教师要求的课堂演示任务。",
         "继续使用会话中同一教案版本的完整读取结果和已经取得的 Dashi 候选，避免重复查询。保留已经判断为必要的课堂材料、学生行动、揭示与检验，不要为尽快通过而删减。若最终 layout 尚未检查则批量检查，然后直接提交 title、goal 和 slides 到 propose_classroom_presentation。",
         "不要输出过程说明，不要创建中间脚本。",
       ].join("\n");
@@ -498,11 +542,12 @@ export class PiLessonAgentCoordinator {
               followUp: decisionCompletionPrompt,
               maxFollowUps: 2,
             }
-        : plan.writeMode === "explicit" || learningTask
+        : plan.writeMode === "explicit" || plan.writeMode === "open" || learningTask
           ? {
               isComplete: () => {
                 const proposal = runtimeTools.getProposal();
-                return Boolean(runtimeTools.getNoChange() || (learningTask
+                return Boolean((plan.writeMode === "open" && !runtimeTools.hasWriteAttempt() && !learningTask)
+                  || runtimeTools.getNoChange() || (learningTask
                   ? runtimeTools.getLearningProposal()
                   : proposal != null && proposal.patchKind !== "presentation_storyboard"));
               },
@@ -519,6 +564,7 @@ export class PiLessonAgentCoordinator {
         input: input.message,
         continueExisting: Boolean(continuationRun),
         tools: runtimeTools.tools,
+        getTerminalToolError: runtimeTools.getTerminalPlanningError,
         skills,
         maxTurns: fastLane
           ? 2
@@ -559,6 +605,13 @@ export class PiLessonAgentCoordinator {
           // Presentation prose between tool calls remains private work. The
           // validated approval card is the public artifact for that workflow.
           if (plan.presentationRequested && !plan.presentationThemeConfirmationRequired) return false;
+          // A document turn owes the teacher a verified artifact, so its
+          // pre-tool narration ("已标好") is not a delivery fact. Keep it in the
+          // durable Pi transcript and publish only the canonical receipt.
+          if (!fastLane && !decisionTask && !learningTask && plan.writeMode !== "consultative") {
+            pendingNarration += delta;
+            return false;
+          }
           content += delta;
           assistant!.content = content;
           checkpoint.update(content);
@@ -579,7 +632,8 @@ export class PiLessonAgentCoordinator {
       const noChange = runtimeTools.getNoChange();
       const learningProposal = runtimeTools.getLearningProposal();
       const decisionProposal = runtimeTools.getDecisionProposal();
-      if (((plan.writeMode === "explicit" && (!proposal || proposal.patchKind === "presentation_storyboard")) || (learningTask && !learningProposal)) && !noChange) {
+      const documentWriteAttempted = plan.writeMode !== "consultative" && runtimeTools.hasWriteAttempt() && !decisionTask && !learningTask && !plan.presentationRequested;
+      if ((((plan.writeMode === "explicit" || documentWriteAttempted) && (!proposal || proposal.patchKind === "presentation_storyboard")) || (learningTask && !learningProposal)) && !noChange) {
         throw new Error("write_proposal_missing");
       }
       if (decisionTask && !decisionProposal) throw new Error("decision_proposal_missing");
@@ -604,7 +658,9 @@ export class PiLessonAgentCoordinator {
       content = hidePresentationProse ? "" : noChange?.reason
         ?? (decisionProposal ? "教学决策候选已准备，请在右侧“教学决策”中核对证据、替代方案与不确定性后确认。"
           : learningProposal ? (learningProposal.proposedReview ? "复测审议建议已准备，请在学习验证中核对证据与限制后确认。" : "学习改进方案已准备，请在学习验证中审阅并决定是否采用。")
-            : result.content || content || "");
+            : proposal && proposal.patchKind === "document" ? proposal.patch.summary
+              : noChange ? pendingNarration
+                : result.content || content || pendingNarration || "");
       if (proposal) {
         await this.approvals.commit({
           userId: input.userId,

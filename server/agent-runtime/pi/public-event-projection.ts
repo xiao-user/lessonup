@@ -8,6 +8,7 @@ import {
 } from "../../agent/tool-presentation.js";
 import { PublicTextGuard } from "./session-state.js";
 import { documentDraftFields } from "./document-draft.js";
+import { safeDashiPlanningError } from "../../presentations/dashi-planning-errors.js";
 
 function publicToolProgress(partialResult: unknown) {
   if (!partialResult || typeof partialResult !== "object") return undefined;
@@ -35,6 +36,7 @@ export function projectPublicPiEvents(args: {
   emit: Emit;
   onTextDelta?: (delta: string, turn: number) => void | boolean | Promise<void | boolean>;
   documentDraftScope?: { fileId: string; baseDocumentVersion: number };
+  getTerminalToolError?: () => Error | null;
 }) {
   let currentTurn = 0;
   const publicText = new PublicTextGuard();
@@ -147,6 +149,11 @@ export function projectPublicPiEvents(args: {
         ...safeToolPresentation(event.toolName),
         detail: safeToolDetail(event.toolName),
       };
+      const errorTexts = event.isError && event.result && typeof event.result === "object"
+        && Array.isArray(event.result.content)
+        ? event.result.content.flatMap((block: { type?: string; text?: string }) => block.type === "text" && typeof block.text === "string" ? [block.text] : [])
+        : [];
+      const businessError = errorTexts.map(safeDashiPlanningError).find(Boolean);
       const presentation = {
         ...startedPresentation,
         detail: safeToolCompletionDetail(
@@ -154,6 +161,7 @@ export function projectPublicPiEvents(args: {
           startedPresentation.label,
           event.isError,
           startedPresentation.detail,
+          businessError?.code,
         ),
       };
       await args.emit({
@@ -162,7 +170,8 @@ export function projectPublicPiEvents(args: {
         toolCallId: event.toolCallId,
         name: event.toolName,
         ok: !event.isError,
-        outcome: event.isError ? "needs_revision" : event.toolName === "complete_without_change" ? "no_change" : "completed",
+        outcome: event.isError ? businessError?.terminal ? "failed" : "needs_revision" : event.toolName === "complete_without_change" ? "no_change" : "completed",
+        ...(businessError ? { revisionCode: businessError.code } : {}),
         turn: currentTurn,
         ...presentation,
       });
@@ -170,7 +179,7 @@ export function projectPublicPiEvents(args: {
       return;
     }
     if (event.type === "turn_end") {
-      const outcome = event.message.role === "assistant" && event.message.stopReason === "error"
+      const outcome = args.getTerminalToolError?.() || (event.message.role === "assistant" && event.message.stopReason === "error")
         ? "failed"
         : event.message.role === "assistant" && event.message.stopReason === "aborted"
           ? "cancelled"
@@ -179,7 +188,7 @@ export function projectPublicPiEvents(args: {
       return;
     }
     if (event.type === "agent_end") {
-      const outcome = args.agent.state.errorMessage
+      const outcome = args.getTerminalToolError?.() || args.agent.state.errorMessage
         ? "failed"
         : args.signal?.aborted
           ? "cancelled"

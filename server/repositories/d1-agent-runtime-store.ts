@@ -5,6 +5,7 @@ import type {
   AgentResourceRef,
   AgentRunRecord,
   AgentThreadRecord,
+  AgentPendingInteraction,
   NormalizedAgentEvent,
   ResourcePatch,
   SourceRef,
@@ -17,6 +18,7 @@ import type {
   ConversationSnapshot,
   CreateThreadInput,
   LessonRepository,
+  PresentationTaskOwnerInput,
 } from "../repository.js";
 import type { SqlDatabase, SqlStatement, SqlValue } from "../platform/sql-database.js";
 import { runtimeSessionWritePlan } from "./runtime-session-persist.js";
@@ -33,7 +35,7 @@ type RunRow = Record<string, unknown>;
  */
 export type AgentRuntimeStore = Pick<LessonRepository,
   "listThreads" | "createThread" | "getThread" | "getConversationSnapshot" | "updateThread" |
-  "createBranch" | "listBranches" | "getBranch" | "updateBranch" |
+  "createBranch" | "listBranches" | "getBranch" | "updateBranch" | "bindPresentationTheme" | "updatePresentationTask" |
   "listMessages" | "getMessage" | "appendMessage" | "updateMessage" |
   "createRun" | "createRunWithInitialMessages" | "getRun" | "getRunByClientCommand" | "getLatestRun" | "getLatestCompletedRun" |
   "updateRun" | "heartbeatRun" | "settleRun" | "requestRunCancellation" |
@@ -232,6 +234,68 @@ export class D1AgentRuntimeStore implements AgentRuntimeStore {
     const result = await this.database.query({ sql: "UPDATE agent_branches SET pending_interaction_json = ? WHERE owner_id = ? AND thread_id = ? AND id = ?", params: [value, ownerId, threadId, branchId] });
     if (!result.rowsAffected) throw new Error("branch_not_found");
     return this.requireBranch(ownerId, threadId, branchId);
+  }
+
+  async bindPresentationTheme(args: Parameters<LessonRepository["bindPresentationTheme"]>[0]): Promise<boolean> {
+    const { expectedPending, theme } = args;
+    if (expectedPending.kind !== "presentation_generation"
+      || expectedPending.resourceId !== args.fileId
+      || expectedPending.documentVersion !== args.documentVersion
+      || !theme.trim() || theme !== theme.trim()
+      || (expectedPending.confirmedTheme !== undefined && expectedPending.confirmedTheme !== theme)) return false;
+    return this.compareAndSetPresentationTask(args, JSON.stringify({ ...expectedPending, confirmedTheme: theme }));
+  }
+
+  /** Ordinary chat can preserve, mark or clear a presentation task, but the
+   * same run-lease and snapshot guards apply so a cancelled or replaced run
+   * cannot write a late task over the current one. */
+  async updatePresentationTask(args: Parameters<LessonRepository["updatePresentationTask"]>[0]): Promise<boolean> {
+    const { previousPending, pendingInteraction } = args;
+    // A fresh task begins unbound; once it names a lesson, both sides of the
+    // transition must still match this run's canonical snapshot. Clearing a
+    // task that a newer lesson snapshot superseded starts no work, so only the
+    // exact previous task on the branch has to match.
+    const clearingStaleTask = args.allowStaleSnapshot === true && pendingInteraction === null;
+    if (!clearingStaleTask && previousPending && (
+      previousPending.resourceId !== args.fileId
+      || previousPending.documentVersion !== args.documentVersion)) return false;
+    if (pendingInteraction && (
+      pendingInteraction.resourceId !== args.fileId
+      || pendingInteraction.documentVersion !== args.documentVersion)) return false;
+    return this.compareAndSetPresentationTask(
+      { ...args, expectedPending: previousPending as AgentPendingInteraction },
+      pendingInteraction ? JSON.stringify(pendingInteraction) : null,
+      clearingStaleTask,
+    );
+  }
+
+  private async compareAndSetPresentationTask(
+    args: PresentationTaskOwnerInput,
+    pendingJson: string | null,
+    allowStaleSnapshot = false,
+  ): Promise<boolean> {
+    const result = await this.database.query({
+      sql: `UPDATE agent_branches
+        SET pending_interaction_json = ?
+        WHERE owner_id = ? AND thread_id = ? AND id = ?
+          AND pending_interaction_json = ?
+          AND EXISTS (
+            SELECT 1 FROM agent_runs r
+            JOIN agent_threads t ON t.id = r.thread_id AND t.owner_id = r.owner_id
+            JOIN lesson_files f ON f.id = t.lesson_file_id AND f.owner_id = t.owner_id AND f.notebook_id = t.notebook_id
+            JOIN notebooks n ON n.id = f.notebook_id AND n.owner_id = f.owner_id
+            WHERE r.owner_id = agent_branches.owner_id
+              AND r.thread_id = agent_branches.thread_id AND r.branch_id = agent_branches.id
+              AND r.id = ? AND r.status = 'running' AND r.lease_token = ?
+              AND r.cancel_requested_at IS NULL AND r.lease_expires_at > ?
+              AND t.resource_type = 'lesson_file' AND t.deleted_at IS NULL
+              AND f.id = ?${allowStaleSnapshot ? "" : " AND f.document_version = ?"}
+          )`,
+      params: [pendingJson, args.ownerId, args.threadId, args.branchId, JSON.stringify(args.expectedPending),
+        args.runId, args.leaseToken, this.clock(), args.fileId,
+        ...(allowStaleSnapshot ? [] : [args.documentVersion])],
+    });
+    return result.rowsAffected === 1;
   }
 
   async listMessages(ownerId: string, threadId: string, branchId: string, cursor?: string, limit = 100) {

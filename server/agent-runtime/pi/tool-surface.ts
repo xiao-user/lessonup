@@ -9,6 +9,7 @@ import type { WebSearchProvider } from "../../providers/web-search.js";
 import type { QueryEmbedder } from "../../providers/query-embedding.js";
 import { UnavailableWebSearchProvider } from "../../providers/unavailable-web-search.js";
 import { createPiDashiPlanningSession } from "./dashi-tools.js";
+import type { DashiPlanningError } from "../../presentations/dashi-planning-errors.js";
 import { assertDashiGoalHasCompleteVisibleCopy, indexDashiLayoutContracts, keepOnlyDashiAuthoredContent, type DashiLayoutContract } from "../../presentations/dashi-layout-contract.js";
 import { createPiLessonKnowledgeTools, createPiLessonReadTools } from "./lesson-tools.js";
 import { createPiDocumentProposalTool, createPiDesignBasisPatchProposalTool, createPiDesignBasisProjectionProposalTool, createPiLessonDesignChangeProposalTool, createPiPresentationProposalTool, createPiSemesterProposalTool, type PiCapturedProposal } from "./proposal-tools.js";
@@ -53,6 +54,7 @@ export class PiToolSurface {
     surface: ToolSurface,
     presentationSeed?: string,
     presentationLanguage?: "zh" | "en",
+    onThemeBound?: (theme: DashiThemeId) => void | Promise<void>,
   ) {
     const { repository, attempts } = trackEvidenceAttempts(this.repository);
     const scope = {
@@ -103,18 +105,21 @@ export class PiToolSurface {
       tools.push(basis.tool, combined.tool, projection.tool);
       captured.push(basis.getProposal, combined.getProposal, projection.getProposal);
     }
+    let getTerminalPlanningError: () => DashiPlanningError | null = () => null;
     if (writing && plan.presentationRequested && this.dashi) {
       const dashi = this.dashi;
       const inspectedLayouts = new Map<string, DashiLayoutContract>();
       const planning = createPiDashiPlanningSession(dashi, {
         theme: plan.confirmedPresentationTheme as DashiThemeId | undefined,
         seed: presentationSeed,
+        onThemeBound,
         onLayoutsInspected: (_layouts, result) => {
           for (const [layout, contract] of indexDashiLayoutContracts(result)) {
             inspectedLayouts.set(layout, contract);
           }
         },
       });
+      getTerminalPlanningError = planning.getTerminalError;
       const proposal = createPiPresentationProposalTool({
         repository,
         context,
@@ -142,6 +147,8 @@ export class PiToolSurface {
       getLearningProposal: learning.getLearningProposal,
       getDecisionProposal: decisions.getDecisionProposal,
       getNoChange: completion?.getNoChange ?? (() => null),
+      hasWriteAttempt: completion?.hasWriteAttempt ?? (() => false),
+      getTerminalPlanningError,
       getEvidenceAttempts: () => attempts,
     };
   }
@@ -168,8 +175,10 @@ export class PiToolSurface {
     const completion = withTeachingCompletion(tools, () => Boolean(proposal.getProposal()));
     return {
       ...completion,
+      hasWriteAttempt: completion.hasWriteAttempt,
       getLearningProposal: () => null,
       getDecisionProposal: () => null,
+      getTerminalPlanningError: (): DashiPlanningError | null => null,
       getProposal: proposal.getProposal,
       getEvidenceAttempts: () => attempts,
     };

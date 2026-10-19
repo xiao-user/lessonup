@@ -2,6 +2,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import type { BrowserDashiSkill } from "../../presentations/browser-dashi-skill.js";
 import type { DashiThemeId } from "../../presentations/dashi-theme-catalog.js";
+import { DashiPlanningError, type DashiPlanningErrorCode } from "../../presentations/dashi-planning-errors.js";
 
 const themeIds = [
   "theme01", "theme02", "theme03", "theme04", "theme05", "theme06",
@@ -115,15 +116,50 @@ export function createPiDashiPlanningSession(
     theme?: DashiThemeId;
     seed?: string;
     onLayoutsInspected?: (layouts: string[], result: unknown) => void;
+    onThemeBound?: (theme: DashiThemeId) => void | Promise<void>;
   } = {},
 ) {
   let activeTheme = options.theme;
+  let bindingTheme: DashiThemeId | undefined;
+  let binding: Promise<void> | undefined;
+  let contractFailures = 0;
+  let terminalError: DashiPlanningError | null = null;
+  const fail = (code: DashiPlanningErrorCode): never => {
+    if (terminalError) throw terminalError;
+    contractFailures += 1;
+    const terminal = code === "presentation_theme_binding_failed" || contractFailures > 1;
+    const error = new DashiPlanningError(code === "presentation_theme_binding_failed" ? code
+      : terminal ? "presentation_planning_blocked" : code);
+    if (terminal) terminalError = error;
+    throw error;
+  };
+  const bindTheme = async (requested?: DashiThemeId): Promise<DashiThemeId> => {
+    if (terminalError) throw terminalError;
+    const fixedTheme = activeTheme ?? bindingTheme;
+    if (requested && !themeIds.includes(requested)) fail("presentation_theme_invalid");
+    if (fixedTheme && requested && fixedTheme !== requested) fail("presentation_theme_mismatch");
+    const theme = fixedTheme ?? requested;
+    if (!theme) return fail("presentation_theme_required");
+    if (!activeTheme) {
+      if (!binding) {
+        bindingTheme = theme;
+        binding = (async () => {
+          try { await options.onThemeBound?.(theme); }
+          catch { fail("presentation_theme_binding_failed"); }
+          activeTheme = theme;
+        })();
+      }
+      await binding;
+    }
+    return theme;
+  };
   const layoutQueryCache = new Map<string, unknown>();
   const queryLayouts: AgentTool<any> = {
     name: "query_dashi_layouts",
     label: "查询 Dashi 版式",
-    description: "按课堂意图批量查询真实候选版式；主题由服务端绑定，只需描述每一类页面要承担的课堂功能。",
+    description: "按课堂意图批量查询真实候选版式。教师已确认的主题固定不变，可省略 theme；教师委托选择且尚未绑定时，在首次查询的 theme 中选择一个可用主题。首次绑定保存成功后，后续查询沿用该主题，不得漂移。每一类页面用 queries 描述课堂功能。",
     parameters: Type.Object({
+      theme: Type.Optional(Type.Union(themeIds.map((theme) => Type.Literal(theme)))),
       queries: Type.Array(Type.Object({
         intent: Type.String({ minLength: 1, maxLength: 120 }),
         limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
@@ -134,10 +170,8 @@ export function createPiDashiPlanningSession(
         theme?: DashiThemeId;
         queries: Array<{ intent: string; limit?: number }>;
       };
-      const requestedTheme = options.theme ?? parameters.theme;
-      if (!requestedTheme || !themeIds.includes(requestedTheme)) throw new Error("presentation_theme_required");
-      if (activeTheme && activeTheme !== requestedTheme) throw new Error("presentation_theme_mismatch");
-      activeTheme = requestedTheme;
+      const theme = await bindTheme(parameters.theme);
+      if (terminalError) throw terminalError;
       const batches = [];
       for (const [index, query] of parameters.queries.entries()) {
         onUpdate?.(progressResult(
@@ -147,14 +181,14 @@ export function createPiDashiPlanningSession(
         ));
         const role = roleForIntent(query.intent);
         const limit = query.limit ?? 6;
-        const cacheKey = JSON.stringify({ theme: activeTheme, intent: query.intent, role, limit });
+        const cacheKey = JSON.stringify({ theme, intent: query.intent, role, limit });
         let result = layoutQueryCache.get(cacheKey);
         let cached = true;
         if (!result) {
           cached = false;
           const queryNumber = layoutQueryCache.size + 1;
           result = await dashi.queryLayouts({
-            theme: activeTheme,
+            theme,
             role,
             keyword: query.intent,
             seed: options.seed ? `${options.seed}:${queryNumber}:${index}:intent` : undefined,
@@ -166,7 +200,7 @@ export function createPiDashiPlanningSession(
           // to the visual role instead of making the Agent learn that mismatch.
           if (!asArray(asRecord(result).layouts).length) {
             result = await dashi.queryLayouts({
-              theme: activeTheme,
+              theme,
               role,
               seed: options.seed ? `${options.seed}:${queryNumber}:${index}:role` : undefined,
               limit,
@@ -177,7 +211,8 @@ export function createPiDashiPlanningSession(
         }
         batches.push({ ...compactQueryResult(query.intent, role, result), cached });
       }
-      return textResult({ theme: activeTheme, batches });
+      contractFailures = 0;
+      return textResult({ theme, batches });
     },
   };
 
@@ -193,6 +228,9 @@ export function createPiDashiPlanningSession(
     }, { additionalProperties: false }),
     execute: async (_toolCallId, input, signal, onUpdate) => {
       const layouts = [...new Set((input as { layouts: string[] }).layouts)];
+      const theme = await bindTheme();
+      if (terminalError) throw terminalError;
+      if (layouts.some((layout) => !layout.startsWith(`${theme}_`))) fail("presentation_theme_mismatch");
       const inspected: unknown[] = [];
       for (let index = 0; index < layouts.length; index += 12) {
         onUpdate?.(progressResult(
@@ -205,6 +243,7 @@ export function createPiDashiPlanningSession(
       }
       const rawResult = { layouts: inspected };
       options.onLayoutsInspected?.(layouts, rawResult);
+      contractFailures = 0;
       return textResult({ layouts: inspected.map(compactInspection) });
     },
   };
@@ -212,5 +251,6 @@ export function createPiDashiPlanningSession(
   return {
     tools: [queryLayouts, inspectLayouts],
     getTheme: () => activeTheme,
+    getTerminalError: () => terminalError,
   };
 }

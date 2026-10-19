@@ -1,4 +1,5 @@
 import type { LessonField } from "../domain.js";
+import { safeDashiPlanningError } from "../presentations/dashi-planning-errors.js";
 
 export type SafeToolPresentation = {
   label: string;
@@ -237,8 +238,13 @@ export function safeToolCompletionDetail(
   label: string,
   isError = false,
   startedDetail?: string,
+  businessError?: unknown,
 ): string {
   if (isError) {
+    if (name === "query_dashi_layouts" || name === "inspect_dashi_layouts" || name === "propose_classroom_presentation") {
+      const safe = safeDashiPlanningError(businessError);
+      if (safe) return safe.detail;
+    }
     if (name.startsWith("propose_")) {
       return "修改建议未通过预检，可在本轮根据问题继续调整。";
     }

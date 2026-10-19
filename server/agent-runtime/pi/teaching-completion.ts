@@ -11,11 +11,13 @@ export function withTeachingCompletion(
 ) {
   const observed = new Set<string>();
   let outcome: TeachingNoChange | null = null;
+  let writeAttempted = false;
   const canonicalReads = new Set(["read_document", "read_section", "read_semester_framework", "read_semester_unit"]);
   const wrapped = tools.map((tool) => ({
     ...tool,
     execute: async (...args: Parameters<typeof tool.execute>) => {
       if (outcome && tool.name.startsWith("propose_")) throw new Error("teaching_result_already_completed");
+      if (tool.name.startsWith("propose_")) writeAttempted = true;
       const result = await tool.execute(...args);
       if (canonicalReads.has(tool.name)) observed.add(tool.name);
       return result;
@@ -37,5 +39,5 @@ export function withTeachingCompletion(
       return { content: [{ type: "text", text: JSON.stringify({ status: "completed_without_change", ...outcome }) }], details: { publicOutcome: "no_change" }, terminate: true };
     },
   };
-  return { tools: [...wrapped, complete], getNoChange: () => outcome };
+  return { tools: [...wrapped, complete], getNoChange: () => outcome, hasWriteAttempt: () => writeAttempted };
 }

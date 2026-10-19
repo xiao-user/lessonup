@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { DashiPlanningError, isTerminalDashiPlanningError, safeDashiPlanningError } from "../presentations/dashi-planning-errors.js";
 
 import {
   safeToolCompletionDetail,
@@ -155,6 +156,21 @@ describe("safeToolCompletionDetail", () => {
       "读取当前教案的完整内容，作为后续分析与修改依据。",
     );
     expect(safeToolCompletionDetail("read_document", "读取整份教案")).not.toMatch(/Pi/);
+  });
+
+  it("shows actionable safe Dashi business failures without copying raw exception text", () => {
+    expect(safeToolCompletionDetail("query_dashi_layouts", "查询版式", true, undefined, "presentation_theme_required")).toBe("尚未选定演示主题，请选择主题或让助手选择后继续。");
+    expect(safeToolCompletionDetail("inspect_dashi_layouts", "检查版式", true, undefined, new DashiPlanningError("presentation_theme_mismatch"))).toContain("已有固定主题");
+    expect(safeToolCompletionDetail("propose_classroom_presentation", "准备演示", true, undefined, "presentation_planning_blocked")).toContain("本轮已停止");
+    for (const unsafe of [new Error("SQL bearer secret"), "presentation_theme_required: SQL bearer secret", "constructor", { message: "presentation_theme_required", private: "secret" }]) {
+      expect(safeDashiPlanningError(unsafe)).toBeNull();
+      expect(safeToolCompletionDetail("query_dashi_layouts", "查询版式", true, undefined, unsafe)).toBe("查询版式未完成。");
+    }
+    expect(safeToolCompletionDetail("read_document", "读取教案", true, undefined, "presentation_theme_required")).toBe("读取教案未完成。");
+    expect(isTerminalDashiPlanningError(new DashiPlanningError("presentation_theme_binding_failed"))).toBe(true);
+    expect(isTerminalDashiPlanningError("presentation_planning_blocked")).toBe(true);
+    expect(isTerminalDashiPlanningError("presentation_theme_required")).toBe(false);
+    expect(isTerminalDashiPlanningError(new Error("private backend failure"))).toBe(false);
   });
 
   it("distinguishes a proposal preflight failure", () => {

@@ -103,7 +103,7 @@ export function lessonTurnContext(
           availableThemes: dashiThemeCatalogForPrompt(),
           instruction: plan.presentationThemeConfirmationRequired
             ? "Ask the teacher to select one theme by ID/name, or explicitly delegate the choice. The client renders the durable theme picker from this state, so keep the reply to one short sentence and do not enumerate themes. Do not read the lesson or start presentation work in this turn."
-            : "Use the confirmed theme exactly; if delegated, select one suitable theme from the catalog.",
+            : "Use the confirmed theme exactly. If delegated, choose one catalog theme and supply its ID in the first query_dashi_layouts theme argument. That validated call binds the theme durably; do not claim it is bound before the tool succeeds. Later calls reuse that bound theme.",
           recentAccountDesigns: recentPresentationDesigns,
           noveltyPolicy: "Recent designs are account-scoped hints, not content. When semantic fit is equal, avoid repeating their theme and exact layout set; never sacrifice classroom function merely to be different.",
         },
@@ -145,9 +145,12 @@ export function emptyRuntimeTools(): {
   getNoChange: () => null;
   getLearningProposal: () => null;
   getDecisionProposal: () => null;
+  getTerminalPlanningError: () => null;
+  hasWriteAttempt: () => boolean;
 } {
   return { tools: [], getProposal: () => null, getNoChange: () => null, getLearningProposal: () => null,
-    getDecisionProposal: () => null, getEvidenceAttempts: () => new Set() };
+    getDecisionProposal: () => null, getEvidenceAttempts: () => new Set(),
+    getTerminalPlanningError: () => null, hasWriteAttempt: () => false };
 }
 
 export function isFastExecution(

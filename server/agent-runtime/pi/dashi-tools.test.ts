@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { safeDashiPlanningError } from "../../presentations/dashi-planning-errors.js";
 import { createPiDashiPlanningSession } from "./dashi-tools.js";
 
 const outputOf = (result: { content: unknown[] }) => JSON.parse((result.content[0] as { text: string }).text);
@@ -151,6 +152,98 @@ describe("Pi Dashi planning session", () => {
     expect(outputOf(output).layouts).toHaveLength(20);
   });
 
+  it("persists a delegated first choice before querying, then reuses it without another theme argument", async () => {
+    let resolveBinding!: () => void;
+    const persisted = vi.fn(() => new Promise<void>((resolve) => { resolveBinding = resolve; }));
+    const queryLayouts = vi.fn(async () => ({ layouts: [{ layout: "theme10_page001" }] }));
+    const session = createPiDashiPlanningSession({ queryLayouts, inspectLayouts: vi.fn() } as never, { onThemeBound: persisted });
+    const query = session.tools[0]!;
+    const schema = query.parameters as { properties: { theme: { anyOf: Array<{ const: string }> } }; additionalProperties: boolean };
+    expect(schema.properties.theme.anyOf.map((item) => item.const)).toEqual(Array.from({ length: 12 }, (_, i) => `theme${String(i + 1).padStart(2, "0")}`));
+    expect(schema.additionalProperties).toBe(false);
+    const first = query.execute("first", { theme: "theme10", queries: [{ intent: "原文观察" }] });
+    expect(persisted).toHaveBeenCalledExactlyOnceWith("theme10");
+    expect(session.getTheme()).toBeUndefined();
+    expect(queryLayouts).not.toHaveBeenCalled();
+    resolveBinding();
+    expect(outputOf(await first).theme).toBe("theme10");
+    await query.execute("next", { queries: [{ intent: "独立练习" }] });
+    expect(persisted).toHaveBeenCalledTimes(1);
+    expect(queryLayouts.mock.calls).toHaveLength(2);
+    expect(queryLayouts.mock.calls.every((call) => (call as unknown as [{ theme: string }])[0].theme === "theme10")).toBe(true);
+  });
+
+  it("rejects explicit drift from a confirmed theme rather than silently ignoring the argument", async () => {
+    const queryLayouts = vi.fn(async () => ({ layouts: [{ layout: "theme09_page001" }] }));
+    const session = createPiDashiPlanningSession({ queryLayouts, inspectLayouts: vi.fn() } as never, { theme: "theme09" });
+    await expect(session.tools[0]!.execute("wrong", { theme: "theme10", queries: [{ intent: "比较" }] })).rejects.toThrow("presentation_theme_mismatch");
+    expect(queryLayouts).not.toHaveBeenCalled();
+    expect(session.getTheme()).toBe("theme09");
+    await session.tools[0]!.execute("fixed", { queries: [{ intent: "比较" }] });
+    expect(queryLayouts).toHaveBeenCalledTimes(1);
+    expect(session.getTerminalError()).toBeNull();
+  });
+
+  it("retains the persisted theme through a failed lookup and allows a same-theme retry", async () => {
+    const persist = vi.fn();
+    const queryLayouts = vi.fn().mockRejectedValueOnce(new Error("private service failure")).mockResolvedValue({ layouts: [{ layout: "theme11_page001" }] });
+    const session = createPiDashiPlanningSession({ queryLayouts, inspectLayouts: vi.fn() } as never, { onThemeBound: persist });
+    const query = session.tools[0]!;
+    await expect(query.execute("first", { theme: "theme11", queries: [{ intent: "任务" }] })).rejects.toThrow("private service failure");
+    expect(session.getTheme()).toBe("theme11");
+    await expect(query.execute("drift", { theme: "theme12", queries: [{ intent: "任务" }] })).rejects.toThrow("presentation_theme_mismatch");
+    await query.execute("retry", { queries: [{ intent: "任务" }] });
+    expect(queryLayouts).toHaveBeenCalledTimes(2);
+    expect(persist).toHaveBeenCalledExactlyOnceWith("theme11");
+  });
+
+  it("does not query or expose storage error details when durable binding fails", async () => {
+    const queryLayouts = vi.fn();
+    const session = createPiDashiPlanningSession({ queryLayouts, inspectLayouts: vi.fn() } as never, {
+      onThemeBound: async () => { throw new Error("private SQL and bearer token"); },
+    });
+    await expect(session.tools[0]!.execute("bind", { theme: "theme12", queries: [{ intent: "任务" }] })).rejects.toThrow("presentation_theme_binding_failed");
+    expect(session.getTheme()).toBeUndefined();
+    expect(safeDashiPlanningError(session.getTerminalError())).toMatchObject({ code: "presentation_theme_binding_failed", terminal: true });
+    expect(String(session.getTerminalError())).not.toContain("private");
+    await expect(session.tools[0]!.execute("repeat", { theme: "theme01", queries: [{ intent: "任务" }] })).rejects.toThrow("presentation_theme_binding_failed");
+    expect(queryLayouts).not.toHaveBeenCalled();
+  });
+
+  it("allows one contract correction then keeps a terminal failure for the native executor", async () => {
+    const queryLayouts = vi.fn();
+    const session = createPiDashiPlanningSession({ queryLayouts, inspectLayouts: vi.fn() } as never);
+    await expect(session.tools[0]!.execute("first", { queries: [{ intent: "任务" }] })).rejects.toThrow("presentation_theme_required");
+    expect(session.getTerminalError()).toBeNull();
+    await expect(session.tools[0]!.execute("second", { theme: "theme99", queries: [{ intent: "任务" }] })).rejects.toThrow("presentation_planning_blocked");
+    const terminal = session.getTerminalError();
+    await expect(session.tools[0]!.execute("third", { theme: "theme10", queries: [{ intent: "任务" }] })).rejects.toBe(terminal);
+    await expect(session.tools[1]!.execute("inspect", { layouts: ["theme10_page001"] })).rejects.toBe(terminal);
+    expect(queryLayouts).not.toHaveBeenCalled();
+  });
+
+  it("requires inspection layouts to belong to the fixed theme before calling Dashi", async () => {
+    const inspectLayouts = vi.fn(async () => ({ layouts: [{ layout: "theme10_page001" }] }));
+    const session = createPiDashiPlanningSession({ queryLayouts: vi.fn(), inspectLayouts } as never, { theme: "theme10" });
+    await expect(session.tools[1]!.execute("wrong", { layouts: ["theme01_page001"] })).rejects.toThrow("presentation_theme_mismatch");
+    expect(inspectLayouts).not.toHaveBeenCalled();
+    await session.tools[1]!.execute("right", { layouts: ["theme10_page001"] });
+    expect(inspectLayouts).toHaveBeenCalledTimes(1);
+  });
+
+  it("reserves the first delegated theme while its persistence callback is pending", async () => {
+    let resolveBinding!: () => void;
+    const persist = vi.fn(() => new Promise<void>((resolve) => { resolveBinding = resolve; }));
+    const queryLayouts = vi.fn(async () => ({ layouts: [{ layout: "theme10_page001" }] }));
+    const session = createPiDashiPlanningSession({ queryLayouts, inspectLayouts: vi.fn() } as never, { onThemeBound: persist });
+    const first = session.tools[0]!.execute("first", { theme: "theme10", queries: [{ intent: "任务" }] });
+    await expect(session.tools[0]!.execute("race", { theme: "theme11", queries: [{ intent: "任务" }] })).rejects.toThrow("presentation_theme_mismatch");
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(queryLayouts).not.toHaveBeenCalled();
+    resolveBinding();await first;
+    expect(session.getTheme()).toBe("theme10");
+  });
+
   it("keeps the query tool schema identical whether or not a theme is already bound", () => {
     const dashi = {
       queryLayouts: async () => ({ layouts: [] }),
@@ -162,6 +255,7 @@ describe("Pi Dashi planning session", () => {
       session.tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters })),
     );
     expect(toolJson(bound)).toBe(toolJson(unbound));
-    expect(toolJson(bound)).not.toContain("theme09");
+    expect(toolJson(bound)).toContain("theme01");
+    expect(toolJson(bound)).toContain("theme12");
   });
 });

@@ -1,3 +1,4 @@
+import type { AgentPendingInteraction } from "../domain.js";
 import type { LearningCommand, LearningCursor, LearningEvidence, LearningInquiry, LearningRecord } from "../learning/domain.js";
 import type { DecisionCommand, DecisionCursor, DecisionEvent, DecisionRecord, EvidenceCard } from "../decisions/contracts.js";
 import { learningReviewContext } from "../learning/review-context.js";
@@ -75,6 +76,7 @@ import type {
   CreateThreadInput,
   ImportedNotebook,
   LessonRepository,
+  PresentationTaskOwnerInput,
 } from "../repository.js";
 import { createLessonPlanPreview } from "../../src/lib/lesson-preview.js";
 import { applySemesterFrameworkPatch } from "../semester-framework-patch.js";
@@ -1282,6 +1284,65 @@ export class MemoryLessonRepository implements LessonRepository {
     const updated = { ...branch, ...patch };
     this.branches.set(branchId, updated);
     return structuredClone(updated);
+  }
+
+  async bindPresentationTheme(args: Parameters<LessonRepository["bindPresentationTheme"]>[0]): Promise<boolean> {
+    const { expectedPending, theme } = args;
+    if (expectedPending.kind !== "presentation_generation"
+      || expectedPending.resourceId !== args.fileId
+      || expectedPending.documentVersion !== args.documentVersion
+      || !theme.trim() || theme !== theme.trim()
+      || (expectedPending.confirmedTheme !== undefined && expectedPending.confirmedTheme !== theme)) return false;
+    if (!this.presentationTaskOwner(args, expectedPending)) return false;
+    this.branches.set(args.branchId, { ...this.branches.get(args.branchId)!, pendingInteraction: structuredClone({ ...expectedPending, confirmedTheme: theme }) });
+    return true;
+  }
+
+  /** Ordinary chat may update the task, but only while this run still owns the
+   * branch and snapshot. A cancelled or replaced run cannot write a late task. */
+  async updatePresentationTask(args: Parameters<LessonRepository["updatePresentationTask"]>[0]): Promise<boolean> {
+    // A new task may start before it carries a resource binding, but a task
+    // that already names a lesson must still match this run's snapshot.
+    const clearingStaleTask = args.allowStaleSnapshot === true && args.pendingInteraction === null;
+    if (!clearingStaleTask && args.previousPending && (
+      args.previousPending.resourceId !== args.fileId
+      || args.previousPending.documentVersion !== args.documentVersion)) return false;
+    if (args.pendingInteraction && (
+      args.pendingInteraction.resourceId !== args.fileId
+      || args.pendingInteraction.documentVersion !== args.documentVersion
+    )) return false;
+    if (!this.presentationTaskOwner(args, args.previousPending, clearingStaleTask)) return false;
+    this.branches.set(args.branchId, {
+      ...this.branches.get(args.branchId)!,
+      pendingInteraction: args.pendingInteraction ? structuredClone(args.pendingInteraction) : null,
+    });
+    return true;
+  }
+
+  /** Shared ownership predicate for presentation-task writes. No await may sit
+   * between this check and the Map write. */
+  private presentationTaskOwner(
+    args: Omit<PresentationTaskOwnerInput, "expectedPending">,
+    current: AgentPendingInteraction | null,
+    allowStaleSnapshot = false,
+  ) {
+    const branch = this.branches.get(args.branchId);
+    const thread = this.threads.get(args.threadId);
+    const run = this.runs.get(args.runId);
+    const file = this.files.get(key(args.ownerId, args.fileId));
+    if (!branch || branch.ownerId !== args.ownerId || branch.threadId !== args.threadId
+      // Branch records may omit the field entirely when no task exists; both
+      // stores must compare the same logical "no pending task" value.
+      || JSON.stringify(branch.pendingInteraction ?? null) !== JSON.stringify(current)
+      || !thread || thread.ownerId !== args.ownerId || thread.deletedAt
+      || thread.resourceType !== "lesson_file" || thread.lessonFileId !== args.fileId
+      || !file || file.ownerId !== args.ownerId || file.notebookId !== thread.notebookId
+      || !this.notebooks.has(key(args.ownerId, file.notebookId))
+      || (!allowStaleSnapshot && file.documentVersion !== args.documentVersion)
+      || !run || run.ownerId !== args.ownerId || run.threadId !== args.threadId || run.branchId !== args.branchId
+      || run.status !== "running" || run.leaseToken !== args.leaseToken || run.cancelRequestedAt != null
+      || !run.leaseExpiresAt || !(Date.parse(run.leaseExpiresAt) > Date.now())) return false;
+    return true;
   }
 
   async listMessages(ownerId: string, threadId: string, branchId: string, cursor?: string, limit = 100) {

@@ -32,6 +32,7 @@ function proposalTool(plan: CapabilityPlan, documentVersion = 4) {
   return { ...createPiDocumentProposalTool({ repository, context, plan }), getLessonFile, listRunEvidence, document };
 }
 const coherentRevision = {
+  readingEmphasis: { kind: "not_needed", reason: "本次同步评分判据，短句已能清楚表达。" },
   summary: "同步过程评分和出口条的解释判据",
   operations: [
     { field: "process", replacement: "独立解释后按具体证据与效果联系记录，交流后再修订。" },
