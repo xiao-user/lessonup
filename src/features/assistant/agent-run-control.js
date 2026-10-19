@@ -244,8 +244,8 @@ export function presentAgentError(error) {
       retryLabel: "基于当前教案重新生成",
     },
     presentation_theme_binding_failed: {
-      message: "演示主题未能保存，本轮已停止。当前演示任务已保留，可以稍后继续。",
-      retryLabel: "继续当前演示",
+      message: "演示任务或主题未能保存，本轮已停止。请稍后重试；若任务无法接续，请基于当前教案重新发起演示生成。",
+      retryLabel: "重试演示生成",
     },
     presentation_planning_blocked: {
       message: "演示主题校验重复失败，本轮已停止。请核对主题后继续当前演示任务。",

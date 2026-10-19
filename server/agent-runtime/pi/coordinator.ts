@@ -383,9 +383,6 @@ export class PiLessonAgentCoordinator {
         ), input.taskIntent);
         const branch = await this.repository.getBranch(input.userId, input.threadId, input.branchId);
         if (!branch) throw new Error("thread_scope_invalid");
-        if (plan.taskIntent && branch.pendingInteraction) {
-          await this.repository.updateBranch(input.userId, input.threadId, input.branchId, { pendingInteraction: null });
-        }
         const scopedPending = branch.pendingInteraction && !branch.pendingInteraction.resourceId
           && branch.pendingInteraction.documentVersion === currentLesson.documentVersion
           ? { ...branch.pendingInteraction, resourceId: currentLesson.lessonFileId }
@@ -401,31 +398,21 @@ export class PiLessonAgentCoordinator {
         const presentationRequest = presentationTurn?.presentationRequest
           ?? branch.pendingInteraction?.originalRequest
           ?? input.message;
-        if (presentationTurn && JSON.stringify(branch.pendingInteraction ?? null) !== JSON.stringify(presentationTurn.pendingInteraction)) {
+        const nextPending = plan.taskIntent ? null : presentationTurn?.pendingInteraction;
+        if (nextPending !== undefined && JSON.stringify(branch.pendingInteraction ?? null) !== JSON.stringify(nextPending)) {
           const transitioned = await this.repository.updatePresentationTask({
             ownerId: input.userId, threadId: input.threadId, branchId: input.branchId,
             runId, leaseToken, fileId: currentLesson.lessonFileId,
             documentVersion: currentLesson.documentVersion,
-            previousPending: scopedPending ?? branch.pendingInteraction ?? null,
-            pendingInteraction: presentationTurn.pendingInteraction,
-          }).catch(() => false);
-          // A cancelled or replaced run must not write a late task over the
-          // current one; refusing here is safer than a blind branch update.
-          if (!transitioned) controller.signal.throwIfAborted();
+            previousPending: branch.pendingInteraction ?? null,
+            pendingInteraction: nextPending,
+          });
+          if (!transitioned) {
+            controller.signal.throwIfAborted();
+            throw new Error("presentation_theme_binding_failed");
+          }
         }
-        if (presentationTurn?.expiredInteraction) {
-          // The stale task cannot be resumed against a newer snapshot, so it
-          // must not stay behind and report the same failure on every retry.
-          await this.repository.updatePresentationTask({
-            ownerId: input.userId, threadId: input.threadId, branchId: input.branchId,
-            runId, leaseToken, fileId: currentLesson.lessonFileId,
-            documentVersion: currentLesson.documentVersion,
-            previousPending: scopedPending ?? branch.pendingInteraction ?? null,
-            pendingInteraction: null,
-            allowStaleSnapshot: true,
-          }).catch(() => false);
-          throw new Error("presentation_task_stale");
-        }
+        if (presentationTurn?.expiredInteraction) throw new Error("presentation_task_stale");
         if (plan.presentationRequested && !this.dashi) {
           throw new Error("presentation_renderer_unavailable");
         }
@@ -752,7 +739,7 @@ export class PiLessonAgentCoordinator {
             sessionCursor: session?.messages.length ?? 0,
             skillVersions: {},
             emit,
-            clearPresentationPending: true,
+            clearPresentationPending: proposal.patchKind === "presentation_storyboard",
           });
           return;
         } catch {

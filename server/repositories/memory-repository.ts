@@ -1301,17 +1301,14 @@ export class MemoryLessonRepository implements LessonRepository {
   /** Ordinary chat may update the task, but only while this run still owns the
    * branch and snapshot. A cancelled or replaced run cannot write a late task. */
   async updatePresentationTask(args: Parameters<LessonRepository["updatePresentationTask"]>[0]): Promise<boolean> {
-    // A new task may start before it carries a resource binding, but a task
-    // that already names a lesson must still match this run's snapshot.
-    const clearingStaleTask = args.allowStaleSnapshot === true && args.pendingInteraction === null;
-    if (!clearingStaleTask && args.previousPending && (
-      args.previousPending.resourceId !== args.fileId
-      || args.previousPending.documentVersion !== args.documentVersion)) return false;
+    // The old task is compared exactly, including a superseded version. The
+    // owning run and replacement are still guarded by the current snapshot.
+    if (args.previousPending?.resourceId !== undefined && args.previousPending.resourceId !== args.fileId) return false;
     if (args.pendingInteraction && (
       args.pendingInteraction.resourceId !== args.fileId
       || args.pendingInteraction.documentVersion !== args.documentVersion
     )) return false;
-    if (!this.presentationTaskOwner(args, args.previousPending, clearingStaleTask)) return false;
+    if (!this.presentationTaskOwner(args, args.previousPending)) return false;
     this.branches.set(args.branchId, {
       ...this.branches.get(args.branchId)!,
       pendingInteraction: args.pendingInteraction ? structuredClone(args.pendingInteraction) : null,
@@ -1324,7 +1321,6 @@ export class MemoryLessonRepository implements LessonRepository {
   private presentationTaskOwner(
     args: Omit<PresentationTaskOwnerInput, "expectedPending">,
     current: AgentPendingInteraction | null,
-    allowStaleSnapshot = false,
   ) {
     const branch = this.branches.get(args.branchId);
     const thread = this.threads.get(args.threadId);
@@ -1338,7 +1334,7 @@ export class MemoryLessonRepository implements LessonRepository {
       || thread.resourceType !== "lesson_file" || thread.lessonFileId !== args.fileId
       || !file || file.ownerId !== args.ownerId || file.notebookId !== thread.notebookId
       || !this.notebooks.has(key(args.ownerId, file.notebookId))
-      || (!allowStaleSnapshot && file.documentVersion !== args.documentVersion)
+      || file.documentVersion !== args.documentVersion
       || !run || run.ownerId !== args.ownerId || run.threadId !== args.threadId || run.branchId !== args.branchId
       || run.status !== "running" || run.leaseToken !== args.leaseToken || run.cancelRequestedAt != null
       || !run.leaseExpiresAt || !(Date.parse(run.leaseExpiresAt) > Date.now())) return false;

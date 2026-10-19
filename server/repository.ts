@@ -145,14 +145,11 @@ export type UpdatePresentationTaskInput = Omit<BindPresentationThemeInput, "them
    * Concurrent writes compare against this, not against the new task. */
   previousPending: AgentPendingInteraction | null;
   pendingInteraction: AgentPendingInteraction | null;
-  /** Clearing a task whose lesson moved on is safe because it starts no work;
-   * the branch must still hold exactly that previous task. */
-  allowStaleSnapshot?: boolean;
 };
 
 /** Ownership guards shared by every presentation-task write. */
 export type PresentationTaskOwnerInput = Omit<BindPresentationThemeInput, "theme" | "expectedPending"> & {
-  expectedPending: AgentPendingInteraction;
+  expectedPending: AgentPendingInteraction | null;
 };
 
 export interface LessonRepository extends LearningRepository, DecisionRepository {

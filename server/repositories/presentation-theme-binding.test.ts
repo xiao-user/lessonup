@@ -12,7 +12,7 @@ const document = lessonPlanSchema.parse({ ...Object.fromEntries([
   "unit", "period", "totalPeriods", "objectives", "focus", "preparation", "assessment", "homework", "board", "reflection",
 ].map(field => [field, "教案内容"])), topic: "春", process: "比较两份回答并解释表达效果" });
 
-async function fixture(kind: "memory" | "sqlite", missingExpiry = false) {
+async function fixture(kind: "memory" | "sqlite", missingExpiry = false, seedTask = true) {
   let db: DatabaseSync | undefined;
   let repository: LessonRepository;
   let beforeBind: (() => Promise<void>) | undefined;
@@ -58,7 +58,7 @@ async function fixture(kind: "memory" | "sqlite", missingExpiry = false) {
     kind: "presentation_generation", originalRequest: "为这节课准备课堂演示", documentVersion: 0,
     resourceId: file.id, requestedAt: "2026-10-19T04:00:00.000Z", resumeReferenceRequired: false,
   };
-  await repository.updateBranch(ownerId, thread.id, branch.id, { pendingInteraction: expectedPending });
+  if (seedTask) await repository.updateBranch(ownerId, thread.id, branch.id, { pendingInteraction: expectedPending });
   const input: BindPresentationThemeInput = { ownerId, threadId: thread.id, branchId: branch.id, runId: run.id,
     leaseToken: "theme-lease", fileId: file.id, documentVersion: 0, expectedPending, theme: "theme09" };
   const pending = async () => (await repository.getBranch(ownerId, thread.id, branch.id))!.pendingInteraction;
@@ -230,6 +230,175 @@ describe("SQLite theme binding submission races", () => {
       expect(await f.repository.bindPresentationTheme(f.input)).toBe(false);
       expect(f.bindingStatements).toHaveLength(1);
       expect(await f.pending()).toEqual(replacement ?? f.input.expectedPending);
+    } finally { f.db?.close(); }
+  });
+});
+
+type TaskFixture = Awaited<ReturnType<typeof fixture>>;
+const transition = (f: TaskFixture, previousPending: AgentPendingInteraction | null, pendingInteraction: AgentPendingInteraction | null,
+  overrides: Partial<Parameters<LessonRepository["updatePresentationTask"]>[0]> = {}) => f.repository.updatePresentationTask({
+  ...f.input, previousPending, pendingInteraction, ...overrides,
+});
+const themeQuestion = (f: TaskFixture): AgentPendingInteraction => ({ ...f.input.expectedPending, kind: "presentation_theme" });
+const advanceDocument = (f: TaskFixture) => f.repository.saveLessonDocument({ ownerId, fileId: f.file.id, baseVersion: 0,
+  document: { ...document, process: "教师已更新课堂设计" }, pageCount: 1, source: "manual", idempotencyKey: "task-lifecycle-version" });
+
+for (const kind of ["memory", "sqlite"] as const) describe(`${kind} presentation task lifecycle`, () => {
+  it("creates the first theme question from an untouched branch with no pending task", async () => {
+    const f = await fixture(kind, false, false);
+    try {
+      expect(await f.pending() ?? null).toBeNull();
+      if (f.db) expect(f.db.prepare("SELECT pending_interaction_json AS pending FROM agent_branches WHERE id = ?").get(f.branch.id)?.pending).toBeNull();
+      const asking = themeQuestion(f);
+      expect(await transition(f, null, asking)).toBe(true);
+      expect(await f.pending()).toEqual(asking);
+      expect(f.bindingStatements).toHaveLength(kind === "sqlite" ? 1 : 0);
+    } finally { f.db?.close(); }
+  });
+
+  it("clears to canonical null and then creates a fresh task", async () => {
+    const f = await fixture(kind);
+    try {
+      expect(await transition(f, f.input.expectedPending, null)).toBe(true);
+      expect(await f.pending()).toBeNull();
+      if (f.db) expect(f.db.prepare("SELECT pending_interaction_json AS pending FROM agent_branches WHERE id = ?").get(f.branch.id)?.pending).toBeNull();
+      const next = { ...themeQuestion(f), requestedAt: "2026-10-19T09:40:00.000Z" };
+      expect(await transition(f, null, next)).toBe(true);
+      expect(await f.pending()).toEqual(next);
+    } finally { f.db?.close(); }
+  });
+
+  it("persists theme question, generation, first binding, failure, and retry under a new run", async () => {
+    const f = await fixture(kind, false, false);
+    try {
+      const asking = themeQuestion(f);
+      expect(await transition(f, null, asking)).toBe(true);
+      const generation = { ...asking, kind: "presentation_generation" as const };
+      expect(await transition(f, asking, generation)).toBe(true);
+      expect(await f.pending()).toEqual(generation);
+      expect(await f.repository.bindPresentationTheme({ ...f.input, expectedPending: generation })).toBe(true);
+      const bound = { ...generation, confirmedTheme: f.input.theme };
+      expect(await f.pending()).toEqual(bound);
+      await f.repository.updateRun(ownerId, f.run.id, { status: "failed" });
+      const retry = await f.repository.createRun({ ...f.run, id: crypto.randomUUID(), leaseToken: "retry-lease",
+        leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() });
+      const retryOwner = { runId: retry.id, leaseToken: "retry-lease" };
+      const marked = { ...bound, resumeReferenceRequired: true };
+      expect(await transition(f, bound, marked, retryOwner)).toBe(true);
+      expect(await f.repository.bindPresentationTheme({ ...f.input, ...retryOwner, expectedPending: marked })).toBe(true);
+      expect(await f.pending()).toEqual(marked);
+      expect(await f.repository.bindPresentationTheme({ ...f.input, ...retryOwner, expectedPending: marked, theme: "theme03" })).toBe(false);
+      expect(await transition(f, marked, null)).toBe(false); // Failed original run cannot clear the retry's task.
+      expect(await f.pending()).toEqual(marked);
+    } finally { f.db?.close(); }
+  });
+
+  it.each(["create", "replace", "clear"] as const)("rejects cancellation before %s without changing the branch", async operation => {
+    const f = await fixture(kind, false, operation !== "create");
+    try {
+      const previous = await f.pending() ?? null;
+      expect(await f.repository.requestRunCancellation(ownerId, f.run.id)).toBe(true);
+      expect(await transition(f, previous, operation === "clear" ? null : themeQuestion(f))).toBe(false);
+      expect(await f.pending() ?? null).toEqual(previous);
+    } finally { f.db?.close(); }
+  });
+
+  it.each(["replace", "clear"] as const)("rejects a stale %s after another task won the branch", async operation => {
+    const f = await fixture(kind, false, false);
+    try {
+      const first = themeQuestion(f);
+      expect(await transition(f, null, first)).toBe(true);
+      const replacement = { ...first, originalRequest: "改为单元复习演示", requestedAt: "2026-10-19T09:41:00.000Z" };
+      expect(await transition(f, first, replacement)).toBe(true);
+      expect(await transition(f, first, operation === "clear" ? null : f.input.expectedPending)).toBe(false);
+      expect(await f.pending()).toEqual(replacement);
+    } finally { f.db?.close(); }
+  });
+
+  it.each(["clear", "replace"] as const)("allows a current-snapshot run to %s an exact old-version task", async operation => {
+    const f = await fixture(kind);
+    try {
+      await advanceDocument(f);
+      const next = operation === "clear" ? null : { ...themeQuestion(f), documentVersion: 1 };
+      expect(await transition(f, f.input.expectedPending, next, { documentVersion: 1 })).toBe(true);
+      expect(await f.pending()).toEqual(next);
+      if (operation === "clear") {
+        const fresh = { ...themeQuestion(f), documentVersion: 1 };
+        expect(await transition(f, null, fresh, { documentVersion: 1 })).toBe(true);
+        expect(await f.pending()).toEqual(fresh);
+      }
+    } finally { f.db?.close(); }
+  });
+
+  it.each(["clear", "replace"] as const)("prevents an old-snapshot run from using %s to mutate tasks", async operation => {
+    const f = await fixture(kind);
+    try {
+      await advanceDocument(f);
+      expect(await transition(f, f.input.expectedPending, operation === "clear" ? null : themeQuestion(f))).toBe(false);
+      expect(await f.pending()).toEqual(f.input.expectedPending);
+    } finally { f.db?.close(); }
+  });
+
+  it("compares the actual legacy resource-less task before upgrading it", async () => {
+    const f = await fixture(kind);
+    try {
+      const legacy = { ...themeQuestion(f) };
+      delete legacy.resourceId;
+      await f.repository.updateBranch(ownerId, f.thread.id, f.branch.id, { pendingInteraction: legacy });
+      const upgraded = { ...legacy, resourceId: f.file.id, kind: "presentation_generation" as const };
+      expect(await transition(f, { ...legacy, resourceId: f.file.id }, upgraded)).toBe(false);
+      expect(await f.pending()).toEqual(legacy);
+      expect(await transition(f, legacy, upgraded)).toBe(true);
+      expect(await f.pending()).toEqual(upgraded);
+      expect(await f.repository.bindPresentationTheme({ ...f.input, expectedPending: upgraded })).toBe(true);
+      expect(await f.pending()).toEqual({ ...upgraded, confirmedTheme: f.input.theme });
+    } finally { f.db?.close(); }
+  });
+
+  it("rejects previous or replacement tasks for a different resource or an outdated next version", async () => {
+    const f = await fixture(kind);
+    try {
+      expect(await transition(f, { ...f.input.expectedPending, resourceId: "another-file" }, null)).toBe(false);
+      expect(await transition(f, f.input.expectedPending, { ...themeQuestion(f), resourceId: "another-file" })).toBe(false);
+      await advanceDocument(f);
+      expect(await transition(f, f.input.expectedPending, themeQuestion(f), { documentVersion: 1 })).toBe(false);
+      expect(await f.pending()).toEqual(f.input.expectedPending);
+    } finally { f.db?.close(); }
+  });
+});
+
+it("SQLite recreates a task from the historical JSON literal null", async () => {
+  const f = await fixture("sqlite", false, false);
+  try {
+    f.db!.prepare("UPDATE agent_branches SET pending_interaction_json = 'null' WHERE id = ?").run(f.branch.id);
+    expect(f.db!.prepare("SELECT pending_interaction_json AS pending FROM agent_branches WHERE id = ?").get(f.branch.id)?.pending).toBe("null");
+    expect(await f.pending()).toBeNull();
+    const asking = themeQuestion(f);
+    expect(await transition(f, null, asking)).toBe(true);
+    expect(await f.pending()).toEqual(asking);
+    expect(await transition(f, asking, null)).toBe(true);
+    expect(f.db!.prepare("SELECT pending_interaction_json AS pending FROM agent_branches WHERE id = ?").get(f.branch.id)?.pending).toBeNull();
+    expect(await transition(f, null, asking)).toBe(true);
+  } finally { f.db?.close(); }
+});
+
+describe("SQLite first presentation task submission races", () => {
+  it.each(["cancellation", "task-replacement", "document-version", "lease-replacement"] as const)("rejects first creation if %s commits before its UPDATE", async mutation => {
+    const f = await fixture("sqlite", false, false);
+    try {
+      let replacement: AgentPendingInteraction | null = null;
+      f.beforeBind(async () => {
+        if (mutation === "cancellation") await f.repository.requestRunCancellation(ownerId, f.run.id);
+        if (mutation === "document-version") await advanceDocument(f);
+        if (mutation === "lease-replacement") await f.repository.updateRun(ownerId, f.run.id, { leaseToken: "successor-lease" });
+        if (mutation === "task-replacement") {
+          replacement = { ...themeQuestion(f), originalRequest: "较新的课堂演示任务" };
+          expect(await transition(f, null, replacement)).toBe(true);
+        }
+      });
+      expect(await transition(f, null, themeQuestion(f))).toBe(false);
+      expect(await f.pending() ?? null).toEqual(replacement);
+      expect(f.bindingStatements).toHaveLength(mutation === "task-replacement" ? 2 : 1);
     } finally { f.db?.close(); }
   });
 });

@@ -55,11 +55,6 @@ export class PiApprovalWorkflow {
     let approval = pending.find((item) => (
       item.runId === args.runId && item.toolCallId === args.proposal.toolCallId
     ));
-    if (args.clearPresentationPending) {
-      await this.repository.updateBranch(args.userId, args.threadId, args.branchId, {
-        pendingInteraction: null,
-      });
-    }
     if (!approval) {
       approval = {
         id: crypto.randomUUID(),
@@ -88,6 +83,20 @@ export class PiApprovalWorkflow {
         createdAt: new Date().toISOString(),
       };
       await this.repository.saveApproval(approval);
+    }
+    if (args.clearPresentationPending && isPresentationGoalPatch(args.proposal.patch) && args.proposal.lessonFileId) {
+      const branch = await this.repository.getBranch(args.userId, args.threadId, args.branchId);
+      if (!branch) throw new Error("thread_scope_invalid");
+      if (branch.pendingInteraction) {
+        const cleared = await this.repository.updatePresentationTask({
+          ownerId: args.userId, threadId: args.threadId, branchId: args.branchId,
+          runId: args.runId, leaseToken: args.leaseToken, fileId: args.proposal.lessonFileId,
+          documentVersion: args.proposal.baseResourceVersion,
+          previousPending: branch.pendingInteraction,
+          pendingInteraction: null,
+        });
+        if (!cleared) throw new Error("presentation_theme_binding_failed");
+      }
     }
     if (args.settle !== false) {
       await this.repository.settleRun({

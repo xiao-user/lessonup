@@ -5,7 +5,6 @@ import type {
   AgentResourceRef,
   AgentRunRecord,
   AgentThreadRecord,
-  AgentPendingInteraction,
   NormalizedAgentEvent,
   ResourcePatch,
   SourceRef,
@@ -251,34 +250,28 @@ export class D1AgentRuntimeStore implements AgentRuntimeStore {
    * cannot write a late task over the current one. */
   async updatePresentationTask(args: Parameters<LessonRepository["updatePresentationTask"]>[0]): Promise<boolean> {
     const { previousPending, pendingInteraction } = args;
-    // A fresh task begins unbound; once it names a lesson, both sides of the
-    // transition must still match this run's canonical snapshot. Clearing a
-    // task that a newer lesson snapshot superseded starts no work, so only the
-    // exact previous task on the branch has to match.
-    const clearingStaleTask = args.allowStaleSnapshot === true && pendingInteraction === null;
-    if (!clearingStaleTask && previousPending && (
-      previousPending.resourceId !== args.fileId
-      || previousPending.documentVersion !== args.documentVersion)) return false;
+    // The previous task is the CAS identity, even when it belongs to an older
+    // document version. The owning run and the new task must use the current
+    // canonical snapshot; this permits safe stale-task cleanup and replacement.
+    if (previousPending?.resourceId !== undefined && previousPending.resourceId !== args.fileId) return false;
     if (pendingInteraction && (
       pendingInteraction.resourceId !== args.fileId
       || pendingInteraction.documentVersion !== args.documentVersion)) return false;
     return this.compareAndSetPresentationTask(
-      { ...args, expectedPending: previousPending as AgentPendingInteraction },
+      { ...args, expectedPending: previousPending },
       pendingInteraction ? JSON.stringify(pendingInteraction) : null,
-      clearingStaleTask,
     );
   }
 
   private async compareAndSetPresentationTask(
     args: PresentationTaskOwnerInput,
     pendingJson: string | null,
-    allowStaleSnapshot = false,
   ): Promise<boolean> {
     const result = await this.database.query({
       sql: `UPDATE agent_branches
         SET pending_interaction_json = ?
         WHERE owner_id = ? AND thread_id = ? AND id = ?
-          AND pending_interaction_json = ?
+          AND COALESCE(pending_interaction_json, 'null') = ?
           AND EXISTS (
             SELECT 1 FROM agent_runs r
             JOIN agent_threads t ON t.id = r.thread_id AND t.owner_id = r.owner_id
@@ -289,11 +282,10 @@ export class D1AgentRuntimeStore implements AgentRuntimeStore {
               AND r.id = ? AND r.status = 'running' AND r.lease_token = ?
               AND r.cancel_requested_at IS NULL AND r.lease_expires_at > ?
               AND t.resource_type = 'lesson_file' AND t.deleted_at IS NULL
-              AND f.id = ?${allowStaleSnapshot ? "" : " AND f.document_version = ?"}
+              AND f.id = ? AND f.document_version = ?
           )`,
       params: [pendingJson, args.ownerId, args.threadId, args.branchId, JSON.stringify(args.expectedPending),
-        args.runId, args.leaseToken, this.clock(), args.fileId,
-        ...(allowStaleSnapshot ? [] : [args.documentVersion])],
+        args.runId, args.leaseToken, this.clock(), args.fileId, args.documentVersion],
     });
     return result.rowsAffected === 1;
   }

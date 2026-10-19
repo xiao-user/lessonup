@@ -2,7 +2,7 @@ import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it, vi } from "vitest";
-import type { LessonPlan } from "../../domain.js";
+import type { AgentPendingInteraction, LessonPlan } from "../../domain.js";
 import type { DashiGoal } from "../../presentations/dashi-goal.js";
 import { MemoryLessonRepository } from "../../repositories/memory-repository.js";
 import { PresentationService } from "../../presentations/service.js";
@@ -1271,6 +1271,117 @@ describe("Pi production coordinator", () => {
     expect(await repository.getLessonFile(ownerId, lessonFileId)).toMatchObject({ documentVersion: 1 });
   });
 
+  for (const timing of ["before", "after"] as const) it.each(["cancelled", "lease-replaced"] as const)(`preserves the presentation task when %s wins ${timing} saving its approval`, async invalidation => {
+    const { repository, created, faux, coordinator, calls } = await fixture();
+    let proposedPending: AgentPendingInteraction | null = null;
+    let pendingAtInvalidation: AgentPendingInteraction | null = null;
+    let replacement: AgentPendingInteraction | null = null;
+    let invalidatedRunId = "";
+    let hookRan = false;
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("read_document", {}), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("inspect_dashi_layouts", { layouts: goal.slides.map(slide => slide.layout) }), { stopReason: "toolUse" }),
+      async () => {
+        proposedPending = structuredClone((await repository.getBranch(ownerId, created.thread.id, created.branch.id))!.pendingInteraction ?? null);
+        return fauxAssistantMessage(fauxToolCall("propose_classroom_presentation", presentationProposal(goal, "三页课堂演示待确认")), { stopReason: "toolUse" });
+      },
+    ]);
+    const originalSave = repository.saveApproval.bind(repository);
+    vi.spyOn(repository, "saveApproval").mockImplementationOnce(async approval => {
+      const invalidate = async () => {
+        hookRan = true;
+        invalidatedRunId = approval.runId;
+        pendingAtInvalidation = structuredClone((await repository.getBranch(ownerId, created.thread.id, created.branch.id))!.pendingInteraction ?? null);
+        if (invalidation === "cancelled") await repository.requestRunCancellation(ownerId, approval.runId);
+        else {
+          await repository.updateRun(ownerId, approval.runId, { leaseToken: "successor-lease" });
+          replacement = { kind: "presentation_theme", originalRequest: "教师较新的复习课堂演示任务",
+            resourceId: lessonFileId, documentVersion: 0, requestedAt: "2026-10-19T10:00:00.000Z" };
+          await repository.updateBranch(ownerId, created.thread.id, created.branch.id, { pendingInteraction: replacement });
+        }
+      };
+      if (timing === "before") await invalidate();
+      const saved = await originalSave(approval);
+      if (timing === "after") await invalidate();
+      return saved;
+    });
+    const events: string[] = [];
+    await coordinator.start({ userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
+      message: "请基于当前教案生成课堂 PPT，使用 theme01。", activeSectionId: "process", documentVersion: 0, attachmentIds: [],
+    }, event => { events.push(event.type); });
+    expect(hookRan).toBe(true);
+    expect(proposedPending).toMatchObject({ kind: "presentation_generation", confirmedTheme: "theme01", resourceId: lessonFileId });
+    expect(pendingAtInvalidation).toEqual(proposedPending); // Cleanup must not happen before saveApproval succeeds.
+    expect((await repository.getBranch(ownerId, created.thread.id, created.branch.id))!.pendingInteraction)
+      .toEqual(replacement ?? proposedPending);
+    // The captured proposal may already have a durable approval card before
+    // final settlement; task cleanup must still reject the invalidated owner.
+    expect(events).not.toContain("run.completed");
+    expect(calls).not.toContain("render");
+    const interruptedRun = await repository.getRun(ownerId, invalidatedRunId);
+    if (invalidation === "cancelled") expect(interruptedRun!.cancelRequestedAt).toBeTruthy();
+    else expect(interruptedRun!.leaseToken).toBe("successor-lease");
+    expect((await repository.getLessonFile(ownerId, lessonFileId))!.documentVersion).toBe(0);
+  });
+
+  it("recovers a document proposal after the first approval save fails without clearing a suspended presentation task", async () => {
+    const { repository, created, faux, coordinator, calls } = await fixture();
+    const suspended: AgentPendingInteraction = { kind: "presentation_generation", originalRequest: "为济南的冬天准备课堂演示",
+      resourceId: lessonFileId, documentVersion: 0, confirmedTheme: "theme09", requestedAt: "2026-10-19T09:55:00.000Z",
+      resumeReferenceRequired: true };
+    await repository.updateBranch(ownerId, created.thread.id, created.branch.id, { pendingInteraction: suspended });
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("read_document", { fields: ["assessment"] }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("propose_document_patch", {
+        readingEmphasis: { kind: "not_needed", reason: "本次仅明确评价产出，无需新增阅读笔迹。" }, summary: "调整评价练习",
+        operations: [{ field: "assessment", replacement: "学生提交两处景物证据，并解释其与温晴特征的联系。" }],
+      }), { stopReason: "toolUse" }),
+    ]);
+    const originalSave = repository.saveApproval.bind(repository);
+    const save = vi.spyOn(repository, "saveApproval");
+    save.mockRejectedValueOnce(new Error("first_approval_save_unavailable"));
+    save.mockImplementation(approval => originalSave(approval));
+    const transitions = vi.spyOn(repository, "updatePresentationTask");
+    const events: string[] = [];
+    await coordinator.start({ userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
+      message: "请修改评价练习，让它检验学生用文本证据解释景物特征。", activeSectionId: "assessment", documentVersion: 0, attachmentIds: [],
+    }, event => { events.push(event.type); });
+    expect(save).toHaveBeenCalledTimes(2);
+    const approvals = await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id);
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]).toMatchObject({ patchKind: "document", patch: { operations: [{ field: "assessment" }] } });
+    expect((await repository.getBranch(ownerId, created.thread.id, created.branch.id))!.pendingInteraction).toEqual(suspended);
+    expect(transitions.mock.calls.some(([input]) => input.pendingInteraction === null)).toBe(false);
+    expect(events).toContain("approval.required");
+    expect(events).not.toContain("run.failed");
+    expect((await repository.getRun(ownerId, approvals[0]!.runId))!.status).toBe("completed");
+    expect((await repository.getLessonFile(ownerId, lessonFileId))!.documentVersion).toBe(0);
+    expect(calls).not.toContain("render");
+  });
+
+  it.each(["refused", "unavailable"] as const)("stops before asking a theme when task persistence is %s", async (failure) => {
+    const { repository, created, faux, coordinator, calls } = await fixture();
+    const write = vi.spyOn(repository, "updatePresentationTask");
+    if (failure === "refused") write.mockResolvedValue(false);
+    else write.mockRejectedValue(new Error("private_database_failure"));
+    const provider = vi.fn(() => fauxAssistantMessage("请选择主题。"));
+    faux.setResponses([provider]);
+    await coordinator.start({
+      userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
+      message: "请基于当前教案生成课堂 PPT。", activeSectionId: "process",
+      documentVersion: 0, attachmentIds: [],
+    }, () => undefined);
+    expect(write).toHaveBeenCalledWith(expect.objectContaining({ previousPending: null }));
+    expect(provider).not.toHaveBeenCalled();
+    expect(calls).toEqual([]);
+    expect((await repository.getBranch(ownerId, created.thread.id, created.branch.id))?.pendingInteraction ?? null).toBeNull();
+    expect(await repository.getLatestRun(ownerId, created.thread.id, created.branch.id))
+      .toMatchObject({ status: "failed" });
+    const messages = await repository.listMessages(ownerId, created.thread.id, created.branch.id);
+    expect(messages.at(-1)?.content).not.toContain("请选择主题");
+    expect(messages.at(-1)?.content).not.toContain("private_database_failure");
+  });
+
   it("persists theme confirmation per branch and does not treat an acknowledgement as generation consent", async () => {
     const { repository, created, faux, coordinator, calls } = await fixture();
     faux.setResponses([
@@ -1361,6 +1472,7 @@ describe("Pi production coordinator", () => {
       source: "manual",
       idempotencyKey: "theme-choice-autosave",
     });
+    let expiredChoiceRunId = "";
     await coordinator.start({
       userId: ownerId,
       threadId: created.thread.id,
@@ -1369,8 +1481,9 @@ describe("Pi production coordinator", () => {
       activeSectionId: "process",
       documentVersion: 1,
       attachmentIds: [],
-    }, () => undefined);
-    expect(await repository.getLatestRun(ownerId, created.thread.id, created.branch.id))
+    }, event => { if (event.type === "run.started") expiredChoiceRunId = event.runId; });
+    expect(expiredChoiceRunId).toBeTruthy();
+    expect(await repository.getRun(ownerId, expiredChoiceRunId))
       .toMatchObject({ status: "failed", error: "presentation_task_stale" });
     expect((await repository.getBranch(ownerId, created.thread.id, created.branch.id))?.pendingInteraction).toBeNull();
     expect(await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id)).toEqual([]);
