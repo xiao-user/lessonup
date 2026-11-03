@@ -60,7 +60,7 @@ export function useLessonPaperTransition({ rootRef, scrollRef, sourceElement }) 
       gsap.set(sheet, { ...pose(to, from), backgroundColor: sourcePaper, borderRadius: 3 });
       gsap.set(backdrop, { opacity: 0 });
       gsap.set([...content, ...rails], { autoAlpha: 0 });
-      gsap.set(secondary, { autoAlpha: 0, y: 24 });
+      if (secondary.length) gsap.set(secondary, { autoAlpha: 0, y: 24 });
       timeline = gsap.timeline({ onComplete: () => settled(elements) })
         .to(backdrop, { opacity: 1, duration: 0.58, ease: "power2.inOut" }, 0)
         .to(sheet, { x: 0, y: 0, scaleX: 1, scaleY: 1, backgroundColor: finalPaper, borderRadius: finalRadius, duration: 0.82, ease: "power2.inOut" }, 0)

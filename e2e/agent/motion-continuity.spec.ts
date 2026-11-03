@@ -1,5 +1,5 @@
 import { expect, test } from './fixtures.js';
-import { initialNotebookGraph } from './test-data.js';
+import { initialDocument, initialNotebookGraph, lessonFileId } from './test-data.js';
 
 test.use({ contextOptions: { reducedMotion: 'no-preference' } });
 
@@ -136,4 +136,34 @@ test('paper transition settles on resize and keeps mobile drawers usable', async
   await expect(page.locator('.lesson-sheet-frame').first()).toHaveCSS('position', 'relative');
   await page.goBack();
   await expect(workspace).toHaveCount(0);
+});
+
+test('single-sheet detail opens and returns without empty animation targets', async ({ collectionPage: page }) => {
+  const warnings: string[] = [];
+  page.on('console', message => {
+    if (message.type() === 'warn') warnings.push(message.text());
+  });
+  const file = await (await page.request.get(`/api/lesson-files/${lessonFileId}`)).json();
+  const saved = await page.request.patch(`/api/lesson-files/${lessonFileId}/document`, {
+    headers: { 'idempotency-key': crypto.randomUUID() },
+    data: {
+      baseVersion: file.documentVersion,
+      document: { ...initialDocument, objectives: '理解消息的结构。', focus: '', preparation: '',
+        process: '圈画导语并说明作用。', assessment: '用一句话复述消息。', homework: '', board: '', reflection: '' },
+      pageCount: 1, source: 'manual',
+    },
+  });
+  expect(saved.ok()).toBeTruthy();
+  await page.reload();
+  await page.getByRole('button', { name: '打开语文备课本', exact: true }).click();
+  const paper = page.getByRole('button', { name: '打开备课文件春日的第一声鸟鸣', exact: true });
+  await expect(paper).toHaveAttribute('tabindex', '0');
+  await paper.click();
+  const workspace = page.locator('.lesson-file-workspace');
+  await expect(workspace).toHaveAttribute('data-motion', 'idle');
+  await expect(workspace.locator('.lesson-sheet-frame')).toHaveCount(1);
+  await page.getByRole('button', { name: /返回备课本/ }).click();
+  await expect(workspace).toHaveCount(0);
+  await expect(paper).toBeFocused();
+  expect(warnings.filter(message => /GSAP target.*not found/.test(message))).toEqual([]);
 });
