@@ -33,8 +33,6 @@
   --line: oklch(0.946 0.003 264.542);
   --line-strong: oklch(0.912 0.005 258.326);
   --field: oklch(0.961 0.001 286.375);
-  --stripe: oklch(0.405 0 0 / 0.075);
-  --stripe-bg: oklch(0.97 0 0);
 
   /* accent */
   --accent: oklch(0.626 0.205 254.947);
@@ -81,8 +79,6 @@
   --line: oklch(0.308 0.006 258.354);
   --line-strong: oklch(0.356 0.007 264.474);
   --field: oklch(0.293 0.006 271.223);
-  --stripe: oklch(1 0 0 / 0.055);
-  --stripe-bg: oklch(0.226 0.004 264.485);
 
   --accent: oklch(0.68 0.173 253.301);
   --accent-ink: oklch(0.788 0.113 248.33);
@@ -173,16 +169,7 @@ html {
 }
 
 body {
-  background-color: var(--stripe-bg);
-  background-image: repeating-linear-gradient(
-    -45deg,
-    transparent 0,
-    transparent 7px,
-    var(--stripe) 7px,
-    var(--stripe) 8px
-  );
-  /* Pin the stripe pattern to the viewport so it stays put on scroll. */
-  background-attachment: fixed;
+  background-color: var(--app-background);
   color: var(--ink);
   font-feature-settings: "cv11", "ss01";
   font-size: 14px;

@@ -8,11 +8,11 @@
   --neutral: #f2f2f2;
   --background-100: #ffffff;
   --background-200: #fafafa;
-  --app-background: #fffbfa;
-  --app-background-clear: rgb(255 251 250 / 0%);
+  --app-background: #f1f2f5;
+  --app-background-clear: rgb(241 242 245 / 0%);
 
   /* Canvas workspaces: neutral worktable and independent paper/panels. */
-  --workspace-canvas: #f1f2f5;
+  --workspace-canvas: var(--app-background);
   --workspace-panel: #ffffff;
   --workspace-line: #e4e6eb;
   --workspace-muted: #737984;
@@ -207,7 +207,7 @@
 }
 
 .dark {
-  --workspace-canvas: #111215;
+  --workspace-canvas: var(--app-background);
   --workspace-panel: #1a1b1f;
   --workspace-line: #2b2d33;
   --workspace-muted: #9b9fa9;
@@ -220,8 +220,8 @@
   --neutral: #1a1a1a;
   --background-100: #000000;
   --background-200: #000000;
-  --app-background: var(--background-100);
-  --app-background-clear: rgb(0 0 0 / 0%);
+  --app-background: #111215;
+  --app-background-clear: rgb(17 18 21 / 0%);
   --lesson-paper: #141414;
   --lesson-paper-ink: #ededed;
   --lesson-grid-line: #878787;
