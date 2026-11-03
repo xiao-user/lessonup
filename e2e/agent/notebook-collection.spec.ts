@@ -479,6 +479,7 @@ test("turns real lesson-file pages and restores an independently routed detail",
     await expect(page.locator(".lesson-file-identity h1")).toHaveCount(0);
     await expect(page.locator(".lesson-save-status")).toContainText("已自动保存");
     await expect(page.getByRole("button", { name: "撤销", exact: true })).toHaveCSS("height", "40px");
+    await page.getByRole("button", { name: "显示教案目录", exact: true }).click();
     const anchorWidths = await page.locator(".lesson-anchor-mark").evaluateAll((marks) =>
       marks.slice(0, 3).map((mark) => window.getComputedStyle(mark).width),
     );

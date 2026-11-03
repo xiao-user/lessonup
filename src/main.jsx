@@ -4,6 +4,7 @@ import { ThemeProvider } from "next-themes";
 import { App } from "./App.jsx";
 import { AuthBoundary } from "./features/auth/auth-boundary.jsx";
 import "./styles.css";
+import "./styles/workspace-canvas.css";
 
 createRoot(document.getElementById("root")).render(
   <ThemeProvider attribute="class" defaultTheme="system" enableSystem>

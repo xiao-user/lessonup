@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   BookOpen,
@@ -6,11 +6,12 @@ import {
   ChevronRight,
   FilePlus2,
   Link2,
-  List,
   LoaderCircle,
   MessageCircle,
   MessageSquareText,
   Pencil,
+  PanelRightClose,
+  PanelRightOpen,
   Plus,
   RefreshCw,
   Save,
@@ -19,6 +20,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { CanvasTools, CanvasZoom } from "@/features/workspace/canvas-controls";
+import { useWorkspaceCanvas } from "@/features/workspace/use-workspace-canvas";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -377,6 +380,9 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
   ), [feedbackFingerprint, feedbackTarget]);
   const unitRefs = useRef(new Map());
   const mainScrollRef = useRef(null);
+  const canvas = useWorkspaceCanvas(mainScrollRef, Boolean(aggregate) && !loading);
+  const [outlineOpen, setOutlineOpen] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(true);
   const reactId = useId();
   const mobileCloseId = `${reactId}-mobile-close`;
 
@@ -670,6 +676,25 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
     if (!mobileDrawerOpen) setMobilePanel(null);
   };
 
+  useLayoutEffect(() => {
+    const viewport = mainScrollRef.current;
+    const content = viewport?.querySelector(".framework-canvas-content");
+    if (!content) return;
+    const resize = () => {
+      const narrow = viewport.clientWidth < 600;
+      const contentWidth = narrow ? Math.max(280, viewport.clientWidth - 32) : 780;
+      content.style.width = `${contentWidth}px`;
+      const fit = Math.min(1, (viewport.clientWidth - (narrow ? 32 : 180)) / contentWidth);
+      const scale = canvas.zoom ?? fit;
+      content.style.zoom = String(scale);
+      canvas.onScaleApplied(scale);
+    };
+    const observer = new ResizeObserver(resize);
+    observer.observe(viewport);
+    resize();
+    return () => observer.disconnect();
+  }, [aggregate?.framework?.id, loading, canvas.zoom, canvas.onScaleApplied]);
+
   if (loading) {
     return (
       <section
@@ -749,20 +774,9 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
   const sidecarBody = assistantPanel;
 
   return (
-    <section className="semester-framework-workspace" aria-label={framework.title}>
+    <section className={`semester-framework-workspace canvas-workspace ${assistantOpen ? "" : "is-assistant-collapsed"}`} aria-label={framework.title}>
       <div className="framework-workspace-shell" inert={mobilePanel ? true : undefined}>
         <div className="framework-mobile-switcher" aria-label="框架页工具">
-          <Button
-            className="framework-mobile-units-trigger"
-            size="icon-sm"
-            variant="outline"
-            type="button"
-            aria-label="打开单元目录"
-            aria-pressed={mobilePanel === "units"}
-            onClick={() => openMobilePanel("units")}
-          >
-            <List aria-hidden="true" />
-          </Button>
           <Button
             size="icon-sm"
             variant="outline"
@@ -786,23 +800,31 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
         </div>
 
         <div className="framework-layout">
-          <aside className="framework-unit-nav" aria-label="单元目录">
-            <div className="framework-nav-header">
-              <FrameworkOutlineBack
-                title={framework.title}
-                subtitle={`${notebook.title} · V${framework.version}`}
-                onClose={onClose}
-              />
-            </div>
+          <aside className="framework-unit-nav" hidden={!outlineOpen} aria-label="单元目录">
+            <div className="framework-nav-header workspace-outline-heading"><strong>单元目录</strong><Button variant="ghost" size="icon-sm" aria-label="关闭单元目录" onClick={() => setOutlineOpen(false)}><X /></Button></div>
             <div className="framework-nav-body">
               <FrameworkUnitNav
                 {...unitNavProps}
-                onSelectUnit={(unitId) => navigateToUnit(unitId)}
+                onSelectUnit={(unitId) => { navigateToUnit(unitId); setOutlineOpen(false); }}
               />
             </div>
           </aside>
 
-          <main className="framework-main" ref={mainScrollRef}>
+          <div className="framework-canvas workspace-surface">
+            <div className="workspace-header">
+              <FrameworkOutlineBack title={framework.title} subtitle={`${notebook.title} · 学期框架 · V${framework.version}`} onClose={onClose} />
+              <span className="workspace-document-kind">学期框架</span>
+              <Button className="workspace-assistant-toggle" variant="ghost" size="icon-sm" aria-label={assistantOpen ? "收起备课助手" : "展开备课助手"} title={assistantOpen ? "收起备课助手" : "展开备课助手"} onClick={() => setAssistantOpen(open => !open)}>
+                {assistantOpen ? <PanelRightClose /> : <PanelRightOpen />}
+              </Button>
+            </div>
+            <CanvasTools canvas={canvas} outlineOpen={outlineOpen || mobilePanel === "units"} outlineLabel="打开单元目录" onToggleOutline={() => {
+              if (window.matchMedia("(max-width: 1050px)").matches) openMobilePanel("units");
+              else setOutlineOpen(open => !open);
+            }} />
+            <CanvasZoom canvas={canvas} />
+            <main className="framework-main workspace-canvas-viewport" data-canvas-mode={canvas.mode} aria-label="学期框架画布" tabIndex={0} ref={mainScrollRef}>
+            <div className="framework-canvas-content" data-canvas-anchor>
             {units.map((unit) => {
               const unitTitle = nodeById.get(unit.curriculumNodeId)?.title ?? `单元 ${unit.sortNo}`;
               const unitBlueprints = blueprints.filter((blueprint) => blueprint.semesterUnitId === unit.id);
@@ -1005,7 +1027,9 @@ export function SemesterFrameworkWorkspace({ notebook, frameworkId, onClose, onC
                 </article>
               );
             })}
-          </main>
+            </div>
+            </main>
+          </div>
 
           <aside className="framework-sidecar lesson-assistant-rail" aria-label="学期规划辅助面板">
             {mobilePanel === "sidecar" ? null : sidecarBody}

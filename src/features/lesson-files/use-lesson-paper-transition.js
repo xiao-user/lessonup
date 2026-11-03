@@ -21,7 +21,7 @@ export function useLessonPaperTransition({ rootRef, scrollRef, sourceElement }) 
       sheet: root.querySelector(".lesson-sheet-frame"),
       content: [...root.querySelectorAll(".lesson-sheet-content")],
       secondary: [...root.querySelectorAll(".lesson-sheet-frame")].slice(1),
-      rails: desktop.matches ? [...root.querySelectorAll(".lesson-side-rail")] : [],
+      rails: desktop.matches ? [...root.querySelectorAll(".lesson-side-rail")].filter(rail => rail.offsetWidth > 0) : [],
     });
     const sourceRect = () => sourceElement?.isConnected ? sourceElement.getBoundingClientRect() : null;
     const usable = (rect) => rect?.width > 0 && rect?.height > 0;

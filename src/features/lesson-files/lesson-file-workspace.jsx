@@ -1,9 +1,11 @@
-import { useLessonPaperTransition } from "./use-lesson-paper-transition";
 import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
-import { ArrowLeft, Check, PanelLeft, Redo2, Sparkles, Undo2 } from "lucide-react";
+import { ArrowLeft, Check, PanelRightClose, PanelRightOpen, Redo2, Sparkles, Undo2, X } from "lucide-react";
 
+import { CanvasTools, CanvasZoom } from "@/features/workspace/canvas-controls";
+import { useWorkspaceCanvas } from "@/features/workspace/use-workspace-canvas";
+import { useLessonPaperTransition } from "./use-lesson-paper-transition";
 import { Button } from "@/components/ui/button";
 import {
   createLessonPlanDraft,
@@ -206,6 +208,8 @@ function pageContentSignature(pages) {
 export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal = 0, onSave, onAgentVersionCommitted, onClose, onCloseBlocked }) {
   const rootRef = useRef(null);
   const scrollRef = useRef(null);
+  const canvas = useWorkspaceCanvas(scrollRef);
+  const [assistantOpen, setAssistantOpen] = useState(true);
   const documentPagesRef = useRef(null);
   const closingRef = useRef(false);
   const sectionScrollRef = useRef(null);
@@ -550,6 +554,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
     try {
       await flushDocumentBeforeAgentRun();
       setMobileRail("assistant");
+    setAssistantOpen(true);
       window.dispatchEvent(new CustomEvent("lessonup:request-dashi-presentation", {
         detail: {
           prompt: presentationMaterial.presentation
@@ -638,19 +643,20 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
         + Number.parseFloat(scrollStyle.paddingRight);
       const availableWidth = Math.max(0, scrollRoot.clientWidth - horizontalPadding);
       const canonicalWidth = sheet.offsetWidth;
-      const scale = canonicalWidth
-        ? Math.min(1, Math.max(0.34, availableWidth / canonicalWidth))
-        : 1;
+      const fitScale = canonicalWidth ? Math.min(1, Math.max(0.25, availableWidth / canonicalWidth)) : 1;
+      const scale = canvas.zoom ?? fitScale;
       pagesRoot.style.setProperty("--lesson-paper-scale", String(scale));
       pagesRoot.style.setProperty("--lesson-paper-display-width", `${canonicalWidth * scale}px`);
       pagesRoot.style.setProperty("--lesson-paper-display-height", `${sheet.offsetHeight * scale}px`);
+      scrollRoot.style.setProperty("--canvas-paper-width", `${canonicalWidth * scale}px`);
+      canvas.onScaleApplied(scale);
     };
 
     const observer = new ResizeObserver(updateScale);
     observer.observe(scrollRoot);
     updateScale();
     return () => observer.disconnect();
-  }, [editorReadyRevision, displayingDraft]);
+  }, [canvas.zoom, canvas.onScaleApplied, editorReadyRevision, displayingDraft]);
 
   useEffect(() => {
     const scrollRoot = scrollRef.current;
@@ -915,12 +921,14 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
     setLearningRequest({ ...request, id: crypto.randomUUID() });
     setSidecarView("assistant");
     setMobileRail("assistant");
+    setAssistantOpen(true);
   }, []);
   const handleDecisionRequest = useCallback((id) => setDecisionRequest((current) => current?.id === id ? null : current), []);
   const requestDecisionAgent = useCallback((request) => {
     setDecisionRequest({ ...request, id: crypto.randomUUID() });
     setSidecarView("assistant");
     setMobileRail("assistant");
+    setAssistantOpen(true);
   }, []);
 
   const chooseRecovery = (id) => {
@@ -978,26 +986,22 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
 
   return (
     <section
-      className="lesson-file-workspace"
+      className={`lesson-file-workspace canvas-workspace ${assistantOpen ? "" : "is-assistant-collapsed"}`}
       ref={rootRef}
       aria-label={`${file.title}备课文件`}
       tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && mobileRail === "outline") {
+          setMobileRail(null);
+          rootRef.current?.querySelector('[aria-label="显示教案目录"]')?.focus();
+          event.stopPropagation();
+        }
+      }}
     >
       <div className="lesson-workspace-backdrop" aria-hidden="true" />
       <PaginationMeasure plan={plan} presentationMaterial={presentationMaterial} measureRef={measureRef} />
       {displayingDraft ? <PaginationMeasure plan={draftPlan} presentationMaterial={presentationMaterial} measureRef={draftMeasureRef} /> : null}
       <div className="lesson-mobile-switcher" aria-label="详情页工具">
-        <Button
-          variant="outline"
-          size="icon-sm"
-          type="button"
-          aria-label="显示教案目录"
-          aria-pressed={mobileRail === "outline"}
-          aria-controls="lesson-outline-panel"
-          onClick={() => setMobileRail((current) => current === "outline" ? null : "outline")}
-        >
-          <PanelLeft />
-        </Button>
         <Button
           variant="outline"
           size="icon-sm"
@@ -1011,51 +1015,8 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
         </Button>
       </div>
 
-      <aside id="lesson-outline-panel" className={`lesson-side-rail lesson-outline-rail ${mobileRail === "outline" ? "is-mobile-open" : ""}`}>
-        <div className="lesson-outline-header">
-          <Button
-            className="lesson-outline-back"
-            variant="ghost"
-            size="sm"
-            type="button"
-            aria-label={`返回备课本：${file.title}`}
-            onClick={closeWorkspace}
-          >
-            <ArrowLeft data-icon="inline-start" />
-            <span className="lesson-outline-back-copy">
-              <strong>{file.title}</strong>
-              <small>{notebook.subject} / {notebook.className}</small>
-            </span>
-          </Button>
-          <div className="lesson-file-identity">
-            <p className="lesson-save-status" role="status" aria-live="polite">{saveStatus === "已自动保存" ? <Check aria-hidden="true" /> : null} {saveStatus}</p>
-            <div className="lesson-history-actions" aria-label="编辑历史">
-              <Button
-                variant="outline"
-                type="button"
-                aria-label="撤销"
-                aria-keyshortcuts="Meta+Z Control+Z"
-                title="撤销"
-                disabled={!historyAvailability.canUndo}
-                onClick={() => handleHistoryAction("undo")}
-              >
-                <Undo2 data-icon="inline-start" /> 撤销
-              </Button>
-              <Button
-                variant="outline"
-                type="button"
-                aria-label="重做"
-                aria-keyshortcuts="Meta+Shift+Z Control+Y"
-                title="重做"
-                disabled={!historyAvailability.canRedo}
-                onClick={() => handleHistoryAction("redo")}
-              >
-                <Redo2 data-icon="inline-start" /> 重做
-              </Button>
-            </div>
-          </div>
-        </div>
-
+      <aside id="lesson-outline-panel" aria-label="教案目录" hidden={mobileRail !== "outline"} className={`lesson-side-rail lesson-outline-rail ${mobileRail === "outline" ? "is-mobile-open" : ""}`}>
+        <div className="workspace-outline-heading"><strong>教案目录</strong><Button variant="ghost" size="icon-sm" aria-label="关闭教案目录" onClick={() => setMobileRail(null)}><X /></Button></div>
         <nav
           className="lesson-anchor-nav"
           data-preview={previewSectionIndex == null ? "false" : "true"}
@@ -1090,13 +1051,67 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
         </nav>
       </aside>
 
-      <div className="lesson-document-pane">
+      <div className="lesson-document-pane workspace-surface">
+        <div className="workspace-header lesson-outline-header">
+          <Button
+            className="lesson-outline-back"
+            variant="ghost"
+            size="sm"
+            type="button"
+            aria-label={`返回备课本：${file.title}`}
+            onClick={closeWorkspace}
+          >
+            <ArrowLeft data-icon="inline-start" />
+            <span className="lesson-outline-back-copy">
+              <strong>{file.title}</strong>
+              <small>{notebook.subject} / {notebook.className}</small>
+            </span>
+          </Button>
+          <div className="lesson-file-identity">
+            <p className="lesson-save-status" role="status" aria-live="polite">{saveStatus === "已自动保存" ? <Check aria-hidden="true" /> : null} {saveStatus}</p>
+
+          </div>
+          <Button className="workspace-assistant-toggle" variant="ghost" size="icon-sm" aria-label={assistantOpen ? "收起备课助手" : "展开备课助手"} title={assistantOpen ? "收起备课助手" : "展开备课助手"} onClick={() => setAssistantOpen(open => !open)}>
+            {assistantOpen ? <PanelRightClose /> : <PanelRightOpen />}
+          </Button>
+        </div>
+        <CanvasTools canvas={canvas} outlineOpen={mobileRail === "outline"} outlineLabel="显示教案目录" onToggleOutline={() => setMobileRail(current => current === "outline" ? null : "outline")}>
+            <div className="lesson-history-actions" aria-label="编辑历史">
+              <Button
+                variant="ghost"
+                size="icon"
+                type="button"
+                aria-label="撤销"
+                aria-keyshortcuts="Meta+Z Control+Z"
+                title="撤销"
+                disabled={!historyAvailability.canUndo}
+                onClick={() => handleHistoryAction("undo")}
+              >
+                <Undo2 aria-hidden="true" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                type="button"
+                aria-label="重做"
+                aria-keyshortcuts="Meta+Shift+Z Control+Y"
+                title="重做"
+                disabled={!historyAvailability.canRedo}
+                onClick={() => handleHistoryAction("redo")}
+              >
+                <Redo2 aria-hidden="true" />
+              </Button>
+            </div>
+        </CanvasTools>
+        <CanvasZoom canvas={canvas} />
         <main
-          className="lesson-document-scroll"
+          className="lesson-document-scroll workspace-canvas-viewport"
+          data-canvas-mode={canvas.mode}
+          tabIndex={0}
           ref={scrollRef}
           aria-label="A4教案编辑区"
         >
-          <p className="lesson-mobile-document-hint">上下滚动查看完整教案</p>
+          <div className="workspace-canvas-content">
           {localDraftError || draftNeedsSync || recoveryCandidates.length ? <section className="mx-auto mb-4 w-full max-w-3xl space-y-3 rounded-lg border bg-background p-4 text-sm" aria-label="本机草稿与同步">
             {localDraftError ? <p role="alert">{localDraftError}</p> : draftNeedsSync ? <p role="status">未同步修改已保留在本机。请核对恢复内容后同步；云端同时变化的段落需要逐项选择。</p> : null}
             {recoveryCandidates.length ? <div className="space-y-2">
@@ -1142,6 +1157,7 @@ export function LessonFileWorkspace({ notebook, file, sourceElement, closeSignal
             onSelectionChange={handleSelectionChange}
             presentationMaterial={editablePresentationMaterial}
           />
+          </div>
           </div>
         </main>
         {agentDraft ? <div className="lesson-draft-bar" aria-label="A4 草稿操作">

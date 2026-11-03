@@ -11,6 +11,14 @@
   --app-background: #fffbfa;
   --app-background-clear: rgb(255 251 250 / 0%);
 
+  /* Canvas workspaces: neutral worktable and independent paper/panels. */
+  --workspace-canvas: #f1f2f5;
+  --workspace-panel: #ffffff;
+  --workspace-line: #e4e6eb;
+  --workspace-muted: #737984;
+  --workspace-toolbar-shadow: 0 4px 18px rgb(25 30 45 / 4%);
+  --workspace-paper-shadow: 0 4px 24px rgb(25 30 45 / 5%);
+
   /* Lesson workspace accents */
   --lesson-accent-teal: #82a09b;
   --lesson-action-foreground: oklch(43% 0.035 175);
@@ -199,6 +207,10 @@
 }
 
 .dark {
+  --workspace-canvas: #111215;
+  --workspace-panel: #1a1b1f;
+  --workspace-line: #2b2d33;
+  --workspace-muted: #9b9fa9;
   color-scheme: dark;
 
   /* Geist source palette — design.dark.md */
