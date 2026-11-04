@@ -20,6 +20,7 @@ React/Vite frontend with Hono on Cloudflare Workers, native Pi Agent, D1 and R2.
 
 ## Project constraints
 
+- Avoid unnecessary secondary labels and descriptions. Let the layout do the explaining
 - D1 is canonical and R2 stores private objects. Validate user → resource → thread → branch → run ownership. Keep credentials, private reasoning and raw provider/tool data off the client.
 - Keep one native Pi coordinator and one configured model; do not add another harness or canned Fast replies. Isolate branch Sessions; reconnect must not resend and cancellation is terminal.
 - Preserve raw history and the cacheable static prompt prefix. Compact older context in the background without splitting tool/result groups; wait only when context cannot fit.

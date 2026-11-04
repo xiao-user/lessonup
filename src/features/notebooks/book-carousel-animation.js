@@ -8,46 +8,33 @@ export const EASE = {
   settle: "back.out(1.35)",
   soft: "sine.inOut",
   fade: "sine.out",
+  close: "power3.inOut",
 };
 
 export const OPEN_DURATION = 0.9;
 export const OPEN_FIRST_PAGE_DELAY = 0.28;
-export const CLOSE_DURATION = 1.02;
-export const CLOSE_REWIND_DURATION = 0.4;
-export const CLOSE_REWIND_STAGGER = 0.05;
-export const CLOSE_REWIND_START_LIMIT = 0.36;
-export const CLOSE_COVER_GAP = 0.04;
-export const CLOSE_COVER_MIN_DURATION = 0.42;
+const CLOSE_LEAF_DURATION = 0.4;
+const CLOSE_LEAF_STAGGER = 0.05;
+const CLOSE_STAGGER_LIMIT = 0.36;
+const CLOSE_COVER_DURATION = 0.9;
 const BASE_ROTATIONS = [-3, -2.8, 3.1, -7.5, 2, -4];
 
 /**
- * Turning the cover back while leaves are still sweeping makes their planes
- * cross at the spine. Rewind every turned leaf first, then close the cover.
+ * Preserve the original staggered page rewind. The cover follows as soon as
+ * the last leaf starts, rather than waiting for every leaf to land. Sharing
+ * the leaf ease with a longer swing keeps the cover behind all moving pages
+ * and carries the motion through their landing without a pause.
  */
-export function closeRewindPlan(turnedCount, reduceMotion = false) {
-  if (reduceMotion) {
-    return { starts: [], rewindEnd: 0, coverStart: 0, coverDuration: 0 };
-  }
-  if (turnedCount <= 0) {
-    return { starts: [], rewindEnd: 0, coverStart: 0, coverDuration: CLOSE_DURATION };
-  }
-  const starts = Array.from({ length: turnedCount }, (_, order) => (
-    Math.min(order * CLOSE_REWIND_STAGGER, CLOSE_REWIND_START_LIMIT)
+export function closeBookPlan(turnedCount, reduceMotion = false) {
+  const leafStarts = Array.from({ length: turnedCount }, (_, order) => (
+    reduceMotion ? 0 : Math.min(order * CLOSE_LEAF_STAGGER, CLOSE_STAGGER_LIMIT)
   ));
-  const rewindEnd = starts[starts.length - 1] + CLOSE_REWIND_DURATION;
-  const coverStart = rewindEnd + CLOSE_COVER_GAP;
   return {
-    starts,
-    rewindEnd,
-    coverStart,
-    coverDuration: Math.max(CLOSE_COVER_MIN_DURATION, CLOSE_DURATION - coverStart),
+    leafStarts,
+    leafDuration: reduceMotion ? 0 : CLOSE_LEAF_DURATION,
+    coverStart: leafStarts.at(-1) ?? 0,
+    coverDuration: reduceMotion ? 0 : CLOSE_COVER_DURATION,
   };
-}
-
-/** Longest close for the current leaf stack, including the cover swing. */
-export function closeDurationFor(turnedCount) {
-  const { coverStart, coverDuration } = closeRewindPlan(turnedCount);
-  return coverStart + coverDuration;
 }
 
 const bookPoseWriters = new WeakMap();

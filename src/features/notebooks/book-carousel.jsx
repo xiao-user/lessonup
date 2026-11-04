@@ -19,8 +19,7 @@ import {
   addPageTurn,
   applyOpenBookPose,
   baseRotation,
-  CLOSE_REWIND_DURATION,
-  closeRewindPlan,
+  closeBookPlan,
   EASE,
   OPEN_DURATION,
   OPEN_FIRST_PAGE_DELAY,
@@ -70,7 +69,8 @@ export const BookCarousel = forwardRef(function BookCarousel({
   const [activeIndex, setActiveIndex] = useState(0);
   const [preparedIndex, setPreparedIndex] = useState(0);
   const [pageIndexes, setPageIndexes] = useState({});
-  const [pageAnimating, setPageAnimating] = useState(false);
+  const [turningPages, setTurningPages] = useState([]);
+  const pageAnimating = turningPages.length > 0;
   const [bookAnimating, setBookAnimating] = useState(false);
   const [closingId, setClosingId] = useState(null);
   const activeNotebook = notebooks[activeIndex];
@@ -473,7 +473,10 @@ export const BookCarousel = forwardRef(function BookCarousel({
     const nextPageIndexes = { ...pageIndexesRef.current, [notebookId]: nextIndex };
     pageIndexesRef.current = nextPageIndexes;
     flushSync(() => {
-      setPageAnimating(true);
+      // Retain every in-flight sheet even when repeated clicks move the current
+      // page beyond the usual render window. Only animation boundaries render.
+      setTurningPages([...new Set([...pageTimelinesRef.current.keys(), leaf])]
+        .map(element => Number(element.dataset.pageIndex)));
       setPageIndexes(nextPageIndexes);
     });
     pageAnimatingRef.current = true;
@@ -495,7 +498,8 @@ export const BookCarousel = forwardRef(function BookCarousel({
           pageTimelinesRef.current.delete(leaf);
           gsap.set(leaf, { clearProps: "--leaf-angle" });
           pageAnimatingRef.current = pageTimelinesRef.current.size > 0;
-          setPageAnimating(pageAnimatingRef.current);
+          setTurningPages([...pageTimelinesRef.current.keys()]
+            .map(element => Number(element.dataset.pageIndex)));
           resolve(true);
         },
       });
@@ -576,7 +580,6 @@ export const BookCarousel = forwardRef(function BookCarousel({
     pageTimelinesRef.current.forEach((timeline) => timeline.kill());
     pageTimelinesRef.current.clear();
     pageAnimatingRef.current = false;
-    setPageAnimating(false);
     const pages = book.querySelector(".book-volume-pages");
     const page = book.querySelector(".book-volume-leaf.is-current");
     const coverBack = book.querySelector(".book-volume-cover-back");
@@ -594,7 +597,7 @@ export const BookCarousel = forwardRef(function BookCarousel({
       .filter(({ rotation }) => rotation < -0.5)
       .sort((left, right) => right.index - left.index);
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const rewind = closeRewindPlan(turnedLeaves.length, reduceMotion);
+    const close = closeBookPlan(turnedLeaves.length, reduceMotion);
 
     const timeline = gsap.timeline({
       onComplete: () => {
@@ -611,6 +614,7 @@ export const BookCarousel = forwardRef(function BookCarousel({
         isAnimatingRef.current = false;
         setBookAnimating(false);
         setClosingId(null);
+        setTurningPages([]);
         window.requestAnimationFrame(() => {
           if (!book.isConnected) return;
           gsap.set(leaves, { clearProps: "--leaf-angle" });
@@ -621,9 +625,9 @@ export const BookCarousel = forwardRef(function BookCarousel({
     turnedLeaves.forEach(({ leaf }, order) => {
       addPageTurn(timeline, leaf, {
         rotationY: 0,
-        duration: reduceMotion ? 0 : CLOSE_REWIND_DURATION,
-        position: rewind.starts[order] ?? 0,
-        ease: "power3.inOut",
+        duration: close.leafDuration,
+        position: close.leafStarts[order],
+        ease: EASE.close,
       });
     });
 
@@ -636,13 +640,12 @@ export const BookCarousel = forwardRef(function BookCarousel({
       }, 0);
     }
     timeline
-      .to(book.querySelector(".book-volume-cover"), { "--cover-angle": "0deg", duration: rewind.coverDuration, ease: "power3.inOut" }, rewind.coverStart)
-      .to(book.querySelector(".book-volume-unit"), { "--book-spread-x": "0%", duration: reduceMotion ? 0 : rewind.coverDuration * 0.88, ease: "power3.inOut" }, rewind.coverStart)
-      .to(book, { "--book-scale": slot.scale, duration: reduceMotion ? 0 : rewind.coverDuration, ease: "power3.inOut" }, rewind.coverStart)
-      .to(book, { "--book-rotation": `${restingRotation}deg`, duration: reduceMotion ? 0 : rewind.coverDuration * 0.66, ease: "power2.inOut" }, (reduceMotion ? 0 : rewind.coverStart + rewind.coverDuration * 0.34))
-      .to(pages, { borderRadius: outer, duration: reduceMotion ? 0 : rewind.coverDuration * 0.74, ease: EASE.soft }, rewind.coverStart)
-      .to(page, { borderRadius: inner, duration: reduceMotion ? 0 : rewind.coverDuration * 0.74, ease: EASE.soft }, rewind.coverStart)
-      .to(coverBack, { borderRadius: outer, duration: reduceMotion ? 0 : rewind.coverDuration * 0.74, ease: EASE.soft }, rewind.coverStart);
+      .to(book.querySelector(".book-volume-cover"), { "--cover-angle": "0deg", duration: close.coverDuration, ease: EASE.close }, close.coverStart)
+      .to(book.querySelector(".book-volume-unit"), { "--book-spread-x": "0%", duration: close.coverDuration, ease: EASE.close }, close.coverStart)
+      .to(book, { "--book-scale": slot.scale, "--book-rotation": `${restingRotation}deg`, duration: close.coverDuration, ease: EASE.close }, close.coverStart)
+      .to(pages, { borderRadius: outer, duration: close.coverDuration, ease: EASE.close }, close.coverStart)
+      .to(page, { borderRadius: inner, duration: close.coverDuration, ease: EASE.close }, close.coverStart)
+      .to(coverBack, { borderRadius: outer, duration: close.coverDuration, ease: EASE.close }, close.coverStart);
   });
 
   useEffect(() => {
@@ -736,6 +739,7 @@ export const BookCarousel = forwardRef(function BookCarousel({
             activeFileId={activeFileId}
             pageIndex={Math.min(pageIndexes[notebook.id] ?? 0, notebook.files.length)}
             pageAnimating={pageAnimating && notebook.id === openNotebookId}
+            turningPages={notebook.id === openNotebookId ? turningPages : []}
             bookAnimating={bookAnimating && notebook.id === openNotebookId}
             closing={notebook.id === closingId}
             renderPages={notebook.id === openNotebookId || index === preparedIndex}

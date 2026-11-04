@@ -819,6 +819,7 @@
   cursor: pointer;
 }
 
+.book-volume-leaf.is-turning,
 .book-volume.is-animating .book-volume-leaf,
 .book-volume.is-animating .book-volume-cover {
   will-change: transform;

@@ -1,5 +1,5 @@
 import { expect, test } from "./fixtures.js";
-import { initialDocument, lessonFileId, notebookId } from "./test-data.js";
+import { initialDocument, initialNotebookGraph, lessonFileId, notebookId } from "./test-data.js";
 
 const temporaryTitle = "端到端临时备课本";
 
@@ -544,7 +544,7 @@ test("turns real lesson-file pages and restores an independently routed detail",
   }
 });
 
-test("rewinds every turned leaf before an outside-click close settles", async ({ collectionPage: page }) => {
+test("overlaps the cover with staggered page rewind without crossing or losing the page reset", async ({ collectionPage: page }, testInfo) => {
   const temporaryFileIds: string[] = [];
   try {
     for (const [index, title] of ["回卷测试一", "回卷测试二", "回卷测试三"].entries()) {
@@ -624,32 +624,51 @@ test("rewinds every turned leaf before an outside-click close settles", async ({
       rightOpacity: 1,
     });
 
+    await openBook.evaluate((book) => {
+      const cover = book.querySelector(".book-volume-cover")!;
+      const unit = book.querySelector(".book-volume-unit")!;
+      const leaves = [...book.querySelectorAll(".book-volume-leaf.is-turned")].reverse();
+      const samples: { time: number; cover: number; leaves: number[]; spread: number; scale: number }[] = [];
+      const sample = (time: number) => {
+        if (book.classList.contains("is-animating")) {
+          samples.push({
+            time,
+            cover: parseFloat(getComputedStyle(cover).getPropertyValue("--cover-angle")),
+            leaves: leaves.map(leaf => parseFloat(getComputedStyle(leaf).getPropertyValue("--leaf-angle"))),
+            spread: parseFloat(getComputedStyle(unit).getPropertyValue("--book-spread-x")),
+            scale: parseFloat(getComputedStyle(book).getPropertyValue("--book-scale")),
+          });
+        }
+        if (book.classList.contains("is-open")) requestAnimationFrame(sample);
+      };
+      (window as any).__closeSamples = samples;
+      requestAnimationFrame(sample);
+    });
     await page.getByRole("button", { name: "返回全部备课本", exact: true }).click();
-    // Pages rewind first; the cover must stay open until they land. Otherwise the
-    // cover plane and the leaf planes cross at the spine during the close.
     await page.waitForFunction(() => {
-      const book = document.querySelector(".book-volume.is-open");
-      const leaves = [...(book?.querySelectorAll(".book-volume-leaf") ?? [])].slice(0, 3);
-      return leaves.every((leaf) => (leaf as HTMLElement).style.getPropertyValue("--leaf-angle").includes("deg"));
+      const cover = document.querySelector(".book-volume.is-open .book-volume-cover");
+      return cover && parseFloat(getComputedStyle(cover).getPropertyValue("--cover-angle")) > -130;
     });
-    const coverWhileRewinding = await openBook.evaluate((book) => (
-      book.querySelector(".book-volume-cover") as HTMLElement
-    ).style.getPropertyValue("--cover-angle"));
-    expect(coverWhileRewinding).toBe("-180deg");
-    await page.waitForFunction(() => {
-      const cover = document.querySelector(".book-volume.is-open .book-volume-cover") as HTMLElement | null;
-      return cover ? cover.style.getPropertyValue("--cover-angle") !== "-180deg" : true;
-    });
-    const closingTransforms = await openBook.evaluate((book) => ({
-      cover: (book.querySelector(".book-volume-cover") as HTMLElement).style.getPropertyValue("--cover-angle"),
-      leaves: [...book.querySelectorAll(".book-volume-leaf")]
-        .slice(0, 3)
-        .map((leaf) => (leaf as HTMLElement).style.getPropertyValue("--leaf-angle")),
-    }));
-    expect(closingTransforms.cover).toContain("deg");
-    expect(closingTransforms.cover).not.toBe("-180deg");
-    expect(closingTransforms.leaves.every((angle) => angle === "0deg")).toBeTruthy();
+    await page.screenshot({ path: testInfo.outputPath("closing.png") });
     await expect(page.locator(".book-volume.is-open")).toHaveCount(0);
+    const samples = await page.evaluate(() => (window as any).__closeSamples) as {
+      time: number; cover: number; leaves: number[]; spread: number; scale: number;
+    }[];
+    expect(samples.length).toBeGreaterThan(4);
+    const firstCoverMotion = samples.find(sample => sample.cover > -179);
+    expect(firstCoverMotion).toBeTruthy();
+    const lastLeafLanding = samples.find(sample => sample.leaves.every(angle => angle >= -0.1));
+    expect(lastLeafLanding).toBeTruthy();
+    expect(firstCoverMotion!.time).toBeLessThan(lastLeafLanding!.time);
+    expect(lastLeafLanding!.cover).toBeGreaterThan(-175);
+    expect(lastLeafLanding!.cover).toBeLessThan(-5);
+    const overlapping = samples.filter(sample => sample.cover > -175 && sample.cover < -10
+      && sample.leaves.some(angle => angle > -175 && angle < -5));
+    expect(overlapping.length).toBeGreaterThan(2);
+    expect(overlapping.every(sample => sample.spread > 0 && sample.spread < 50 && sample.scale < 1)).toBe(true);
+    expect(samples.every(sample => sample.leaves.every(angle => angle >= sample.cover - 0.1))).toBe(true);
+    expect(samples.every(sample => sample.leaves.every((angle, index) => index === 0 || angle <= sample.leaves[index - 1] + 0.1))).toBe(true);
+    await testInfo.attach("close-motion", { body: JSON.stringify(samples), contentType: "application/json" });
     await expect(page.locator(".book-volume-leaf.is-turned")).toHaveCount(0);
     const remainingInlineTransforms = await page
       .locator(`.book-volume[data-notebook-id="${notebookId}"] .book-volume-leaf`)
@@ -666,4 +685,82 @@ test("rewinds every turned leaf before an outside-click close settles", async ({
       expect(response.ok()).toBeTruthy();
     }
   }
+});
+
+
+test("accepts rapid page clicks, reverses in flight and closes without dropping moving sheets", async ({ collectionPage: page }, testInfo) => {
+  const first = initialNotebookGraph[0];
+  expect((await page.request.post("/api/bootstrap/import", { data: { notebooks: [{
+    ...first,
+    files: Array.from({ length: 12 }, (_, index) => ({
+      ...first.files[0], id: index ? `rapid-${index}` : lessonFileId, title: `连续翻页 ${index + 1}`,
+    })),
+  }] } })).ok()).toBeTruthy();
+  await page.reload();
+  await page.getByRole("button", { name: "打开语文备课本", exact: true }).click();
+  const book = page.locator(".book-volume.is-open");
+  await expect(book).not.toHaveClass(/is-animating/);
+  await expect(book.locator(".book-volume-leaf.is-turning")).toHaveCount(0);
+  const next = page.getByRole("button", { name: "下一页", exact: true });
+  const previous = page.getByRole("button", { name: "上一页", exact: true });
+
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
+  await book.evaluate(book => {
+    const frames: { angles: number[]; missing: number[]; interval: number }[] = [];
+    let lastFrame = performance.now();
+    const tick = (now: number) => {
+      if (!book.classList.contains("is-open")) return;
+      const leaves = [...book.querySelectorAll(".book-volume-leaf")];
+      frames.push({
+        interval: now - lastFrame,
+        angles: leaves.map(leaf => parseFloat(getComputedStyle(leaf).getPropertyValue("--leaf-angle"))),
+        missing: leaves.filter(leaf => leaf.classList.contains("is-turning") && (!leaf.querySelector(".book-volume-leaf-front") || !leaf.querySelector(".book-volume-leaf-back > *")))
+          .map(leaf => Number((leaf as HTMLElement).dataset.pageIndex)),
+      });
+      lastFrame = now;
+      requestAnimationFrame(tick);
+    };
+    (window as any).__rapidFrames = frames;
+    requestAnimationFrame(tick);
+  });
+  for (let click = 0; click < 5; click += 1) await next.click();
+  await expect(book.locator(".book-volume-controls")).toContainText("6 / 12");
+  expect(await book.locator(".book-volume-leaf.is-turning").count()).toBeGreaterThan(1);
+  await expect(next).toBeEnabled();
+  await expect(previous).toBeEnabled();
+  await expect(book.locator('.book-volume-leaf[data-page-index="1"] .book-volume-leaf-front')).toHaveCount(1);
+  for (let click = 0; click < 3; click += 1) await previous.click();
+  await expect(book.locator(".book-volume-controls")).toContainText("3 / 12");
+  await expect(book.locator(".book-volume-leaf.is-turning")).toHaveCount(0);
+  await expect(book.locator(".book-volume-leaf.is-current")).toHaveAttribute("data-page-index", "3");
+  const angles = await book.locator(".book-volume-leaf").evaluateAll(leaves => leaves.map(leaf =>
+    parseFloat(getComputedStyle(leaf).getPropertyValue("--leaf-angle"))));
+  expect(angles).toEqual(angles.map((_, index) => index < 3 ? -180 : 0));
+
+  await next.click();
+  await next.click();
+  await page.getByRole("button", { name: "返回全部备课本", exact: true }).click();
+  await expect(book).toHaveCount(0);
+  const frames = await page.evaluate(() => (window as any).__rapidFrames) as { angles: number[]; missing: number[]; interval: number }[];
+  expect(frames.every(frame => frame.missing.length === 0)).toBe(true);
+  expect(frames.every(frame => frame.angles.every((angle, index) => index === 0 || angle >= frame.angles[index - 1] - 0.5))).toBe(true);
+  console.log("Rapid page turns at 4x CPU", JSON.stringify({
+    maxFrame: Math.max(...frames.map(frame => frame.interval)),
+    framesOver50: frames.filter(frame => frame.interval > 50).length,
+  }));
+  await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+  await testInfo.attach("rapid-turns", { body: JSON.stringify(frames), contentType: "application/json" });
+  await page.getByRole("button", { name: "打开语文备课本", exact: true }).click();
+  await expect(book).not.toHaveClass(/is-animating/);
+  await expect(book.locator(".book-volume-controls")).toContainText("1 / 12");
+  await expect(book.locator(".book-volume-leaf.is-turning")).toHaveCount(0);
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await previous.click();
+  await expect(previous).toBeDisabled();
+  for (let click = 0; click < 12; click += 1) await next.click();
+  await expect(book.locator(".book-volume-controls")).toContainText("12 / 12");
+  await expect(next).toBeDisabled();
+  await expect(book.locator(".book-volume-leaf.is-turning")).toHaveCount(0);
 });

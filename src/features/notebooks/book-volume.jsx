@@ -14,6 +14,7 @@ export function BookVolume({
   onDeleteFile,
   onPageChange,
   pageAnimating,
+  turningPages,
   bookAnimating,
   closing,
   renderPages,
@@ -63,14 +64,14 @@ export function BookVolume({
           <div className="book-volume-pages" aria-hidden={!isOpen}>
             {renderPages && pages.map((page, index) => (
               <div
-                className={`book-volume-leaf ${index < activePageIndex ? "is-turned" : ""} ${index === activePageIndex ? "is-current" : ""}`}
+                className={`book-volume-leaf ${index < activePageIndex ? "is-turned" : ""} ${index === activePageIndex ? "is-current" : ""} ${turningPages.includes(index) ? "is-turning" : ""}`}
                 data-page-index={index}
                 data-page-kind={page.kind}
                 style={{ "--leaf-layer": pages.length - index + 1 }}
                 aria-hidden={index !== activePageIndex}
                 key={page.id}
               >
-                {(index === 0 || Math.abs(index - activePageIndex) <= 2 || (closing && index < activePageIndex)) && (page.kind === "file" ? (
+                {(index === 0 || Math.abs(index - activePageIndex) <= 2 || turningPages.includes(index) || (closing && index < activePageIndex)) && (page.kind === "file" ? (
                   <button
                     className={`folder-paper book-volume-file book-volume-leaf-front ${activeFileId === page.id ? "is-file-source" : ""}`}
                     data-file-id={page.id}
@@ -93,7 +94,7 @@ export function BookVolume({
                   </div>
                 ))}
                 <div className="book-volume-leaf-back" aria-hidden="true">
-                  {(index === 0 || Math.abs(index - activePageIndex) <= 2 || (closing && index < activePageIndex)) && (page.kind === "title" ? (
+                  {(index === 0 || Math.abs(index - activePageIndex) <= 2 || turningPages.includes(index) || (closing && index < activePageIndex)) && (page.kind === "title" ? (
                     <NotebookTitlePageSummary notebook={notebook} />
                   ) : (
                     <LessonFilePageBackSummary file={page} />
@@ -130,7 +131,7 @@ export function BookVolume({
               className="book-volume-control-button"
               type="button"
               aria-label="上一页"
-              disabled={bookAnimating || pageAnimating || pageIndex <= 0}
+              disabled={bookAnimating || pageIndex <= 0}
               onClick={(event) => { event.stopPropagation(); onPageChange(pageIndex - 1); }}
             >
               <ChevronLeft aria-hidden="true" />
@@ -142,7 +143,7 @@ export function BookVolume({
               className="book-volume-control-button"
               type="button"
               aria-label="下一页"
-              disabled={bookAnimating || pageAnimating || pageIndex >= leafCount - 1}
+              disabled={bookAnimating || pageIndex >= leafCount - 1}
               onClick={(event) => { event.stopPropagation(); onPageChange(pageIndex + 1); }}
             >
               <ChevronRight aria-hidden="true" />
