@@ -14,6 +14,7 @@ import { projectPublicPiEvents } from "./public-event-projection.js";
 import { PiTransportTimer } from "./transport-timing.js";
 import { PiMemoryCompactor } from "./memory-compactor.js";
 import { type Emit } from "./contracts.js";
+import { DashiPlanningError } from "../../presentations/dashi-planning-errors.js";
 import type { PiRunLifecycle } from "./run-lifecycle.js";
 
 /** Adapts native Pi execution to durable branch transcripts and public events.
@@ -134,6 +135,9 @@ export class PiAgentExecutor {
     let turnToolTerminates: boolean[] = [];
     let compactBeforeNextLlm = false;
     let pendingCompletionFollowUp: string | undefined;
+    let proposalFailure: string | undefined;
+    let repeatedProposalError: Error | null = null;
+    const terminalToolError = () => repeatedProposalError ?? args.getTerminalToolError?.() ?? null;
     const providerSessionId = createHmac("sha256", this.sessionSecret)
       .update(JSON.stringify([ownerId, threadId, branchId]))
       .digest("hex");
@@ -171,7 +175,7 @@ export class PiAgentExecutor {
       ),
       shouldStopAfterTurn: (context) => {
         turnCount += 1;
-        if (args.getTerminalToolError?.()) return true;
+        if (terminalToolError()) return true;
         const toolCalls = context.message.content.filter((block) => block.type === "toolCall");
         const innerLoopContinues = toolCalls.length > 0
           && !(turnToolTerminates.length > 0 && turnToolTerminates.every(Boolean));
@@ -248,6 +252,13 @@ export class PiAgentExecutor {
     };
     const unsubscribeTiming = agent.subscribe((event) => {
       if (event.type === "tool_execution_end") {
+        if (event.toolName === "propose_classroom_presentation") {
+          const failure = event.isError ? JSON.stringify(event.result) : undefined;
+          if (failure && failure === proposalFailure) {
+            repeatedProposalError = new DashiPlanningError("presentation_proposal_blocked");
+          }
+          proposalFailure = failure;
+        }
         turnToolTerminates.push(
           Boolean(event.result && typeof event.result === "object" && event.result.terminate === true),
         );
@@ -285,7 +296,7 @@ export class PiAgentExecutor {
       emit: args.emit,
       onTextDelta: args.onTextDelta,
       documentDraftScope: args.documentDraftScope,
-      getTerminalToolError: args.getTerminalToolError,
+      getTerminalToolError: terminalToolError,
     });
     const abort = () => agent.abort();
     if (args.signal?.aborted) agent.abort();
@@ -316,7 +327,7 @@ export class PiAgentExecutor {
         && compactCycles < 2
         && !args.signal?.aborted
         && !agent.state.errorMessage
-        && !args.getTerminalToolError?.()
+        && !terminalToolError()
       ) {
         compactCycles += 1;
         compactBeforeNextLlm = false;
@@ -346,8 +357,8 @@ export class PiAgentExecutor {
         await agent.continue();
         await agent.waitForIdle();
       }
-      const terminalToolError = args.getTerminalToolError?.();
-      if (terminalToolError) throw terminalToolError;
+      const terminalError = terminalToolError();
+      if (terminalError) throw terminalError;
       if (projection.hasProtocolViolation()) throw new Error("pi_provider_protocol_text_detected");
       if (agent.state.errorMessage) throw new Error(`pi_run_failed:${agent.state.errorMessage}`);
       const newMessages = agent.state.messages.slice(initialMessageCount);

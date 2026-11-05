@@ -576,6 +576,30 @@ describe("Pi production coordinator", () => {
     expect(JSON.stringify(events)).not.toContain("provider_credentials");
   });
 
+  it("stops repeated empty presentation calls at native schema validation before handlers run", async () => {
+    const { repository, created, faux, coordinator } = await fixture();
+    const input = { userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
+      activeSectionId: "process", documentVersion: 0, attachmentIds: [] };
+    let requests = 0;
+    faux.setResponses([1, 2, 3].map(() => (context) => {
+      requests += 1;
+      const parameters = context.tools?.find(tool => tool.name === "propose_classroom_presentation")?.parameters;
+      expect(parameters).toMatchObject({ type: "object", required: ["summary"] });
+      expect(parameters).not.toHaveProperty("anyOf");
+      expect(parameters).toHaveProperty("properties.slides");
+      return fauxAssistantMessage(fauxToolCall("propose_classroom_presentation", {}), { stopReason: "toolUse" });
+    }));
+    const events: any[] = [];
+    await coordinator.start({ ...input, message: "请基于当前教案生成课堂PPT，使用theme01。" }, event => { events.push(event); });
+    expect(requests).toBe(2);
+    expect(await repository.getLatestRun(ownerId, input.threadId, input.branchId))
+      .toMatchObject({ status: "failed", error: "presentation_proposal_blocked" });
+    expect(await repository.listPendingApprovals(ownerId, input.threadId, input.branchId)).toHaveLength(0);
+    expect((await repository.getBranch(ownerId, input.threadId, input.branchId))?.pendingInteraction)
+      .toMatchObject({ kind: "presentation_generation", confirmedTheme: "theme01" });
+    expect(events).toContainEqual(expect.objectContaining({ type: "tool.completed", outcome: "failed", revisionCode: "presentation_proposal_blocked" }));
+  });
+
   it("derives reading emphasis from the actual proposal without a redundant model repair round", async () => {
     const { repository, created, faux, coordinator } = await fixture();
     const input = { userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,

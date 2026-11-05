@@ -38,6 +38,7 @@ const publicErrorCodes = new Set([
   "presentation_task_stale",
   "presentation_theme_binding_failed",
   "presentation_planning_blocked",
+  "presentation_proposal_blocked",
   "attachment_not_bound_to_run",
   "lesson_file_not_found",
   "semester_framework_input_scope_invalid",

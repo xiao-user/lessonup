@@ -153,7 +153,8 @@ export function projectPublicPiEvents(args: {
         && Array.isArray(event.result.content)
         ? event.result.content.flatMap((block: { type?: string; text?: string }) => block.type === "text" && typeof block.text === "string" ? [block.text] : [])
         : [];
-      const businessError = errorTexts.map(safeDashiPlanningError).find(Boolean);
+      const businessError = safeDashiPlanningError(args.getTerminalToolError?.())
+        ?? errorTexts.map(safeDashiPlanningError).find(Boolean);
       const presentation = {
         ...startedPresentation,
         detail: safeToolCompletionDetail(

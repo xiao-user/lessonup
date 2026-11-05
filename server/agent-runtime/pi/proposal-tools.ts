@@ -134,6 +134,22 @@ const presentationProposalInputSchema = z.union([
   presentationProposalRevisionSchema,
 ]);
 
+// Function-call providers require a root object with named properties. A root
+// anyOf can be interpreted as an empty parameter object by compatible hosts.
+// Keep the conditional full/revision validation in the business parser above.
+const presentationProposalParametersSchema = z.object({
+  summary: presentationGoalToolSchema.shape.summary,
+  baseToolCallId: presentationProposalRevisionSchema.shape.baseToolCallId.optional(),
+  title: presentationGoalToolSchema.shape.title.optional(),
+  goal: presentationGoalToolSchema.shape.goal.optional(),
+  audience: presentationGoalToolSchema.shape.audience,
+  slides: z.array(z.object({
+    index: z.number().int().min(0).max(39).optional(),
+    layout: z.string().regex(/^theme(?:0[1-9]|1[0-2])_page\d{3}$/).optional(),
+    props: z.record(z.string(), dashiJsonValueSchema),
+  })).min(1).max(40).optional(),
+}).strict();
+
 function captureSlot() {
   let captured: PiCapturedProposal | null = null;
   return {
@@ -222,7 +238,7 @@ export function createPiPresentationProposalTool(args: {
     toolCallId: string;
     proposal: z.infer<typeof presentationGoalToolSchema>;
   } | null = null;
-  const parameters = typeBoxFromZod(presentationProposalInputSchema, "input");
+  const parameters = typeBoxFromZod(presentationProposalParametersSchema, "input");
   const tool: AgentTool<typeof parameters> = {
     name: "propose_classroom_presentation",
     label: "提交 Dashi 演示确认",

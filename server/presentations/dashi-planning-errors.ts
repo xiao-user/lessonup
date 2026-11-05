@@ -4,11 +4,12 @@ const messages = {
   presentation_theme_mismatch: "本次演示已有固定主题，请沿用该主题继续；更换主题需另行确认。",
   presentation_theme_binding_failed: "演示主题未能保存，本轮已停止。请稍后重试，保留当前演示任务。",
   presentation_planning_blocked: "演示主题校验重复失败，本轮已停止。请核对主题后继续当前演示任务。",
+  presentation_proposal_blocked: "演示内容提交重复失败，本轮已停止。已保留当前任务，请修复问题后重试。",
 } as const;
 
 export type DashiPlanningErrorCode = keyof typeof messages;
 const terminalCodes: ReadonlySet<DashiPlanningErrorCode> = new Set([
-  "presentation_theme_binding_failed", "presentation_planning_blocked",
+  "presentation_theme_binding_failed", "presentation_planning_blocked", "presentation_proposal_blocked",
 ]);
 
 /** Errors carry only safe business codes; provider and persistence errors stay private. */
