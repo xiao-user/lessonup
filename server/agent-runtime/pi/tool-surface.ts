@@ -18,7 +18,6 @@ import { createPiCurriculumTools } from "./curriculum-tools.js";
 import { createPiDesignBasisReadTools } from "./design-basis-tools.js";
 import { createPiWebTools } from "./web-tools.js";
 import { trackEvidenceAttempts } from "./evidence-attempts.js";
-import { createPiReadSkillTool } from "./skill-tools.js";
 import { type ToolSurface } from "../../conversation/turn-resolver.js";
 import { type PiDashi } from "./contracts.js";
 
@@ -77,7 +76,6 @@ export class PiToolSurface {
     const decisions = createPiDecisionTools(repository, context, plan);
     const document = createPiDocumentProposalTool({ repository, context, plan });
     const tools = [
-      ...(skills.length ? [createPiReadSkillTool(skills)] : []),
       ...createPiLessonReadTools(repository, scope, {
         requireCompleteDocument: plan.presentationRequested && !plan.presentationThemeConfirmationRequired,
       }),

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type {
   CapabilityPlan,
   LessonAgentContext,
+  LessonPlan,
   SemesterFrameworkAgentContext,
 } from "../../domain.js";
 import {
@@ -81,6 +82,41 @@ describe("turn context policy", () => {
       requiredEvidenceKinds: ["curriculum_standard_search"] }, "write");
     expect(sourceBound.policy.evidence.instruction).toContain("call complete_without_change");
     expect(sourceBound.policy.evidence.instruction).toContain("An empty search is not evidence");
+  });
+
+  it("binds the current complete document to a full rewrite without a duplicate read round", () => {
+    const document = {
+      unit: "第一单元",
+      period: "第 1 课时",
+      totalPeriods: "共 2 课时",
+      topic: "春日图景",
+      objectives: "辨认五幅画面",
+      knowledgePoints: "对象与特点",
+      continuity: "承接小学写景经验",
+      focus: "用证据概括",
+      preparation: "课文",
+      process: "圈画并概括",
+      assessment: "完成概括表",
+      homework: "摘录一处描写",
+      board: "对象—特点",
+      reflection: "",
+    } satisfies LessonPlan;
+    const context = lessonTurnContext(
+      lessonContext,
+      [],
+      { ...basePlan, writeMode: "explicit", fullRewriteRequested: true },
+      "write",
+      undefined,
+      [],
+      document,
+    );
+    expect(context.canonicalDocument).toEqual({
+      source: "server_bound_current_version",
+      version: 7,
+      complete: true,
+      fields: document,
+    });
+    expect(context.policy.evidence.instruction).toContain("do not call read_document");
   });
 
   it("keeps open lesson work able to reply or create an approval proposal", () => {

@@ -396,11 +396,12 @@ describe("Pi production coordinator", () => {
         expect(context.systemPrompt).toContain("段落或清单已能表达清楚时不加小标题");
         expect(context.systemPrompt).not.toContain("<available_skills>");
         expect((context.tools ?? []).map((tool) => tool.name)).not.toContain("read_skill");
-        return fauxAssistantMessage(fauxToolCall("read_document", {}), { stopReason: "toolUse" });
+        expect(turnContextOf(context)).toContain('"canonicalDocument"');
+        expect(turnContextOf(context)).toContain('"complete":true');
+        return fauxAssistantMessage(fauxToolCall("search_curriculum_standards", {
+          query: "语文阅读 理解语言材料",
+        }), { stopReason: "toolUse" });
       },
-      fauxAssistantMessage(fauxToolCall("search_curriculum_standards", {
-        query: "语文阅读 理解语言材料",
-      }), { stopReason: "toolUse" }),
       fauxAssistantMessage(fauxToolCall("propose_document_patch", { readingEmphasis: { kind: "marked", reason: "关键证据是学生解释判断的依据。", spans: [{ field: "process", text: "关键证据", tone: "yellow" }] },
         summary: "完善教学过程",
         operations: [{
@@ -427,7 +428,59 @@ describe("Pi production coordinator", () => {
     });
     expect(await repository.getLessonFile(ownerId, lessonFileId)).toMatchObject({ documentVersion: 0 });
     const run = await repository.getLatestRun(ownerId, created.thread.id, created.branch.id);
-    expect(run?.tokenUsage?.requests).toBe(3); // Read, evidence, proposal; no Skill-read request.
+    expect(run?.tokenUsage?.requests).toBe(2); // Preloaded document, evidence, proposal.
+  });
+
+  it("regenerates a complete lesson from the preloaded A4 in one provider request", async () => {
+    const { repository, created, faux, coordinator } = await fixture();
+    faux.setResponses([
+      (context) => {
+        expect((context.tools ?? []).map((tool) => tool.name)).toContain("read_document");
+        const turnContext = turnContextOf(context);
+        expect(turnContext).toContain('"source":"server_bound_current_version"');
+        expect(turnContext).toContain('"complete":true');
+        expect(turnContext).toContain('"process":"提出中心问题，小组圈画证据并说明表达效果"');
+        expect(turnContext).toContain("do not call read_document");
+        return fauxAssistantMessage(fauxToolCall("propose_document_patch", {
+          summary: "重新生成完整 A4 教案",
+          operations: [
+            { field: "objectives", replacement: "用两处景物描写证据解释济南冬天的温晴。" },
+            { field: "process", replacement: "先独立圈画景物描写，再用证据卡说明温晴，最后与同伴核对理由。" },
+          ],
+        }), { stopReason: "toolUse" });
+      },
+    ]);
+
+    await coordinator.start({
+      userId: ownerId,
+      threadId: created.thread.id,
+      branchId: created.branch.id,
+      message: "重新生成整份教案内容",
+      activeSectionId: "process",
+      documentVersion: 0,
+      attachmentIds: [],
+    }, () => undefined);
+
+    const run = await repository.getLatestRun(ownerId, created.thread.id, created.branch.id);
+    expect(run).toMatchObject({
+      status: "completed",
+      tokenUsage: { requests: 1 },
+      capabilityPlan: {
+        fullRewriteRequested: true,
+        writeMode: "explicit",
+        evidenceRequired: false,
+        mcpServers: [],
+      },
+    });
+    const approvals = await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id);
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]?.patch).toMatchObject({
+      operations: [
+        { field: "objectives" },
+        { field: "process" },
+      ],
+    });
+    expect(await repository.getLessonFile(ownerId, lessonFileId)).toMatchObject({ documentVersion: 0 });
   });
 
   it("binds a delegated theme durably and resumes the original presentation after both real follow-up phrases", async () => {
@@ -498,32 +551,26 @@ describe("Pi production coordinator", () => {
     expect(JSON.stringify(events)).not.toContain("provider_credentials");
   });
 
-  it("rejects promised-but-missing emphasis and lets the same native run repair the actual proposal before approval", async () => {
+  it("derives reading emphasis from the actual proposal without a redundant model repair round", async () => {
     const { repository, created, faux, coordinator } = await fixture();
     const input = { userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
       activeSectionId: "process", documentVersion: 0, attachmentIds: [], message: "重新生成当前教案，精简一些" };
-    const readingEmphasis = { kind: "marked", reason: "学生必须用证据解释效果。",
-      spans: [{ field: "process", text: "具体证据", tone: "pink" }] };
     faux.setResponses([
       fauxAssistantMessage(fauxToolCall("read_document", {}), { stopReason: "toolUse" }),
-      fauxAssistantMessage(fauxToolCall("propose_document_patch", { readingEmphasis, summary: "精简任务并突出证据要求",
-        operations: [{ field: "process", replacement: "学生圈画具体证据，再解释效果。" }] }), { stopReason: "toolUse" }),
-      async context => {
-        expect(await repository.listPendingApprovals(ownerId, input.threadId, input.branchId)).toEqual([]);
-        const transcript = (context.messages ?? []) as Array<{ role?: string; content?: unknown }>;
-        const lastToolResult = transcript.filter(message => message.role === "toolResult").at(-1);
-        console.log("PROBE:" + JSON.stringify(lastToolResult).slice(0, 400));
-        expect(JSON.stringify(context.messages)).toContain("reading_emphasis_mismatch");
-        return fauxAssistantMessage(fauxToolCall("propose_document_patch", { readingEmphasis, summary: "精简任务并突出证据要求",
-          operations: [{ field: "process", replacement: "学生圈画=={pink}具体证据==，再解释效果。" }] }), { stopReason: "toolUse" });
-      },
+      fauxAssistantMessage(fauxToolCall("propose_document_patch", {
+        summary: "精简任务并突出证据要求",
+        operations: [{ field: "process", replacement: "学生圈画=={pink}具体证据==，再解释效果。" }],
+        // Older models may still send this redundant manifest. It is ignored;
+        // the final replacement remains the source of truth.
+        readingEmphasis: { kind: "not_needed" },
+      }), { stopReason: "toolUse" }),
     ]);
     const events: any[] = [];
     await coordinator.start(input, event => { events.push(event); });
     const [approval] = await repository.listPendingApprovals(ownerId, input.threadId, input.branchId);
     expect(approval.patch).toMatchObject({ operations: [{ field: "process", replacement: "学生圈画=={pink}具体证据==，再解释效果。" }] });
     expect(approval.patch).toMatchObject({ summary: expect.stringContaining("1 处阅读重点标记") });
-    expect(events.filter(event => event.type === "tool.completed" && event.name === "propose_document_patch").map(event => event.ok)).toEqual([false, true]);
+    expect(events.filter(event => event.type === "tool.completed" && event.name === "propose_document_patch").map(event => event.ok)).toEqual([true]);
     expect((await repository.getLessonFile(ownerId, lessonFileId))?.documentVersion).toBe(0);
     await coordinator.resumeApproval({ userId: ownerId, runId: approval.runId, approvalId: approval.id,
       approved: true, idempotencyKey: "verified-reading-emphasis", emit: () => undefined });
@@ -536,8 +583,10 @@ describe("Pi production coordinator", () => {
     faux.setResponses([
       fauxAssistantMessage(fauxToolCall("read_document", {}), { stopReason: "toolUse" }),
       fauxAssistantMessage(fauxToolCall("propose_document_patch", {
-        readingEmphasis: { kind: "marked", reason: "关键证据需要突出。", spans: [{ field: "process", text: "证据", tone: "yellow" }] },
-        summary: "已突出证据", operations: [{ field: "process", replacement: "用证据解释效果。" }],
+        summary: "已突出证据", operations: [{
+          field: "process",
+          replacement: "“春天像刚落地的娃娃”是借喻，本体不出现。",
+        }],
       }), { stopReason: "toolUse" }),
       fauxAssistantMessage("已经完成。"), fauxAssistantMessage("已经完成。"), fauxAssistantMessage("已经完成。"),
     ]);
@@ -974,11 +1023,11 @@ describe("Pi production coordinator", () => {
           "propose_document_patch",
           "query_dashi_layouts",
           "read_document",
-          "read_skill",
         ]));
-        expect(context.systemPrompt).toContain("<available_skills>");
+        expect(context.systemPrompt).toContain("<active_skills>");
         expect(context.systemPrompt).toContain("dashi-ppt");
-        expect(context.systemPrompt).not.toContain("one content artifact only");
+        expect(context.systemPrompt).toContain("one content artifact only");
+        expect(context.systemPrompt).not.toContain("read_skill");
         const querySchema = JSON.stringify(context.tools?.find((tool) => tool.name === "query_dashi_layouts")?.parameters);
         const proposalSchema = JSON.stringify(context.tools?.find((tool) => tool.name === "propose_classroom_presentation")?.parameters);
         expect(querySchema).toContain('"theme"');
@@ -1051,6 +1100,7 @@ describe("Pi production coordinator", () => {
       idempotencyKey: "approve-once",
       emit: (event) => { continuationEvents.push(event); },
     });
+    expect((await repository.getRun(ownerId, approvals[0]!.runId))?.tokenUsage?.requests).toBe(5);
 
     expect(calls).toEqual(["query", "query", "inspect", "render"]);
     await expect(presentations.list(ownerId, lessonFileId)).resolves.toHaveLength(1);
@@ -1597,9 +1647,23 @@ describe("Pi production coordinator", () => {
       fauxAssistantMessage(fauxToolCall("propose_classroom_presentation", {
         ...presentationProposal(invalidGoal, "第一次提交"),
       }), { stopReason: "toolUse" }),
-      fauxAssistantMessage(fauxToolCall("propose_classroom_presentation", {
-        ...presentationProposal(goal, "修正 Dashi 属性后提交"),
-      }), { stopReason: "toolUse" }),
+      (context) => {
+        const transcript = context.messages as Array<{
+          role?: string;
+          content?: Array<{ type?: string; text?: string }>;
+        }>;
+        const lastResult = transcript.filter((message) => message.role === "toolResult").at(-1);
+        const text = lastResult?.content?.find((part) => part.type === "text")?.text ?? "";
+        const payload = JSON.parse(text.slice(text.indexOf(":") + 1)) as {
+          revision?: { baseToolCallId?: string };
+        };
+        expect(payload.revision?.baseToolCallId).toBeTruthy();
+        return fauxAssistantMessage(fauxToolCall("propose_classroom_presentation", {
+          summary: "修正 Dashi 属性后提交",
+          baseToolCallId: payload.revision!.baseToolCallId,
+          title: goal.title,
+        }), { stopReason: "toolUse" });
+      },
     ]);
 
     await coordinator.start({
@@ -1612,6 +1676,9 @@ describe("Pi production coordinator", () => {
       attachmentIds: [],
     }, () => undefined);
 
+    const completedRun = await repository.getLatestRun(ownerId, created.thread.id, created.branch.id);
+    expect(completedRun?.error).toBeUndefined();
+    expect(completedRun).toMatchObject({ status: "awaiting_approval" });
     const approvals = await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id);
     expect(approvals).toHaveLength(1);
     expect(approvals[0]?.patch).toMatchObject({

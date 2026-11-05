@@ -471,6 +471,7 @@ export class PiLessonAgentCoordinator {
             resolvedTurn.toolSurface,
             presentationRequest,
             recentPresentationDesigns,
+            plan.fullRewriteRequested ? loaded.document : undefined,
           );
         }
       }

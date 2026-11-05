@@ -153,20 +153,20 @@ describe("Pi native Agent session state", () => {
     expect(findPiCompactionCursor(transcript, 2)).toBe(6);
   });
 
-  it("lists pinned skills as a catalog without inlining instructions", () => {
+  it("inlines the selected pinned Skill to avoid a separate instruction-read round", () => {
     const prompt = systemPromptWithSkills("base", [{
       id: "classroom-direction",
       version: "1.2.3",
       description: "课堂编导",
-      instructions: "按学习过程组织课堂材料。这是一段不应出现在系统提示里的正文。",
+      instructions: "按学习过程组织课堂材料。",
       requiredTools: [],
       requiredMcp: [],
     }]);
-    expect(prompt).toContain("<available_skills>");
+    expect(prompt).toContain("<active_skills>");
     expect(prompt).toContain("<name>classroom-direction</name>");
     expect(prompt).toContain("1.2.3");
-    expect(prompt).toContain("skill://classroom-direction@1.2.3");
-    expect(prompt).not.toContain("按学习过程组织课堂材料。");
+    expect(prompt).toContain("按学习过程组织课堂材料。");
+    expect(prompt).not.toContain("read_skill");
   });
 
   it("separates a transcript worth summarizing from one that cannot be sent without a summary", () => {

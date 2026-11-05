@@ -409,6 +409,16 @@ describe("deterministic turn policy", () => {
     expect(plan.requiredEvidenceKinds).toBeUndefined();
   });
 
+  it("treats an explicit full regeneration as a direct rewrite without evidence lookup", () => {
+    expect(deterministicCapabilityPlan("重新生成整份教案内容")).toMatchObject({
+      fullRewriteRequested: true,
+      writeMode: "explicit",
+      mcpServers: [],
+      evidenceRequired: false,
+      requestedDocumentFields: undefined,
+    });
+  });
+
   it.each([
     ["完整编写教案，无需引用课标，但须读取附件并核对其中的任务。", ["attachment_read"], ["knowledge"]],
     ["完整编写教案，不绑定教材页码或课标引文；请联网核验最新统计数据。", ["web_open"], ["knowledge", "web"]],

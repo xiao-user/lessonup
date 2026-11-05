@@ -229,28 +229,28 @@ export class PublicTextGuard {
 
 export function systemPromptWithSkills(base: string, skills: PlatformSkill[]) {
   if (!skills.length) return base;
-  const catalog = skills.map((skill) => [
-    "<skill>",
+  // The selected Skill is part of the cacheable system prefix. Inline it
+  // immediately instead of spending one full provider round reading the same
+  // pinned instructions before the first useful tool call.
+  const instructions = skills.map((skill) => [
+    `<skill id="${skill.id}" version="${skill.version}">`,
     `<name>${skill.id}</name>`,
     `<description>${skill.description}</description>`,
-    `<location>skill://${skill.id}@${skill.version}</location>`,
-    "</skill>",
+    skill.instructions,
+    `</skill>`,
   ].join("\n")).join("\n");
   return [
     base,
     "",
-    "任务匹配下列目录描述时，先调用 read_skill 读取该钉定版本全文；未读全文不得按该 Skill 写作。",
-    "<available_skills>",
-    catalog,
-    "</available_skills>",
+    "本轮已选择下列钉定版本 Skill。直接按其完整说明执行。",
+    "<active_skills>",
+    instructions,
+    "</active_skills>",
   ].join("\n");
 }
 
 export function assertSkillTools(skills: PlatformSkill[], tools: AgentTool<any>[]) {
   const names = new Set(tools.map((tool) => tool.name));
-  if (skills.length && !names.has("read_skill")) {
-    throw new Error("pi_skill_required_tool_missing:read_skill");
-  }
   for (const skill of skills) {
     for (const required of skill.requiredTools) {
       if (!names.has(required)) throw new Error(`pi_skill_required_tool_missing:${skill.id}:${required}`);

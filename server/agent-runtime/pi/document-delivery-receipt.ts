@@ -4,7 +4,7 @@ import type { VerifiedReadingEmphasis } from "./reading-emphasis.js";
 
 /**
  * Delivery facts for a lesson patch are derived from the materialized proposal
- * and the verified emphasis manifest. A free-text model summary is never the
+ * and the emphasis parsed from the final replacements. A free-text model summary is never the
  * source of a teacher-facing completion claim; it cannot survive a preflight
  * that produced nothing, and it may not pass an unverified promise through the
  * receipt.

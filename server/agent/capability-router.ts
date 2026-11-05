@@ -53,7 +53,7 @@ const explicitApprovalPattern = /(?:提交|生成|创建).{0,14}(?:修改|调整
 // into a much larger and failure-prone tool loop.
 const designBasisWritePattern = /(?:保存|记录)(?:为|到|进|至)?(?:本课|当前|结构化|教案)*设计依据|形成(?:一条|必要|本课|当前|结构化)*设计依据|(?:新增|添加|建立|删除|纠正|修改)(?:一条|这条|这些|当前|已有|结构化|教案|\s){0,8}设计依据|设计依据(?:记录)?(?:中|里)?(?:新增|添加|删除|纠正|修改)|(?:把|将)?(?:已确认|已有|当前)?的?设计依据落实到(?:教案|A4|目标|评价|过程)/;
 const minimalWritePattern = /(?:只|仅).{0,12}(?:一处|一个栏目|最关键).{0,16}(?:修改|调整|建议)|(?:最小|最少).{0,8}(?:修改|调整|建议)|只生成一处/;
-const fullRewritePattern = /重新(?:整理|编写|改写|重写|重编)|(?:整份|完整|全面).{0,10}(?:整理|重写|重编|改写|编写)|(?:整理|重编)(?:当前)?教案|把.{0,12}模板教案.{0,12}(?:转化|整理|重编|改写)/;
+const fullRewritePattern = /重新(?:整理|编写|改写|重写|重编)|重新(?:生成|输出|产出).{0,16}(?:教案|A4|整份|完整|全栏|所有栏目)|(?:整份|完整|全面).{0,10}(?:整理|重写|重编|改写|编写|生成|输出|产出)|(?:生成|输出|产出).{0,10}(?:整份|完整|全栏).{0,10}(?:教案|A4)|(?:整理|重编)(?:当前)?教案|把.{0,12}模板教案.{0,12}(?:转化|整理|重编|改写)/;
 const classroomActionPattern = /可执行|直接实施|课堂调整|具体课时活动|学生产出|达成证据|落实到.{0,8}(?:课堂|活动)|教师动作|学生任务|可观察(?:产出|证据|表现)/;
 // 教师征求判断时使用的疑问与审议标记，以及 A4 写入意图的动词词表。
 // 咨询豁免、写入判定和疑问句兜底共用同一份词表：过去三处各自维护
@@ -311,7 +311,8 @@ export function requiresDocumentWrite(message: string) {
   if (explicitConsultationPattern.test(message)) return false;
   if (documentConsultationPattern.test(message)) return false;
   if (adviceOnlyPattern.test(message)) return false;
-  return documentWriteIntentVerbPattern.test(message)
+  return fullRewritePattern.test(message)
+    || documentWriteIntentVerbPattern.test(message)
     || /提交.{0,10}(?:修改|调整|建议|确认项)|(?:生成|创建).{0,10}(?:修改|调整|确认项)/.test(message);
 }
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { presentationGoalToolSchema } from "../domain.js";
 import { approvedPresentationGoalRequestSchema } from "./domain.js";
 import { dashiGoalSchema } from "./dashi-goal.js";
 
@@ -10,6 +11,23 @@ const goal = {
 };
 
 describe("Dashi presentation request", () => {
+  it("strips harmless top-level slide annotations before approval materialization", () => {
+    const parsed = presentationGoalToolSchema.parse({
+      summary: "课堂演示",
+      title: "标题",
+      goal: "目标",
+      slides: [{
+        layout: "theme01_page001",
+        props: { title: "可见标题" },
+        "任务：误放在页面对象上的说明": "",
+      }],
+    });
+    expect(parsed.slides[0]).toEqual({
+      layout: "theme01_page001",
+      props: { title: "可见标题" },
+    });
+  });
+
   it("requires a version-bound, teacher-approved native Dashi goal", () => {
     expect(approvedPresentationGoalRequestSchema.parse({
       expectedDocumentVersion: 3,

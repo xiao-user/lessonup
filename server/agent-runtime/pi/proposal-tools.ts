@@ -1,4 +1,5 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { z } from "zod";
 import {
   documentFieldPatchToolSchema,
   designBasisProjectionToolSchema,
@@ -21,13 +22,10 @@ import { findKnownLessonContentIssues } from "../../agent/lesson-content-validat
 import { evidenceRequiredToolError, validateObservedEvidence } from "../../agent/evidence-validation.js";
 import { assertDocumentWriteScope } from "../../agent/write-scope.js";
 import { validateLessonDesignProposalReferences } from "../../agent/design-basis-validation.js";
-import { typeBoxFromZod } from "./schema-adapter.js";import { dashiGoalSchema, type DashiGoal } from "../../presentations/dashi-goal.js";
-import { readingEmphasisSchema, verifyReadingEmphasis } from "./reading-emphasis.js";
+import { typeBoxFromZod } from "./schema-adapter.js";
+import { dashiGoalSchema, dashiJsonValueSchema, type DashiGoal } from "../../presentations/dashi-goal.js";
+import { deriveReadingEmphasis } from "./reading-emphasis.js";
 import { documentDeliveryReceipt } from "./document-delivery-receipt.js";
-
-const documentAuthoringToolSchema = documentFieldPatchToolSchema.extend({
-  readingEmphasis: readingEmphasisSchema.describe("随正文生成的阅读设计。marked 时列出所有 replacement 中实际标记的 field、原文 text 和 tone；不需要笔迹时用 not_needed 并说明内容原因。不是每栏配额，不包括未修改栏目。"),
-});
 
 export type PiCapturedProposal = {
   /**
@@ -56,7 +54,7 @@ const pendingResult = (summary: string) => ({
   terminate: true,
 });
 
-function dashiPreflightError(error: unknown) {
+function dashiPreflightErrors(error: unknown) {
   const detail = (error as { detail?: unknown } | undefined)?.detail;
   if (typeof detail === "string") {
     try {
@@ -65,13 +63,76 @@ function dashiPreflightError(error: unknown) {
         ...(Array.isArray(report.goalSpecErrors) ? report.goalSpecErrors : []),
         ...(Array.isArray(report.propErrors) ? report.propErrors : []),
       ].filter((value): value is string => typeof value === "string"))].slice(0, 8);
-      if (errors.length) return new Error(`dashi_goal_preflight_failed:${JSON.stringify(errors)}`);
+      if (errors.length) return errors;
     } catch {
-      // The native error code remains the safe fallback when output is not JSON.
+      // Fall through to the server-authored error code.
     }
   }
-  return error instanceof Error ? error : new Error("dashi_goal_preflight_failed");
+  const message = error instanceof Error ? error.message : "";
+  const prefix = "dashi_visible_copy_incomplete:";
+  if (message.startsWith(prefix)) {
+    try {
+      const parsed = JSON.parse(message.slice(prefix.length));
+      if (Array.isArray(parsed)) {
+        return parsed.filter((value): value is string => typeof value === "string").slice(0, 8);
+      }
+    } catch {
+      // The safe code below is enough for an unexpected validation failure.
+    }
+  }
+  return ["dashi_goal_preflight_failed"];
 }
+
+function dashiPreflightError(error: unknown, baseToolCallId: string) {
+  return new Error(`dashi_goal_preflight_failed:${JSON.stringify({
+    errors: dashiPreflightErrors(error),
+    revision: {
+      baseToolCallId,
+      instruction: "只提交需要修正的标题、目标、audience 或 slides[].index，不要重发整份演示。",
+    },
+  })}`);
+}
+
+const presentationProposalSlideRevisionSchema = z.object({
+  index: z.number().int().min(0).max(39),
+  layout: z.string().regex(/^theme(?:0[1-9]|1[0-2])_page\d{3}$/).optional(),
+  props: z.record(z.string(), dashiJsonValueSchema),
+}).strict().superRefine((slide, context) => {
+  if (!slide.layout && !Object.keys(slide.props).length) {
+    context.addIssue({
+      code: "custom",
+      path: ["props"],
+      message: "slide_revision_required",
+    });
+  }
+});
+
+const presentationProposalRevisionSchema = z.object({
+  summary: z.string().trim().min(1).max(500),
+  baseToolCallId: z.string().min(1).max(200),
+  title: z.string().trim().min(1).max(240).optional(),
+  goal: z.string().trim().min(1).max(2_000).optional(),
+  audience: z.string().trim().max(500).optional(),
+  slides: z.array(presentationProposalSlideRevisionSchema).max(40).optional(),
+}).strict().superRefine((proposal, context) => {
+  if (
+    proposal.title === undefined
+    && proposal.goal === undefined
+    && proposal.audience === undefined
+    && !proposal.slides?.length
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["baseToolCallId"],
+      message: "presentation_revision_required",
+    });
+  }
+});
+
+const presentationProposalInputSchema = z.union([
+  presentationGoalToolSchema,
+  presentationProposalRevisionSchema,
+]);
 
 function captureSlot() {
   let captured: PiCapturedProposal | null = null;
@@ -93,19 +154,19 @@ export function createPiDocumentProposalTool(args: {
   // Provider-side validation sees the same shape the business validator parses.
   // An output-mode schema would reject the call before any handler can explain
   // the problem to the model.
-  const parameters = typeBoxFromZod(documentAuthoringToolSchema, "input");
+  const parameters = typeBoxFromZod(documentFieldPatchToolSchema, "input");
   const tool: AgentTool<typeof parameters> = {
     name: "propose_document_patch",
     label: "准备教案修改确认",
-    description: "提交当前 A4 教案的完整 Markdown 字段正文供教师确认。按本课重要性将适合局部强调的重点直接写成 ==重点==、=={pink}重点== 等荧光或 =={blue}重点== 等划线，遵守系统 A4 阅读指导，不以加粗替代或机械涂色；保留无关原文与教师标记。readingEmphasis 必须与正文中所有实际笔迹逐项对应；不需要笔迹时明确说明原因。交付摘要由服务端按实际修改栏目与已验证标记生成，不由说明文字决定。每项 operation 为完整字段 replacement，当前原文快照由服务端绑定；未经批准不会写入。",
+    description: "提交当前 A4 教案的完整 Markdown 字段正文供教师确认。按本课重要性将适合局部强调的重点直接写成 ==重点==、=={pink}重点== 等荧光或 =={blue}重点== 等划线，遵守系统 A4 阅读指导，不以加粗替代或机械涂色；保留无关原文与教师标记。交付摘要由服务端从实际 replacement 推导，不由说明文字或重复清单决定。每项 operation 为完整字段 replacement，当前原文快照由服务端绑定；未经批准不会写入。",
     parameters,
     executionMode: "sequential",
     execute: async (toolCallId, raw) => {
       if (args.plan.writeMode === "consultative") {
         throw new Error("document_write_not_requested");
       }
-      const proposal = documentAuthoringToolSchema.parse(raw);
-      const readingEmphasis = verifyReadingEmphasis(proposal.readingEmphasis, proposal.operations);
+      const proposal = documentFieldPatchToolSchema.parse(raw);
+      const readingEmphasis = deriveReadingEmphasis(proposal.operations);
       assertDocumentWriteScope(proposal, args.plan.requestedDocumentFields);
       if (args.plan.minimalWriteRequested && proposal.operations.length > 1) {
         throw new Error("too_many_document_operations");
@@ -157,18 +218,58 @@ export function createPiPresentationProposalTool(args: {
   assertPlanningEvidence?: (goal: DashiGoal) => void;
 }) {
   const slot = captureSlot();
-  const parameters = typeBoxFromZod(presentationGoalToolSchema);
+  let correctionCandidate: {
+    toolCallId: string;
+    proposal: z.infer<typeof presentationGoalToolSchema>;
+  } | null = null;
+  const parameters = typeBoxFromZod(presentationProposalInputSchema, "input");
   const tool: AgentTool<typeof parameters> = {
     name: "propose_classroom_presentation",
     label: "提交 Dashi 演示确认",
-    description: "直接提交最终课堂演示的标题、目标和 slides；主题与教案版本已由服务端绑定，批准后原样渲染。",
+    description: "直接提交最终课堂演示的标题、目标和 slides；主题与教案版本已由服务端绑定，批准后原样渲染。若预检返回 baseToolCallId，只提交需要修正的字段或 slide 索引，不必重发整份演示；只有该 ID 已不可用时才重新提交完整提案。",
     parameters,
     executionMode: "sequential",
     execute: async (toolCallId, raw) => {
-      const proposal = presentationGoalToolSchema.parse(raw);
+      const input = presentationProposalInputSchema.parse(raw);
+      let proposal: z.infer<typeof presentationGoalToolSchema>;
+      if ("baseToolCallId" in input) {
+        const base = correctionCandidate?.toolCallId === input.baseToolCallId
+          ? correctionCandidate.proposal
+          : null;
+        if (!base) throw new Error("presentation_revision_base_unavailable");
+        const slideRevisions = input.slides ?? [];
+        const indices = slideRevisions.map((slide) => slide.index);
+        if (new Set(indices).size !== indices.length) {
+          throw new Error("presentation_revision_duplicate_slide");
+        }
+        const revisions = new Map(slideRevisions.map((slide) => [slide.index, slide]));
+        if (indices.some((index) => index >= base.slides.length)) {
+          throw new Error("presentation_revision_slide_out_of_range");
+        }
+        proposal = {
+          ...base,
+          summary: input.summary,
+          ...(input.title === undefined ? {} : { title: input.title }),
+          ...(input.goal === undefined ? {} : { goal: input.goal }),
+          ...(input.audience === undefined ? {} : { audience: input.audience }),
+          slides: base.slides.map((slide, index) => {
+            const revision = revisions.get(index);
+            return revision ? {
+              layout: revision.layout ?? slide.layout,
+              props: revision.props,
+            } : slide;
+          }),
+        };
+      } else {
+        proposal = input;
+      }
       const file = await args.repository.getLessonFile(args.context.userId, args.context.lessonFileId);
       if (!file) throw new Error("lesson_file_not_found");
       if (file.documentVersion !== args.context.documentVersion) throw new Error("document_context_stale");
+      correctionCandidate = {
+        toolCallId,
+        proposal: structuredClone(proposal),
+      };
       let goal: DashiGoal;
       try {
         const theme = args.getTheme();
@@ -189,7 +290,7 @@ export function createPiPresentationProposalTool(args: {
         // Agent did not inspect or a slide whose visible defaults can leak.
         args.assertPlanningEvidence?.(goal);
       } catch (error) {
-        throw dashiPreflightError(error);
+        throw dashiPreflightError(error, toolCallId);
       }
       const patch: ResourcePatch = {
         kind: "presentation_storyboard",

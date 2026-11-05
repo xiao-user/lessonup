@@ -15,6 +15,27 @@ import type { PiToolSurface } from "./tool-surface.js";
 import { emitRunEvidence } from "./run-evidence.js";
 import { isDocumentDraftPatch } from "./document-draft.js";
 
+function mergeTokenUsage(
+  previous: AgentRunRecord["tokenUsage"],
+  continuation: AgentRunRecord["tokenUsage"],
+): AgentRunRecord["tokenUsage"] {
+  if (!previous) return continuation;
+  if (!continuation) return previous;
+  const add = (key: keyof NonNullable<AgentRunRecord["tokenUsage"]>) => (
+    (previous[key] ?? 0) + (continuation[key] ?? 0)
+  );
+  return {
+    input: add("input"),
+    output: add("output"),
+    cacheRead: add("cacheRead"),
+    cacheWrite: add("cacheWrite"),
+    totalTokens: add("totalTokens"),
+    requests: add("requests"),
+    inputTokens: add("inputTokens"),
+    cachedInputTokens: add("cachedInputTokens"),
+  };
+}
+
 /** Coordinates teacher decisions and durable delivery. Completed A4 drafts settle
  * independently; workflows that need continuation share ordinary Pi execution. */
 export class PiApprovalWorkflow {
@@ -382,6 +403,7 @@ export class PiApprovalWorkflow {
       content = result.content || content || "";
       await checkpoint.flush(content);
       const sources = await emitRunEvidence(this.repository, args.userId, args.runId, args.emit);
+      const cumulativeTokenUsage = mergeTokenUsage(run.tokenUsage, result?.tokenUsage);
       await this.repository.settleApprovalContinuation({
         ownerId: args.userId,
         approvalId: approval.id,
@@ -391,7 +413,7 @@ export class PiApprovalWorkflow {
         content,
         sources,
         sessionCursor: result?.sessionCursor,
-        tokenUsage: result?.tokenUsage,
+        tokenUsage: cumulativeTokenUsage,
         encryptedRunState: result ? encryptRunState(JSON.stringify({
           runtime: "pi",
           sessionRevision: result.sessionRevision,

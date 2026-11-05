@@ -48,7 +48,7 @@ export const presentationGoalToolSchema = z.object({
   slides: z.array(z.object({
     layout: z.string().regex(/^theme(?:0[1-9]|1[0-2])_page\d{3}$/),
     props: z.record(z.string(), dashiJsonValueSchema),
-  }).strict()).min(1).max(40),
+  })).min(1).max(40),
 }).strict();
 
 export type PresentationGoalPatch = {
