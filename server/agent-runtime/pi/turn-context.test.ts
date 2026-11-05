@@ -84,7 +84,7 @@ describe("turn context policy", () => {
     expect(sourceBound.policy.evidence.instruction).toContain("An empty search is not evidence");
   });
 
-  it("binds the current complete document to a full rewrite without a duplicate read round", () => {
+  it.each([false, true])("binds current A4 for ordinary work and full rewrites (fullRewrite=%s)", (fullRewriteRequested) => {
     const document = {
       unit: "第一单元",
       period: "第 1 课时",
@@ -104,7 +104,7 @@ describe("turn context policy", () => {
     const context = lessonTurnContext(
       lessonContext,
       [],
-      { ...basePlan, writeMode: "explicit", fullRewriteRequested: true },
+      { ...basePlan, writeMode: "explicit", fullRewriteRequested },
       "write",
       undefined,
       [],
@@ -117,6 +117,10 @@ describe("turn context policy", () => {
       fields: document,
     });
     expect(context.policy.evidence.instruction).toContain("do not call read_document");
+    expect(context.policy.evidence.instruction).toContain("supersedes older document text");
+    const oversized = { ...document, process: "文".repeat(20_000) };
+    expect(lessonTurnContext(lessonContext, [], basePlan, "write", undefined, [], oversized).canonicalDocument).toBeUndefined();
+    expect(lessonTurnContext(lessonContext, [], { ...basePlan, presentationRequested: true }, "write", undefined, [], document).canonicalDocument).toBeUndefined();
   });
 
   it("keeps open lesson work able to reply or create an approval proposal", () => {

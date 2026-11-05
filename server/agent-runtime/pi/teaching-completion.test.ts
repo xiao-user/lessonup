@@ -8,6 +8,14 @@ const tool = (name: string, execute = vi.fn(async () => ({ content: [{ type: "te
 } satisfies AgentTool<any>);
 
 describe("grounded no-change completion", () => {
+  it("accepts server-bound current text as canonical grounding without a duplicate read", async () => {
+    const runtime = withTeachingCompletion([], () => false, { canonicalContentBound: true });
+    const outcome = { kind: "no_change_needed", reason: "当前教案已简洁，目标、任务与评价完整对应。" };
+    await runtime.tools.at(-1)!.execute("complete", outcome);
+    expect(runtime.getNoChange()).toEqual(outcome);
+    const decision = withTeachingCompletion([], () => false, { canonicalContentBound: true, decisionCandidateRequired: true });
+    await expect(decision.tools.at(-1)!.execute("complete", outcome)).rejects.toThrow("decision_candidate_required");
+  });
   it("keeps an evidence-gap decision open until a candidate is saved", async () => {
     const proposal = tool("propose_decision");
     const runtime = withTeachingCompletion([tool("read_document"), proposal], () => false, { decisionCandidateRequired: true });

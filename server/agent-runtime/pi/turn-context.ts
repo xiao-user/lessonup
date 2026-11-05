@@ -39,14 +39,20 @@ export function lessonTurnContext(
 ) {
   const fast = plan.executionLane === "fast";
   const readOnly = toolSurface === "read";
+  // Bind ordinary A4 work to current text without a model round just to read it.
+  // Oversized documents retain scoped reads; full rewrites already require all text.
+  const boundDocument = preloadedDocument && !fast && !plan.presentationRequested
+    && (plan.fullRewriteRequested || (!context.selection
+      && new TextEncoder().encode(JSON.stringify(preloadedDocument)).byteLength <= 48 * 1024))
+    ? preloadedDocument : undefined;
   return {
     resource: { type: "lesson_file", version: context.documentVersion },
-    ...(preloadedDocument ? {
+    ...(boundDocument ? {
       canonicalDocument: {
         source: "server_bound_current_version",
         version: context.documentVersion,
         complete: true,
-        fields: preloadedDocument,
+        fields: boundDocument,
       },
     } : {}),
     focus: { sectionId: context.activeSectionId },
@@ -68,8 +74,8 @@ export function lessonTurnContext(
       evidence: {
         required: plan.evidenceRequired,
         kinds: plan.requiredEvidenceKinds ?? [],
-        instruction: `${preloadedDocument
-          ? "The canonical current A4 document is already bound above for this full-rewrite turn. Use it directly and do not call read_document merely to fetch the same version; only read again if the proposal tool reports a version change. "
+        instruction: `${boundDocument
+          ? "The canonical current A4 document is already bound above for this turn. It supersedes older document text in history. Use it directly and do not call read_document merely to fetch the same version; only read again if the proposal tool reports a version change. "
           : ""}${plan.taskIntent?.type === "decision_proposal"
           ? "Retrieve available evidence and distinguish document-design observations from student outcomes. Missing required sources must be named in uncertainties and saved via propose_decision with status insufficient_evidence; an evidence-gap candidate records an unresolved judgment, not approval to change the lesson. Never fabricate sources or treat synthetic observations as real classroom evidence. Do not call complete_without_change for this task."
           : plan.evidenceRequired

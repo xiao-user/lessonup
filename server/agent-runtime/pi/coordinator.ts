@@ -439,6 +439,11 @@ export class PiLessonAgentCoordinator {
             : [];
           pinnedSkills = this.toolSurface.skillsForSurface(plan, resolvedTurn.toolSurface);
           skills = pinnedSkills;
+          const turnContext = lessonTurnContext(
+            currentLesson, attachments, plan, resolvedTurn.toolSurface,
+            presentationRequest, recentPresentationDesigns, loaded.document,
+          );
+          runtimeTurnContext = turnContext;
           runtimeTools = this.toolSurface.toolsForLesson(
             currentLesson,
             plan,
@@ -463,15 +468,7 @@ export class PiLessonAgentCoordinator {
               plan.confirmedPresentationTheme = theme;
               await this.repository.updateRun(input.userId, runId, { capabilityPlan: plan });
             },
-          );
-          runtimeTurnContext = lessonTurnContext(
-            currentLesson,
-            attachments,
-            plan,
-            resolvedTurn.toolSurface,
-            presentationRequest,
-            recentPresentationDesigns,
-            plan.fullRewriteRequested ? loaded.document : undefined,
+            Boolean(turnContext.canonicalDocument),
           );
         }
       }

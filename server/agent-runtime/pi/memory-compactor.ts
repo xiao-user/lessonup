@@ -129,7 +129,8 @@ export class PiMemoryCompactor {
     const key = `${args.scope.ownerId}:${args.scope.threadId}:${args.scope.branchId}`;
     const existing = this.active.get(key);
     if (existing) return existing;
-    const task = this.compact(args);
+    // A running Agent may append messages while the summarizer awaits I/O.
+    const task = this.compact({ ...args, messages: [...args.messages] });
     this.active.set(key, task);
     const cleanup = () => {
       if (this.active.get(key) === task) this.active.delete(key);
@@ -157,24 +158,32 @@ export class PiMemoryCompactor {
     promptOverheadBytes?: number;
     signal?: AbortSignal;
   }) {
-    if (!piContextBudgetExceeded(
-      args.history,
-      args.memory,
-      this.options.model.contextWindow,
-      args.promptOverheadBytes,
-    )) return false;
-    const task = this.start({
-      scope: args.scope,
-      messages: args.history,
-      promptOverheadBytes: args.promptOverheadBytes,
-      signal: args.signal,
-    });
-    if (!task) throw new Error("agent_context_window_exceeded");
-    try {
-      await task;
-    } catch (error) {
-      throw new Error("agent_context_window_exceeded", { cause: error });
+    let memory = args.memory;
+    let waited = false;
+    // An in-flight background task may cover an older prefix. Join it first;
+    // if new tool results still do not fit, compact the newer snapshot once.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (!piContextBudgetExceeded(args.history, memory, this.options.model.contextWindow, args.promptOverheadBytes)) return waited;
+      const task = this.start({
+        scope: args.scope,
+        messages: args.history,
+        promptOverheadBytes: args.promptOverheadBytes,
+        signal: args.signal,
+      });
+      if (!task) throw new Error("agent_context_window_exceeded");
+      try {
+        await task;
+      } catch (error) {
+        throw new Error("agent_context_window_exceeded", { cause: error });
+      }
+      waited = true;
+      memory = validatePiThreadMemory(await this.options.repository.getThreadMemory(
+        args.scope.ownerId, args.scope.threadId, args.scope.branchId,
+      ), args.history.length)?.summary;
     }
-    return true;
+    if (piContextBudgetExceeded(args.history, memory, this.options.model.contextWindow, args.promptOverheadBytes)) {
+      throw new Error("agent_context_window_exceeded");
+    }
+    return waited;
   }
 }

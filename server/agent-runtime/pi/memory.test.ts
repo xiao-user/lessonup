@@ -48,7 +48,7 @@ describe("Pi memory compaction helpers", () => {
     ];
     expect(shouldCompactPiMemory(transcript, 128_000)).toBe(true);
     expect(canCompactPiMemory(transcript, 128_000)).toBe(true);
-    expect(piKeepRecentTokens(128_000)).toBe(20_000);
+    expect(piKeepRecentTokens(128_000)).toBe(8_000);
   });
 
   it("includes the system, schema, and turn-policy overhead in the context budget", () => {

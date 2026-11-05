@@ -54,6 +54,7 @@ export class PiToolSurface {
     presentationSeed?: string,
     presentationLanguage?: "zh" | "en",
     onThemeBound?: (theme: DashiThemeId) => void | Promise<void>,
+    canonicalContentBound = false,
   ) {
     const { repository, attempts } = trackEvidenceAttempts(this.repository);
     const scope = {
@@ -137,6 +138,7 @@ export class PiToolSurface {
     const completion = teaching
       ? withTeachingCompletion(tools, () => Boolean(getProposal() || learning.getLearningProposal() || decisions.getDecisionProposal()), {
           decisionCandidateRequired: plan.taskIntent?.type === "decision_proposal",
+          canonicalContentBound,
         })
       : null;
     return {

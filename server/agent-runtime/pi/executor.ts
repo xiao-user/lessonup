@@ -4,7 +4,7 @@ import { Agent, type AgentMessage, type AgentTool, type StreamFn } from "@earend
 import type { LessonRepository } from "../../repository.js";
 import { type PlatformSkill } from "../../agent/skill-registry.js";
 import { decodePiAgentMessages, encodePiAgentMessages } from "./message-codec.js";
-import { canCompactPiMemory, piContextBudgetExceeded, piProviderPromptOverheadBytes, validatePiThreadMemory } from "./memory.js";
+import { piContextBudgetExceeded, piProviderPromptOverheadBytes, validatePiThreadMemory } from "./memory.js";
 import { bindFastProviderContext, bindProviderContext, FAST_SYSTEM_INSTRUCTIONS, STATIC_SYSTEM_INSTRUCTIONS } from "./prompt-layout.js";
 import { DEFAULT_TEACHER_THINKING_LEVEL, type TeacherThinkingLevel } from "./thinking-level.js";
 import { firstChangedRuntimeMessageIndex } from "../../repositories/runtime-session-persist.js";
@@ -122,6 +122,12 @@ export class PiAgentExecutor {
         throw new Error("agent_context_window_exceeded");
       }
     }
+    if (lane !== "fast") this.memoryCompactor.schedule({
+      scope: args.scope,
+      messages: durableHistory,
+      promptOverheadBytes,
+      signal: args.signal,
+    });
 
     let turnCount = 0;
     let completionAttempts = 0;
@@ -171,12 +177,18 @@ export class PiAgentExecutor {
           && !(turnToolTerminates.length > 0 && turnToolTerminates.every(Boolean));
         turnToolTerminates = [];
         if (turnCount >= (args.maxTurns ?? 16)) return true;
-        const compactNow = canCompactPiMemory(
+        const compactNow = piContextBudgetExceeded(
           context.context.messages,
-          this.model.contextWindow,
           memory,
+          this.model.contextWindow,
           promptOverheadBytes,
         );
+        if (lane !== "fast" && !compactNow) this.memoryCompactor.schedule({
+          scope: args.scope,
+          messages: context.context.messages,
+          promptOverheadBytes,
+          signal: args.signal,
+        });
         if (innerLoopContinues) {
           if (compactNow) {
             compactBeforeNextLlm = true;
@@ -308,9 +320,10 @@ export class PiAgentExecutor {
       ) {
         compactCycles += 1;
         compactBeforeNextLlm = false;
-        await this.memoryCompactor.compact({
+        await this.memoryCompactor.awaitRequired({
           scope: args.scope,
-          messages: agent.state.messages,
+          history: agent.state.messages,
+          memory,
           promptOverheadBytes,
           signal: args.signal,
         });
@@ -318,6 +331,9 @@ export class PiAgentExecutor {
           await this.repository.getThreadMemory(ownerId, threadId, branchId),
           agent.state.messages.length,
         )?.summary;
+        if (piContextBudgetExceeded(agent.state.messages, memory, this.model.contextWindow, promptOverheadBytes)) {
+          throw new Error("agent_context_window_exceeded");
+        }
         if (pendingCompletionFollowUp) {
           agent.followUp({
             role: "user",

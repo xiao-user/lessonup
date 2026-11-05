@@ -32,6 +32,11 @@ export const PI_MEMORY_COMPACTION_TRIGGER_UTILIZATION = 0.6;
  */
 export const PI_MEMORY_REQUIRED_UTILIZATION = 0.9;
 
+// Latency budget for history, independent of the model's maximum window.
+// These are conservative byte-derived token estimates, not tokenizer counts.
+export const PI_MEMORY_HISTORY_TARGET_TOKENS = 32_000;
+export const PI_MEMORY_RECENT_TARGET_TOKENS = 8_000;
+
 /**
  * A summary is a context-saving device, so it needs its own total budget.
  * Per-field limits alone allow a syntactically valid summary to grow large
@@ -67,7 +72,7 @@ export function piCompactionSettings(contextWindowTokens: number): CompactionSet
 }
 
 export function piKeepRecentTokens(contextWindowTokens: number) {
-  return piCompactionSettings(contextWindowTokens).keepRecentTokens;
+  return Math.min(piCompactionSettings(contextWindowTokens).keepRecentTokens, PI_MEMORY_RECENT_TARGET_TOKENS);
 }
 
 function providerBoundView(messages: AgentMessage[], memory?: PiMemorySummary) {
@@ -245,9 +250,9 @@ export function piProviderPromptOverheadBytes(value: {
 }
 
 /**
- * Primary trigger is official `estimateContextTokens` / `shouldCompact`
- * (window minus reserve). Byte-share of the window is only a fallback when
- * usage is missing or understates a large serialized transcript.
+ * Capacity triggers follow native usage estimates and the window byte share.
+ * A separate history budget also starts background work well before a large
+ * model window fills. It never makes a foreground request wait by itself.
  */
 export function shouldCompactPiMemory(
   messages: AgentMessage[],
@@ -263,7 +268,9 @@ export function shouldCompactPiMemory(
     return true;
   }
   return piEffectiveContextBytes(messages, memory, promptOverheadBytes)
-    >= piMemoryCompactionTriggerBytes(contextWindowTokens);
+    >= piMemoryCompactionTriggerBytes(contextWindowTokens)
+    || piEffectiveContextBytes(messages, memory)
+      >= PI_MEMORY_HISTORY_TARGET_TOKENS * PI_MEMORY_BYTES_PER_TOKEN;
 }
 
 export function canCompactPiMemory(

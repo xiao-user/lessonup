@@ -10,6 +10,7 @@ import { createNodeSkillRegistry } from "../../agent/skill-registry-node.js";
 import { deterministicCapabilityPlan } from "../../agent/capability-router.js";
 import { encodePiAgentMessages } from "./message-codec.js";
 import { PiLessonAgentCoordinator } from "./coordinator.js";
+import { PiAgentExecutor } from "./executor.js";
 import { publicApproval } from "../../conversation/public-approval.js";
 import type { QueryEmbedder } from "../../providers/query-embedding.js";
 
@@ -431,15 +432,20 @@ describe("Pi production coordinator", () => {
     expect(run?.tokenUsage?.requests).toBe(2); // Preloaded document, evidence, proposal.
   });
 
-  it("regenerates a complete lesson from the preloaded A4 in one provider request", async () => {
+  it.each(["重新生成整份教案内容", "简化当前教案文件"])("uses the latest A4 in one provider request: %s", async (message) => {
     const { repository, created, faux, coordinator } = await fixture();
+    const currentProcess = "当前教师已修订：先独立圈画，再解释温晴。";
+    await repository.saveLessonDocument({ ownerId, fileId: lessonFileId, baseVersion: 0,
+      document: { ...lesson, process: currentProcess }, pageCount: 1, source: "manual", idempotencyKey: "latest-a4" });
     faux.setResponses([
       (context) => {
         expect((context.tools ?? []).map((tool) => tool.name)).toContain("read_document");
         const turnContext = turnContextOf(context);
         expect(turnContext).toContain('"source":"server_bound_current_version"');
         expect(turnContext).toContain('"complete":true');
-        expect(turnContext).toContain('"process":"提出中心问题，小组圈画证据并说明表达效果"');
+        expect(turnContext).toContain(currentProcess);
+        expect(turnContext).not.toContain(lesson.process);
+        expect(turnContext).toContain('"version":1');
         expect(turnContext).toContain("do not call read_document");
         return fauxAssistantMessage(fauxToolCall("propose_document_patch", {
           summary: "重新生成完整 A4 教案",
@@ -455,9 +461,9 @@ describe("Pi production coordinator", () => {
       userId: ownerId,
       threadId: created.thread.id,
       branchId: created.branch.id,
-      message: "重新生成整份教案内容",
+      message,
       activeSectionId: "process",
-      documentVersion: 0,
+      documentVersion: 1,
       attachmentIds: [],
     }, () => undefined);
 
@@ -466,8 +472,7 @@ describe("Pi production coordinator", () => {
       status: "completed",
       tokenUsage: { requests: 1 },
       capabilityPlan: {
-        fullRewriteRequested: true,
-        writeMode: "explicit",
+        fullRewriteRequested: message.startsWith("重新"),
         evidenceRequired: false,
         mcpServers: [],
       },
@@ -480,7 +485,27 @@ describe("Pi production coordinator", () => {
         { field: "process" },
       ],
     });
-    expect(await repository.getLessonFile(ownerId, lessonFileId)).toMatchObject({ documentVersion: 0 });
+    expect(await repository.getLessonFile(ownerId, lessonFileId)).toMatchObject({ documentVersion: 1, document: { process: currentProcess } });
+  });
+
+  it("can retain an already concise A4 from the current snapshot without a read-and-retry loop", async () => {
+    const { repository, created, faux, coordinator } = await fixture();
+    faux.setResponses([(context) => {
+      expect(turnContextOf(context)).toContain('"canonicalDocument"');
+      return fauxAssistantMessage(fauxToolCall("complete_without_change", {
+        kind: "no_change_needed", reason: "当前任务与评价已简洁对应，进一步压缩会丢失必要的学生证据要求。",
+      }), { stopReason: "toolUse" });
+    }]);
+    const events: any[] = [];
+    await coordinator.start({ userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
+      message: "简化当前教案文件", activeSectionId: "process", documentVersion: 0, attachmentIds: [],
+    }, event => { events.push(event); });
+    expect(await repository.getLatestRun(ownerId, created.thread.id, created.branch.id))
+      .toMatchObject({ status: "completed", tokenUsage: { requests: 1 } });
+    expect(events.filter(event => event.type === "tool.completed").map(event => [event.name, event.ok]))
+      .toEqual([["complete_without_change", true]]);
+    expect(await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id)).toHaveLength(0);
+    expect(await repository.getLessonFile(ownerId, lessonFileId)).toMatchObject({ documentVersion: 0, document: lesson });
   });
 
   it("binds a delegated theme durably and resumes the original presentation after both real follow-up phrases", async () => {
@@ -2048,7 +2073,7 @@ describe("Pi production coordinator", () => {
     });
   });
 
-  it("compacts mid-run before the next model turn and keeps memory aligned with the session", async () => {
+  it("continues tool rounds while background compaction is blocked and uses memory on the next run", async () => {
     const repository = new MemoryLessonRepository();
     await repository.importNotebookGraph(ownerId, [{
       id: "notebook-a",
@@ -2068,11 +2093,14 @@ describe("Pi production coordinator", () => {
     models.setProvider(faux.provider);
     const summarizerSessionIds: string[] = [];
     const teacherSessionIds: string[] = [];
+    let releaseSummarizer = () => {};
+    const summarizerBlocked = new Promise<void>((resolve) => { releaseSummarizer = resolve; });
     const streamFn: StreamFn = async (model, context, options) => {
       if (context.systemPrompt?.includes("会话记忆压缩器")) {
         expect(options?.cacheRetention).toBe("none");
         expect(options?.sessionId).toMatch(/^lessonup-memory:/);
         summarizerSessionIds.push(options?.sessionId ?? "");
+        await summarizerBlocked;
       } else if (options?.sessionId) {
         teacherSessionIds.push(options.sessionId);
       }
@@ -2094,15 +2122,13 @@ describe("Pi production coordinator", () => {
       messages: encodePiAgentMessages(bulkyHistory(COMPACT_HISTORY_TURNS)),
     });
 
-    let sawMemoryOnSecondTurn = false;
     faux.setResponses([
       fauxAssistantMessage(fauxToolCall("read_document", { fields: ["process"] }), { stopReason: "toolUse" }),
-      memorySummaryResponse(),
       (context) => {
-        expect(JSON.stringify(context.messages ?? [])).toContain("untrusted-summary");
-        sawMemoryOnSecondTurn = true;
+        expect(JSON.stringify(context.messages ?? [])).not.toContain("untrusted-summary");
         return fauxAssistantMessage("教学过程已经能支撑中心问题。");
       },
+      memorySummaryResponse(),
     ]);
 
     await coordinator.start({
@@ -2115,9 +2141,13 @@ describe("Pi production coordinator", () => {
       attachmentIds: [],
     }, () => undefined);
 
-    expect(sawMemoryOnSecondTurn).toBe(true);
     expect(await repository.getLatestRun(ownerId, created.thread.id, created.branch.id))
       .toMatchObject({ status: "completed" });
+    expect(await repository.getThreadMemory(ownerId, created.thread.id, created.branch.id)).toBeFalsy();
+    releaseSummarizer();
+    await vi.waitFor(async () => {
+      expect(await repository.getThreadMemory(ownerId, created.thread.id, created.branch.id)).toBeTruthy();
+    });
     const session = await repository.getAgentRuntimeSession(
       ownerId,
       created.thread.id,
@@ -2134,6 +2164,48 @@ describe("Pi production coordinator", () => {
     expect(summarizerSessionIds).toHaveLength(1);
     expect(teacherSessionIds.length).toBeGreaterThan(0);
     expect(summarizerSessionIds[0]).not.toBe(teacherSessionIds[0]);
+    faux.setResponses([(context) => {
+      expect(JSON.stringify(context.messages)).toContain("untrusted-summary");
+      expect((context.messages ?? []).length).toBeLessThan(session!.messages.length);
+      return fauxAssistantMessage("按当前教案继续判断。");
+    }]);
+    await coordinator.start({ userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
+      message: "先分析当前课堂任务", activeSectionId: "process", documentVersion: 0, attachmentIds: [],
+    }, () => undefined);
+    const after = await repository.getAgentRuntimeSession(ownerId, created.thread.id, created.branch.id, "pi");
+    expect(after!.messages.slice(0, session!.messages.length)).toEqual(session!.messages);
+  });
+
+  it("waits for compaction when a tool result actually crosses the hard context budget", async () => {
+    const { repository, created } = await fixture();
+    const faux = fauxProvider({ models: [{ id: "small-window", contextWindow: 64_000 }] });
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const executor = new PiAgentExecutor(repository, faux.getModel(), models.streamSimple.bind(models),
+      "test-only-pi-session-secret-32-characters", { attachActiveAgent: () => {} });
+    const history = bulkyHistory(8);
+    await repository.saveAgentRuntimeSession({ ownerId, threadId: created.thread.id, branchId: created.branch.id,
+      runtime: "pi", expectedRevision: 0, messages: encodePiAgentMessages(history) });
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("large_read", {}), { stopReason: "toolUse" }),
+      memorySummaryResponse(),
+      (context) => {
+        expect(JSON.stringify(context.messages)).toContain("untrusted-summary");
+        expect(JSON.stringify(context.messages)).toContain("current-tool-result");
+        return fauxAssistantMessage("已核对当前内容。");
+      },
+    ]);
+    const result = await executor.run({ runId: crypto.randomUUID(),
+      scope: { ownerId, threadId: created.thread.id, branchId: created.branch.id },
+      input: "核对当前内容", turnContext: {}, emit: () => undefined,
+      tools: [{ name: "large_read", label: "读取", description: "读取合成内容", parameters: { type: "object", properties: {} },
+        execute: async () => ({ content: [{ type: "text", text: "current-tool-result" + "x".repeat(100_000) }], details: null }),
+      }],
+    });
+    expect(result.tokenUsage.requests).toBe(2);
+    expect(await repository.getThreadMemory(ownerId, created.thread.id, created.branch.id)).toBeTruthy();
+    const session = await repository.getAgentRuntimeSession(ownerId, created.thread.id, created.branch.id, "pi");
+    expect(session!.messages.slice(0, history.length)).toEqual(encodePiAgentMessages(history));
   });
 
   it("keeps the request prefix byte-identical across turns so the provider can cache it", async () => {

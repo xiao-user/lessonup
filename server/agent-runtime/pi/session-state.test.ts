@@ -185,6 +185,17 @@ describe("Pi native Agent session state", () => {
     expect(piContextBudgetExceeded(transcript, undefined, 200_000)).toBe(false);
   });
 
+  it("starts background compaction for costly history even in a large model window", () => {
+    const transcript = [
+      userMessage("旧 PPT"), fauxAssistantMessage("x".repeat(110_000)),
+      userMessage("当前教案"), fauxAssistantMessage("已确认"),
+    ];
+    expect(shouldCompactPiMemory(transcript, 1_000_000)).toBe(true);
+    expect(piContextBudgetExceeded(transcript, undefined, 1_000_000)).toBe(false);
+    const memory = validatePiThreadMemory({ summary: storedSummary(2), cursor: 2 }, transcript.length);
+    expect(shouldCompactPiMemory(transcript, 1_000_000, memory!.summary)).toBe(false);
+  });
+
   it("counts only the messages a committed summary leaves in the prompt", () => {
     const transcript = [
       userMessage("第一轮"), fauxAssistantMessage("x".repeat(20_000)),

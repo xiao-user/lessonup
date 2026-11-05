@@ -7,9 +7,9 @@ export type TeachingNoChange = { kind: "no_change_needed" | "insufficient_eviden
 export function withTeachingCompletion(
   tools: AgentTool<any>[],
   hasProposal: () => boolean,
-  options: { decisionCandidateRequired?: boolean } = {},
+  options: { decisionCandidateRequired?: boolean; canonicalContentBound?: boolean } = {},
 ) {
-  const observed = new Set<string>();
+  const observed = new Set<string>(options.canonicalContentBound ? ["server_bound_current_version"] : []);
   let outcome: TeachingNoChange | null = null;
   let writeAttempted = false;
   const canonicalReads = new Set(["read_document", "read_section", "read_semester_framework", "read_semester_unit"]);
@@ -25,7 +25,7 @@ export function withTeachingCompletion(
   }));
   const complete: AgentTool<any> = {
     name: "complete_without_change", label: "说明保留现稿或证据缺口",
-    description: "读取当前规范内容后，明确说明无需改动或证据不足。完成本轮但不写入、不生成审批。不能与任何修改提案同时提交。",
+    description: "依据已读取或服务端已绑定的当前规范正文，明确说明无需改动或证据不足。完成本轮但不写入、不生成审批。不能与任何修改提案同时提交。",
     parameters: Type.Object({
       kind: Type.Union([Type.Literal("no_change_needed"), Type.Literal("insufficient_evidence")]),
       reason: Type.String({ minLength: 10, maxLength: 2_000 }),
