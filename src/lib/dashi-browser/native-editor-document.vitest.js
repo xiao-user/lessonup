@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { runInNewContext } from 'node:vm';
 import { readFileSync } from 'node:fs';
 import {
@@ -48,16 +48,24 @@ describe('native Dashi editor document', () => {
     const script = html.match(/<script data-lessonup-browser-export>([\s\S]*?)<\/script>/)[1];
     let ready;
     let calls = 0;
+    const fetch = vi.fn().mockResolvedValue(new Response('native-response'));
     const window = {
+      fetch,
       addEventListener(event, callback) { expect(event).toBe('DOMContentLoaded'); ready = callback; },
       __exportDeckPptxInBrowser() { calls += 1; return Promise.resolve('native-result'); },
       __exportDeckPptx() { throw new Error('HTTP-only entry must not run inside srcdoc'); },
     };
-    runInNewContext(script, { window });
+    runInNewContext(script, { window, Response });
     expect(calls).toBe(0);
     ready();
     expect(await window.__exportDeckPptx()).toBe('native-result');
     expect(calls).toBe(1);
+    const optionalStore = await window.fetch('/api/export-pptx-store?fileName=test', { method: 'POST', body: new Blob(['pptx']) });
+    expect(optionalStore.ok).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
+    const save = { method: 'POST', body: JSON.stringify({ state: {} }) };
+    expect(await (await window.fetch('/api/save-deck-state', save)).text()).toBe('native-response');
+    expect(fetch).toHaveBeenCalledWith('/api/save-deck-state', save);
   });
   it('gives the native capture iframe a reloadable initial deck, not the srcdoc pathname', () => {
     const html = buildNativeDashiEditorDocument({

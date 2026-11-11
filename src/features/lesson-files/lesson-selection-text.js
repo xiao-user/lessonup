@@ -6,7 +6,7 @@ export const lessonHighlightTones = ["yellow", "pink", "green", "blue", "red"];
 export const createLessonMarkdownParser = () => new Marked({ breaks: true });
 
 export function tokenizeLessonHighlight(source, inlineTokens) {
-  const match = /^==(?:\{(yellow|pink|green|blue|red)\})?([^=\n]+)==/.exec(source);
+  const match = /^==(?:\{(yellow|pink|green|blue|red)\})?((?:(?!==)[^\n])+)==/.exec(source);
   if (!match) return undefined;
   const text = match[2].trim();
   if (!text) return undefined;

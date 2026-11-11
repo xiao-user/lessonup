@@ -58,7 +58,7 @@ const findNaturalBreak = (text, start, rawEnd) => {
 };
 
 function avoidSplitMarker(text, start, end) {
-  for (const marker of text.slice(start).matchAll(/==(?:\{(?:yellow|pink|green|blue|red)\})?[^=\n]+==/g)) {
+  for (const marker of text.slice(start).matchAll(/==(?:\{(?:yellow|pink|green|blue|red)\})?(?:(?!==)[^\n])+==/g)) {
     const opener = start + marker.index;
     if (opener >= end) break;
     if (opener < end && end < opener + marker[0].length) {

@@ -29,6 +29,7 @@ import { PiAgentExecutor } from "./executor.js";
 import { PiToolSurface } from "./tool-surface.js";
 import { PiApprovalWorkflow } from "./approval-workflow.js";
 import { emitRunEvidence } from "./run-evidence.js";
+import { loadLessonAuthoringBasis } from "./authoring-basis.js";
 
 export { piAgentDefinitionVersion } from "./contracts.js";
 
@@ -60,6 +61,7 @@ export class PiLessonAgentCoordinator {
   private readonly modelId: string;
   private readonly lifecycle: PiRunLifecycle;
   private readonly executor: PiAgentExecutor;
+  private readonly embedQuery?: QueryEmbedder;
   private readonly toolSurface: PiToolSurface;
   private readonly approvals: PiApprovalWorkflow;
   constructor(
@@ -103,9 +105,10 @@ export class PiLessonAgentCoordinator {
     void this.ready.catch(() => undefined);
     this.lifecycle = new PiRunLifecycle(repository);
     this.executor = new PiAgentExecutor(repository, model, streamFn, sessionSecret, this.lifecycle, options.defer);
+    this.embedQuery = options.embedQuery === undefined ? createQueryEmbedder() : options.embedQuery ?? undefined;
     this.toolSurface = new PiToolSurface(repository, registry,
       options.webProvider ?? new UnavailableWebSearchProvider(), this.dashi,
-      options.embedQuery === undefined ? createQueryEmbedder() : options.embedQuery ?? undefined);
+      this.embedQuery);
     this.approvals = new PiApprovalWorkflow(repository, this.lifecycle, this.executor,
       this.toolSurface, this.ready, this.dashi, options.presentations ?? null);
   }
@@ -439,9 +442,13 @@ export class PiLessonAgentCoordinator {
             : [];
           pinnedSkills = this.toolSurface.skillsForSurface(plan, resolvedTurn.toolSurface);
           skills = pinnedSkills;
+          const authoringBasis = plan.fullRewriteRequested && !plan.requestedDocumentFields?.length
+            && plan.writeMode !== "consultative" && !plan.presentationRequested && loaded.document
+            ? await loadLessonAuthoringBasis(this.repository, currentLesson, loaded.document, this.embedQuery)
+            : undefined;
           const turnContext = lessonTurnContext(
             currentLesson, attachments, plan, resolvedTurn.toolSurface,
-            presentationRequest, recentPresentationDesigns, loaded.document,
+            presentationRequest, recentPresentationDesigns, loaded.document, authoringBasis,
           );
           runtimeTurnContext = turnContext;
           runtimeTools = this.toolSurface.toolsForLesson(
@@ -469,6 +476,7 @@ export class PiLessonAgentCoordinator {
               await this.repository.updateRun(input.userId, runId, { capabilityPlan: plan });
             },
             Boolean(turnContext.canonicalDocument),
+            authoringBasis,
           );
         }
       }

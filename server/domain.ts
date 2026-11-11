@@ -112,6 +112,14 @@ const documentPatchProjectionSchema = z.object({
   })).min(1).max(32),
 });
 
+export const lessonAlignmentSchema = z.object({
+  objective: z.string().trim().min(2).max(120).describe("逐字摘取最终 objectives 栏中该目标的短片段，不概述、不新增目标。"),
+  process: z.string().trim().min(2).max(120).describe("逐字摘取最终 process 栏中支撑该目标的学生行动或关键理解。"),
+  assessment: z.string().trim().min(2).max(120).describe("逐字摘取最终 assessment 栏中检查该目标的任务或达成判据；不可从 process 栏代取，正文须实际写入 assessment。"),
+  standard: z.object({ sourceId: z.string().min(1), quote: z.string().trim().min(4).max(500) }).optional(),
+  standardGap: z.string().trim().min(15).max(300).optional(),
+});
+
 export const documentPatchSchema = z.object({
   fileId: z.string().min(1),
   baseDocumentVersion: z.number().int().nonnegative(),
@@ -122,6 +130,12 @@ export const documentPatchSchema = z.object({
     z.array(sourceRefSchema).max(24).optional(),
   ),
   projection: documentPatchProjectionSchema.optional(),
+  authoringBasis: z.object({
+    designBasisVersion: z.number().int().nonnegative(),
+    standardsRelease: z.string().nullable(),
+    gaps: z.array(z.string()).max(12),
+    alignments: z.array(lessonAlignmentSchema).min(1).max(12),
+  }).optional(),
   qualityPrediction: z.object({
     passed: z.boolean(),
     score: z.number().min(0).max(1),

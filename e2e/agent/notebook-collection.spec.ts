@@ -729,7 +729,10 @@ test("accepts rapid page clicks, reverses in flight and closes without dropping 
   expect(await book.locator(".book-volume-leaf.is-turning").count()).toBeGreaterThan(1);
   await expect(next).toBeEnabled();
   await expect(previous).toBeEnabled();
-  await expect(book.locator('.book-volume-leaf[data-page-index="1"] .book-volume-leaf-front')).toHaveCount(1);
+  // Early sheets may already have settled outside the render window. The
+  // contract is to retain both faces of every sheet still moving, not leaf 1.
+  expect(await book.locator('.book-volume-leaf.is-turning').evaluateAll(leaves => leaves.every(leaf =>
+    leaf.querySelector('.book-volume-leaf-front') && leaf.querySelector('.book-volume-leaf-back > *')))).toBe(true);
   for (let click = 0; click < 3; click += 1) await previous.click();
   await expect(book.locator(".book-volume-controls")).toContainText("3 / 12");
   await expect(book.locator(".book-volume-leaf.is-turning")).toHaveCount(0);

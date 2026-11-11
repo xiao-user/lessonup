@@ -409,14 +409,40 @@ describe("deterministic turn policy", () => {
     expect(plan.requiredEvidenceKinds).toBeUndefined();
   });
 
-  it("treats an explicit full regeneration as a direct rewrite without evidence lookup", () => {
-    expect(deterministicCapabilityPlan("重新生成整份教案内容")).toMatchObject({
+  it.each(["重新生成整份教案内容", "帮我生成教案", "编写一份教案"])("recognizes full authoring independently from explicit source directives (%s)", message => {
+    expect(deterministicCapabilityPlan(message)).toMatchObject({
       fullRewriteRequested: true,
       writeMode: "explicit",
       mcpServers: [],
       evidenceRequired: false,
       requestedDocumentFields: undefined,
     });
+  });
+
+  it("does not expand a request for one generated field into complete authoring", () => {
+    expect(deterministicCapabilityPlan("生成教案的教学目标").fullRewriteRequested).toBe(false);
+  });
+
+  it.each([
+    "请完整编写一份40分钟教案，暂不生成演示材料。",
+    "请完整编写教案，不用准备课件。",
+    "重新生成整份教案内容。PPT先不要制作。",
+    "完整编写教案，不生成PPT，但要有学生独立练习。",
+  ])("keeps complete lesson authoring when presentation creation is denied (%s)", message => {
+    expect(deterministicCapabilityPlan(message)).toMatchObject({
+      fullRewriteRequested: true, presentationRequested: false, writeMode: "explicit",
+      skillIds: [], toolGroups: ["document-read", "document-write"],
+    });
+  });
+
+  it.each([
+    "不要修改教案，但请生成PPT。",
+    "不要生成PPT，而是制作一份课堂课件。",
+    "不能不生成PPT。",
+    "不要修改教案直接生成PPT。",
+    "不但要生成PPT，还要保留原教案。",
+  ])("preserves an affirmative presentation directive (%s)", message => {
+    expect(deterministicCapabilityPlan(message).presentationRequested).toBe(true);
   });
 
   it.each([

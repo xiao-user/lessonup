@@ -101,5 +101,5 @@ export async function searchScopedCurriculumStandards(args: {
     "curriculum_standard_search",
     results,
   );
-  return { status: results.length ? "available" as const : "unavailable" as const, freshness, results };
+  return { status: results.length ? "available" as const : "unavailable" as const, freshness, releaseFingerprint, results };
 }

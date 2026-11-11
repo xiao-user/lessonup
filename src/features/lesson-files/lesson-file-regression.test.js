@@ -65,17 +65,18 @@ test("Markdown pagination prefers complete lines over splitting a structural mar
 
 test("A4 pagination does not cut a short inline marker across two pages", () => {
   const plan = createLessonPlanDraft({ subject: "语文" }, { title: "春" });
-  const marked = `=={pink}关键证据==`;
-  const pages = paginateLessonPlan({ ...plan, process: `${"前".repeat(80)}${marked}${"后".repeat(80)}` }, {
-    pageHeight: 120,
-    measureBasics: () => 12,
-    measureTopic: () => 12,
-    measureSection: (_section, value) => 12 + String(value).length,
-  });
-  const fragments = pages.flat().filter((entry) => entry.sectionId === "process");
-  assert.ok(fragments.length > 1);
-  assert.ok(fragments.some((entry) => entry.value.includes(marked)));
-  assert.ok(fragments.every((entry) => !entry.value.includes("==") || entry.value.includes(marked)));
+  for (const marked of ["=={pink}关键证据==", "=={blue}(3+2)+1=5+1=="]) {
+    const pages = paginateLessonPlan({ ...plan, process: `${"前".repeat(80)}${marked}${"后".repeat(80)}` }, {
+      pageHeight: 120,
+      measureBasics: () => 12,
+      measureTopic: () => 12,
+      measureSection: (_section, value) => 12 + String(value).length,
+    });
+    const fragments = pages.flat().filter((entry) => entry.sectionId === "process");
+    assert.ok(fragments.length > 1);
+    assert.ok(fragments.some((entry) => entry.value.includes(marked)));
+    assert.ok(fragments.every((entry) => !entry.value.includes("==") || entry.value.includes(marked)));
+  }
 });
 
 test("editable text preserves deliberate leading and trailing blank lines", () => {
@@ -243,6 +244,15 @@ test("double-equals highlight survives A4 parse, edit serialization, and reparse
     )),
     true,
   );
+});
+
+test("highlighted equations retain their equals sign and tone through an A4 edit", () => {
+  const source = "比较=={blue}(3+2)+1=5+1==与==只改一边==。";
+  const parsed = parseLessonMarkdown(source);
+  const marked = parsed.content[0].content.filter(node => node.marks?.some(mark => mark.type === "highlight"));
+  assert.deepEqual(marked.map(node => node.text), ["(3+2)+1=5+1", "只改一边"]);
+  assert.equal(serializeLessonMarkdown(parsed), source);
+  assert.deepEqual(parseLessonMarkdown(serializeLessonMarkdown(parsed)), parsed);
 });
 
 test("colored marker strokes preserve their tone through A4 edits and pagination fragments", () => {

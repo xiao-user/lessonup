@@ -6,6 +6,7 @@ import type {
   CurriculumTextbookRecord,
   PreparationAgentContext,
   SourceRef,
+  KnowledgeResult,
 } from "../../domain.js";
 import type { LessonRepository } from "../../repository.js";
 import { withoutInternalCurriculumAssetUrl } from "../../agent/source-policy.js";
@@ -33,6 +34,7 @@ export function createPiCurriculumTools(
   repository: LessonRepository,
   context: PreparationAgentContext,
   embedQuery?: QueryEmbedder,
+  onStandardsRead?: (sources: KnowledgeResult[], release: string | null) => void,
 ): AgentTool<any>[] {
   const record = async (kind: Parameters<LessonRepository["recordRunEvidence"]>[2], sources: SourceRef[]) => {
     await repository.recordRunEvidence(context.userId, context.runId, kind, sources);
@@ -68,13 +70,14 @@ export function createPiCurriculumTools(
     }, { additionalProperties: false }),
     execute: async (_toolCallId, input, signal) => {
       const args = input as { query: string; limit?: number };
-      const { results } = await searchScopedCurriculumStandards({
+      const { results, releaseFingerprint } = await searchScopedCurriculumStandards({
         repository,
         scope: { userId: context.userId, notebookId: context.notebookId, runId: context.runId },
         query: args.query,
         limit: args.limit ?? 6,
         embed: embedQuery ? (query) => embedQuery(query, signal) : undefined,
       });
+      onStandardsRead?.(results, releaseFingerprint);
       return textResult(results);
     },
   };

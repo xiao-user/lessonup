@@ -20,6 +20,7 @@ import { createPiWebTools } from "./web-tools.js";
 import { trackEvidenceAttempts } from "./evidence-attempts.js";
 import { type ToolSurface } from "../../conversation/turn-resolver.js";
 import { type PiDashi } from "./contracts.js";
+import type { LessonAuthoringBasis } from "./authoring-basis.js";
 
 /** Builds capability-scoped tools and stable skill prefixes; never executes a run. */
 export class PiToolSurface {
@@ -55,6 +56,7 @@ export class PiToolSurface {
     presentationLanguage?: "zh" | "en",
     onThemeBound?: (theme: DashiThemeId) => void | Promise<void>,
     canonicalContentBound = false,
+    authoringBasis?: LessonAuthoringBasis,
   ) {
     const { repository, attempts } = trackEvidenceAttempts(this.repository);
     const scope = {
@@ -75,13 +77,21 @@ export class PiToolSurface {
     // schema on consultation turns invalidated the provider's transcript cache.
     const learning = createPiLearningTools(repository, context, plan);
     const decisions = createPiDecisionTools(repository, context, plan);
-    const document = createPiDocumentProposalTool({ repository, context, plan });
+    const document = createPiDocumentProposalTool({ repository, context, plan, authoringBasis });
     const tools = [
       ...createPiLessonReadTools(repository, scope, {
         requireCompleteDocument: plan.presentationRequested && !plan.presentationThemeConfirmationRequired,
       }),
       ...(teaching ? createPiLessonKnowledgeTools(repository, scope, this.embedQuery) : []),
-      ...(teaching ? createPiCurriculumTools(repository, context, this.embedQuery) : []),
+      ...(teaching ? createPiCurriculumTools(repository, context, this.embedQuery, (sources, release) => {
+        if (!authoringBasis || !sources.length) return;
+        const previous = authoringBasis.standardsRelease === release ? authoringBasis.standards.sources : [];
+        authoringBasis.standards.sources = [...new Map([...previous, ...sources].map(source => [source.id, source])).values()];
+        authoringBasis.standardsRelease = release;
+        authoringBasis.standards.status = "available";
+        authoringBasis.standards.freshness = "retrieved";
+        authoringBasis.gaps = authoringBasis.gaps.filter(gap => !gap.startsWith("课标检索") && !gap.startsWith("未检索到适用课标"));
+      }) : []),
       ...(teaching ? createPiDesignBasisReadTools(repository, context) : []),
       ...(teaching ? this.sessionWebTools(repository, context.userId, context.runId) : []),
       ...(teaching ? learning.tools : []),
@@ -95,11 +105,13 @@ export class PiToolSurface {
         repository,
         context,
         plan,
+        authoringBasis,
       });
       const projection = createPiDesignBasisProjectionProposalTool({
         repository,
         context,
         plan,
+        authoringBasis,
       });
       tools.push(basis.tool, combined.tool, projection.tool);
       captured.push(basis.getProposal, combined.getProposal, projection.getProposal);

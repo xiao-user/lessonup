@@ -71,7 +71,10 @@ export { SAVE_MESSAGE };
 // srcdoc has an about: URL, so the upstream HTTP-service entry rejects it.
 // Select upstream's existing browser-only implementation without changing it.
 function browserExportBridge() {
-  return `<script data-lessonup-browser-export>window.addEventListener('DOMContentLoaded',function(){window.__exportDeckPptx=function(){return window.__exportDeckPptxInBrowser();};},{once:true});</script>`;
+  // The browser exporter optionally stores its finished binary in Dashi's
+  // local filesystem service. That service does not exist on Workers; let the
+  // unchanged exporter download its Blob without uploading it to an app route.
+  return `<script data-lessonup-browser-export>(function(){var nativeFetch=window.fetch.bind(window);window.fetch=function(input,init){var url=typeof input==='string'?input:(input&&input.url)||'';if(url.split('?')[0]==='/api/export-pptx-store')return Promise.resolve(new Response(null,{status:501}));return nativeFetch(input,init);};window.addEventListener('DOMContentLoaded',function(){window.__exportDeckPptx=function(){return window.__exportDeckPptxInBrowser();};},{once:true});})();</script>`;
 }
 
 function toNativeViewModel(deck, runtimeCatalog) {

@@ -2,14 +2,19 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { z } from "zod";
 import {
   documentFieldPatchToolSchema,
+  lessonAlignmentSchema,
+  lessonFieldSchema,
   designBasisProjectionToolSchema,
   lessonDesignBasisPatchToolSchema,
   lessonDesignChangeToolSchema,
   presentationGoalToolSchema,
   semesterFrameworkPatchToolSchema,
   type CapabilityPlan,
+  type AgentRunEvidenceRecord,
   type LessonAgentContext,
   type ResourcePatch,
+  type DocumentPatch,
+  type SourceRef,
   type SemesterFrameworkAgentContext,
 } from "../../domain.js";
 import { applyDocumentPatch, materializeDocumentPatchProposal } from "../../document-patch.js";
@@ -26,6 +31,33 @@ import { typeBoxFromZod } from "./schema-adapter.js";
 import { dashiGoalSchema, dashiJsonValueSchema, type DashiGoal } from "../../presentations/dashi-goal.js";
 import { deriveReadingEmphasis } from "./reading-emphasis.js";
 import { documentDeliveryReceipt } from "./document-delivery-receipt.js";
+import { groundLessonAuthoring, authoringGaps, assertAuthoringBasisCurrent, type LessonAuthoringBasis } from "./authoring-basis.js";
+
+const documentAuthoringInputSchema = z.object({
+  summary: documentFieldPatchToolSchema.shape.summary,
+  operations: documentFieldPatchToolSchema.shape.operations.describe("首次提交正文；修正时仅提交要替换的栏目。只补交 alignments 时可省略。").optional(),
+  baseToolCallId: z.string().min(1).max(200).describe("仅在预检要求修正时，使用返回的本轮提案 ID。").optional(),
+  // Let missing mapping fields reach the repair handler so the valid body can
+  // be retained. The complete business schema is still required for approval.
+  alignments: z.array(lessonAlignmentSchema.partial()).min(1).max(12).describe("完整编写每项均须提供 objective、process、assessment，逐字摘取 objectives、process、assessment 三栏中的短锚点，不改写为概述；有课标时附绑定来源与逐字引文。服务端统一处理排版、补入笔迹并保留已有标记。").optional(),
+});
+
+function attachAuthoringReport(patch: DocumentPatch, basis: LessonAuthoringBasis, alignments: z.infer<typeof lessonAlignmentSchema>[], citations: SourceRef[]) {
+  const gaps = authoringGaps(basis, alignments);
+  patch.citations = [...new Map([...(patch.citations ?? []), ...citations].map(source => [source.id, source])).values()];
+  patch.authoringBasis = { designBasisVersion: basis.designBasisVersion, standardsRelease: basis.standardsRelease, gaps, alignments };
+  if (gaps.length) patch.summary = (patch.summary + `；依据待核对：${gaps.join("；")}`).slice(0, 500);
+}
+
+function assertAuthoringEvidence(plan: CapabilityPlan, evidence: AgentRunEvidenceRecord[], alignments?: Array<{ standardGap?: string }>) {
+  if (plan.evidenceRequired) {
+    const validation = validateObservedEvidence({ plan, evidence });
+    if (validation.tripwireTriggered) throw evidenceRequiredToolError(validation.outputInfo.missingKinds ?? []);
+  }
+  if (plan.requiredEvidenceKinds?.includes("curriculum_standard_search") && alignments?.some(alignment => alignment.standardGap)) {
+    throw evidenceRequiredToolError(["curriculum_standard_search"]);
+  }
+}
 
 export type PiCapturedProposal = {
   /**
@@ -165,24 +197,32 @@ export function createPiDocumentProposalTool(args: {
   repository: LessonRepository;
   context: LessonAgentContext;
   plan: CapabilityPlan;
+  authoringBasis?: LessonAuthoringBasis;
 }) {
   const slot = captureSlot();
-  // Provider-side validation sees the same shape the business validator parses.
-  // An output-mode schema would reject the call before any handler can explain
-  // the problem to the model.
-  const parameters = typeBoxFromZod(documentFieldPatchToolSchema, "input");
+  let candidate: { toolCallId: string; operations: z.infer<typeof documentFieldPatchToolSchema>["operations"]; alignments?: z.infer<typeof documentAuthoringInputSchema>["alignments"] } | null = null;
+  // Validate repair payloads in input mode; complete mappings are checked only
+  // after retaining the body, so a missing property cannot force regeneration.
+  const parameters = typeBoxFromZod(documentAuthoringInputSchema, "input");
   const tool: AgentTool<typeof parameters> = {
     name: "propose_document_patch",
     label: "准备教案修改确认",
-    description: "提交当前 A4 教案的完整 Markdown 字段正文供教师确认。按本课重要性将适合局部强调的重点直接写成 ==重点==、=={pink}重点== 等荧光或 =={blue}重点== 等划线，遵守系统 A4 阅读指导，不以加粗替代或机械涂色；保留无关原文与教师标记。交付摘要由服务端从实际 replacement 推导，不由说明文字或重复清单决定。每项 operation 为完整字段 replacement，当前原文快照由服务端绑定；未经批准不会写入。",
+    description: "提交当前 A4 教案的完整 Markdown 字段正文供教师确认。按教学重要性将重点直接写成 ==重点==、=={pink}重点== 或 =={blue}重点== 等标记，保留无关原文与教师笔迹。完整编写须提交 alignments 说明目标—任务—评价及课标来源，服务端从这些内容锚点保留或补入笔迹；不另写标注清单。预检返回 baseToolCallId 时只补交 alignments 或需要修正的 operations，不重发整份教案。每项 operation 为完整字段 replacement，当前原文快照由服务端绑定；未经批准不会写入。",
     parameters,
     executionMode: "sequential",
     execute: async (toolCallId, raw) => {
       if (args.plan.writeMode === "consultative") {
         throw new Error("document_write_not_requested");
       }
-      const proposal = documentFieldPatchToolSchema.parse(raw);
-      const readingEmphasis = deriveReadingEmphasis(proposal.operations);
+      const input = documentAuthoringInputSchema.parse(raw);
+      const base = input.baseToolCallId ? candidate?.toolCallId === input.baseToolCallId ? candidate : null : undefined;
+      if (base === null) throw new Error("document_revision_base_unavailable");
+      const operations = base
+        ? [...base.operations.filter(item => !input.operations?.some(revision => revision.field === item.field)), ...(input.operations ?? [])]
+        : input.operations;
+      const proposal = documentFieldPatchToolSchema.parse({ summary: input.summary, operations });
+      const suppliedAlignments = input.alignments ?? base?.alignments;
+      let alignments: z.infer<typeof lessonAlignmentSchema>[] | undefined;
       assertDocumentWriteScope(proposal, args.plan.requestedDocumentFields);
       if (args.plan.minimalWriteRequested && proposal.operations.length > 1) {
         throw new Error("too_many_document_operations");
@@ -192,23 +232,40 @@ export function createPiDocumentProposalTool(args: {
       if (file.documentVersion !== args.context.documentVersion) {
         throw new Error("document_context_stale");
       }
+      if (args.plan.evidenceRequired) {
+        assertAuthoringEvidence(args.plan, await args.repository.listRunEvidence(args.context.userId, args.context.runId), suppliedAlignments);
+      }
+      candidate = { toolCallId, operations: proposal.operations, alignments: suppliedAlignments };
+      let authoredOperations = proposal.operations;
+      let citations;
+      if (args.authoringBasis) {
+        await assertAuthoringBasisCurrent(args.repository, args.context, args.authoringBasis);
+        try {
+          alignments = suppliedAlignments ? z.array(lessonAlignmentSchema).min(1).max(12).parse(suppliedAlignments) : undefined;
+          const draft = { ...file.document, ...Object.fromEntries(proposal.operations.map(item => [item.field, item.replacement])) };
+          const grounded = groundLessonAuthoring(draft, alignments, args.authoringBasis);
+          citations = grounded.citations;
+          const fields = [...new Set([...proposal.operations.map(item => item.field), "objectives", "process", "assessment"].map(field => lessonFieldSchema.parse(field)))];
+          authoredOperations = fields.map(field => ({ field, replacement: grounded.document[field] }));
+        } catch (error) {
+          throw new Error(JSON.stringify({ error: "lesson_authoring_needs_revision", message: error instanceof Error ? error.message : "lesson_alignment_invalid",
+            candidateText: Object.fromEntries((["objectives", "process", "assessment"] as const).map(field => [field,
+              (Object.fromEntries(proposal.operations.map(operation => [operation.field, operation.replacement]))[field] ?? file.document[field]).slice(0, 2_000)])),
+            revision: { baseToolCallId: toolCallId, instruction: "只补交 alignments 或需要修正的 operations 栏目；不重发其他正文。" } }));
+        }
+      }
+      const readingEmphasis = deriveReadingEmphasis(authoredOperations);
       const patch = materializeDocumentPatchProposal({
-        proposal: { summary: documentDeliveryReceipt(proposal.operations, readingEmphasis), operations: proposal.operations },
+        proposal: { summary: documentDeliveryReceipt(authoredOperations, readingEmphasis), operations: authoredOperations },
         fileId: file.id,
         documentVersion: file.documentVersion,
         plan: file.document,
       });
+      if (args.authoringBasis) {
+        attachAuthoringReport(patch, args.authoringBasis, alignments!, citations ?? []);
+      }
       const issues = findKnownLessonContentIssues(applyDocumentPatch(file.document, patch));
       if (issues.length) throw new Error("curriculum_example_conflict");
-      if (args.plan.evidenceRequired) {
-        const validation = validateObservedEvidence({
-          plan: args.plan,
-          evidence: await args.repository.listRunEvidence(args.context.userId, args.context.runId),
-        });
-        if (validation.tripwireTriggered) {
-          throw evidenceRequiredToolError(validation.outputInfo.missingKinds ?? []);
-        }
-      }
       slot.set(toolCallId, {
         patch,
         resourceType: "lesson_file",
@@ -376,9 +433,11 @@ export function createPiLessonDesignChangeProposalTool(args: {
   repository: LessonRepository;
   context: LessonAgentContext;
   plan: CapabilityPlan;
+  authoringBasis?: LessonAuthoringBasis;
 }) {
   const slot = captureSlot();
-  const parameters = typeBoxFromZod(lessonDesignChangeToolSchema);
+  const authoringSchema = lessonDesignChangeToolSchema.safeExtend({ alignments: z.array(lessonAlignmentSchema).min(1).max(12).optional() });
+  const parameters = typeBoxFromZod(authoringSchema);
   const tool: AgentTool<typeof parameters> = {
     name: "propose_lesson_design_change",
     label: "准备完整备课调整",
@@ -397,12 +456,24 @@ export function createPiLessonDesignChangeProposalTool(args: {
       if (!aggregate) throw new Error("lesson_design_basis_not_found");
       if (file.documentVersion !== args.context.documentVersion) throw new Error("document_context_stale");
       if (aggregate.basis.version !== args.context.designBasisVersion) throw new Error("design_basis_context_stale");
+      let grounding;
+      if (args.authoringBasis) {
+        await assertAuthoringBasisCurrent(args.repository, args.context, args.authoringBasis);
+        assertAuthoringEvidence(args.plan, observedEvidence, authoringSchema.parse(raw).alignments);
+        if (!["objectives", "process", "assessment"].every(field => proposal.documentOperations.some(operation => operation.field === field))) throw new Error("lesson_alignment_fields_required:完整编写须提供目标、教学过程、评价练习。");
+        const draft = { ...file.document, ...Object.fromEntries(proposal.documentOperations.map(operation => [operation.field, operation.replacement])) };
+        grounding = groundLessonAuthoring(draft, authoringSchema.parse(raw).alignments, args.authoringBasis);
+        proposal.documentOperations = proposal.documentOperations.map(operation => ({ ...operation, replacement: grounding!.document[operation.field] }));
+      }
       await validateLessonDesignProposalReferences({
         repository: args.repository,
         context: args.context,
         proposal: { summary: proposal.summary, operations: proposal.designBasisOperations },
       });
       const patch = materializeLessonDesignChange({ proposal, aggregate, file, observedEvidence });
+      if (args.authoringBasis && grounding) {
+        attachAuthoringReport(patch, args.authoringBasis, authoringSchema.parse(raw).alignments!, grounding.citations);
+      }
       slot.set(toolCallId, {
         patch,
         resourceType: "lesson_file",
@@ -421,9 +492,11 @@ export function createPiDesignBasisProjectionProposalTool(args: {
   repository: LessonRepository;
   context: LessonAgentContext;
   plan: CapabilityPlan;
+  authoringBasis?: LessonAuthoringBasis;
 }) {
   const slot = captureSlot();
-  const parameters = typeBoxFromZod(designBasisProjectionToolSchema);
+  const authoringSchema = designBasisProjectionToolSchema.safeExtend({ alignments: z.array(lessonAlignmentSchema).min(1).max(12).optional() });
+  const parameters = typeBoxFromZod(authoringSchema);
   const tool: AgentTool<typeof parameters> = {
     name: "propose_design_basis_projection",
     label: "准备将设计依据落实到教案",
@@ -440,7 +513,19 @@ export function createPiDesignBasisProjectionProposalTool(args: {
       if (!file || !aggregate) throw new Error("lesson_design_basis_not_found");
       if (file.documentVersion !== args.context.documentVersion) throw new Error("document_context_stale");
       if (aggregate.basis.version !== args.context.designBasisVersion) throw new Error("design_basis_context_stale");
+      let grounding;
+      if (args.authoringBasis) {
+        await assertAuthoringBasisCurrent(args.repository, args.context, args.authoringBasis);
+        assertAuthoringEvidence(args.plan, await args.repository.listRunEvidence(args.context.userId, args.context.runId), authoringSchema.parse(raw).alignments);
+        if (!["objectives", "process", "assessment"].every(field => proposal.operations.some(operation => operation.field === field))) throw new Error("lesson_alignment_fields_required:完整编写须提供目标、教学过程、评价练习。");
+        const draft = { ...file.document, ...Object.fromEntries(proposal.operations.map(operation => [operation.field, operation.replacement])) };
+        grounding = groundLessonAuthoring(draft, authoringSchema.parse(raw).alignments, args.authoringBasis);
+        proposal.operations = proposal.operations.map(operation => ({ ...operation, replacement: grounding!.document[operation.field] }));
+      }
       const patch = materializeDesignBasisProjection({ proposal, aggregate, file });
+      if (args.authoringBasis && grounding) {
+        attachAuthoringReport(patch, args.authoringBasis, authoringSchema.parse(raw).alignments!, grounding.citations);
+      }
       slot.set(toolCallId, {
         patch,
         resourceType: "lesson_file",

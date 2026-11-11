@@ -13,6 +13,7 @@ import { PiLessonAgentCoordinator } from "./coordinator.js";
 import { PiAgentExecutor } from "./executor.js";
 import { publicApproval } from "../../conversation/public-approval.js";
 import type { QueryEmbedder } from "../../providers/query-embedding.js";
+import { getLessonHighlightSpans } from "../../../src/features/lesson-files/lesson-selection-text.js";
 
 const ownerId = "pi-coordinator-owner";
 const lessonFileId = "11111111-1111-4111-8111-111111111111";
@@ -405,6 +406,7 @@ describe("Pi production coordinator", () => {
       },
       fauxAssistantMessage(fauxToolCall("propose_document_patch", { readingEmphasis: { kind: "marked", reason: "关键证据是学生解释判断的依据。", spans: [{ field: "process", text: "关键证据", tone: "yellow" }] },
         summary: "完善教学过程",
+        alignments: [{ objective: "寻找温晴的证据", process: "关键证据", assessment: "两处证据", standard: { sourceId: "standard-1", quote: "结合具体语言材料形成理解。" } }],
         operations: [{
           field: "process",
           replacement: "学生圈画==关键证据==，再解释它如何支持判断。",
@@ -425,7 +427,7 @@ describe("Pi production coordinator", () => {
     const approvals = await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id);
     expect(approvals).toHaveLength(1);
     expect(approvals[0]?.patch).toMatchObject({
-      operations: [{ field: "process", replacement: "学生圈画==关键证据==，再解释它如何支持判断。" }],
+      operations: expect.arrayContaining([{ field: "process", replacement: "学生圈画==关键证据==，再解释它如何支持判断。", op: "replace_text", start: 0, end: lesson.process.length, expectedText: lesson.process, contextBefore: "", contextAfter: "" }]),
     });
     expect(await repository.getLessonFile(ownerId, lessonFileId)).toMatchObject({ documentVersion: 0 });
     const run = await repository.getLatestRun(ownerId, created.thread.id, created.branch.id);
@@ -449,6 +451,7 @@ describe("Pi production coordinator", () => {
         expect(turnContext).toContain("do not call read_document");
         return fauxAssistantMessage(fauxToolCall("propose_document_patch", {
           summary: "重新生成完整 A4 教案",
+          alignments: [{ objective: "用两处景物描写证据解释", process: "先独立圈画景物", assessment: "两处证据" }],
           operations: [
             { field: "objectives", replacement: "用两处景物描写证据解释济南冬天的温晴。" },
             { field: "process", replacement: "先独立圈画景物描写，再用证据卡说明温晴，最后与同伴核对理由。" },
@@ -480,10 +483,10 @@ describe("Pi production coordinator", () => {
     const approvals = await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id);
     expect(approvals).toHaveLength(1);
     expect(approvals[0]?.patch).toMatchObject({
-      operations: [
-        { field: "objectives" },
-        { field: "process" },
-      ],
+      operations: expect.arrayContaining([
+        expect.objectContaining({ field: "objectives" }),
+        expect.objectContaining({ field: "process" }),
+      ]),
     });
     expect(await repository.getLessonFile(ownerId, lessonFileId)).toMatchObject({ documentVersion: 1, document: { process: currentProcess } });
   });
@@ -506,6 +509,52 @@ describe("Pi production coordinator", () => {
       .toEqual([["complete_without_change", true]]);
     expect(await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id)).toHaveLength(0);
     expect(await repository.getLessonFile(ownerId, lessonFileId)).toMatchObject({ documentVersion: 0, document: lesson });
+  });
+
+  it("binds current standards before generation, repairs only the alignment and preserves approval delivery", async () => {
+    const { repository, created, faux, coordinator } = await fixture({ embedQuery: null });
+    const retrieve = vi.spyOn(repository, "searchCurriculumStandards").mockResolvedValue([{
+      id: "standard-reading", title: "合成阅读课标", kind: "public", passage: "能结合具体语言材料解释阅读理解的依据。", score: 1,
+    }]);
+    let proposalRequests = 0;
+    faux.setResponses([
+      context => {
+        expect(turnContextOf(context)).toContain("能结合具体语言材料解释阅读理解的依据");
+        expect(turnContextOf(context)).toContain('"authoringBasis"');
+        proposalRequests += 1;
+        return fauxAssistantMessage(fauxToolCall("propose_document_patch", {
+          summary: "编写可检查教案", operations: [{ field: "process", replacement: "独立圈画温晴证据，并向同伴解释理由。" }],
+          alignments: [{ objective: "寻找温晴的证据", assessment: "两处证据" }],
+        }), { stopReason: "toolUse" });
+      },
+      context => {
+        const last = (context.messages as any[]).filter(item => item.role === "toolResult").at(-1);
+        const error = JSON.parse(last.content[0].text);
+        expect(error.error).toBe("lesson_authoring_needs_revision");
+        expect(error.message).toContain("process");
+        expect(error.candidateText.process).toBe("独立圈画温晴证据，并向同伴解释理由。");
+        expect(repository.getLessonFile(ownerId, lessonFileId)).resolves.toMatchObject({ documentVersion: 0 });
+        proposalRequests += 1;
+        return fauxAssistantMessage(fauxToolCall("propose_document_patch", {
+          summary: "补齐目标与达成证据", baseToolCallId: error.revision.baseToolCallId,
+          alignments: [{ objective: "寻找温晴的证据", process: "圈画温晴证据", assessment: "两处证据", standard: { sourceId: "standard-reading", quote: "结合具体语言材料解释阅读理解的依据" } }],
+        }), { stopReason: "toolUse" });
+      },
+    ]);
+    const events: any[] = [];
+    await coordinator.start({ userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
+      message: "重新生成整份教案内容，暂不生成演示材料。", activeSectionId: "process", documentVersion: 0, attachmentIds: [],
+    }, event => { events.push(event); });
+    expect(retrieve).toHaveBeenCalledOnce();
+    expect(proposalRequests).toBe(2);
+    expect(events.filter(event => event.type === "tool.started").map(event => event.name)).toEqual(["propose_document_patch", "propose_document_patch"]);
+    const [approval] = await repository.listPendingApprovals(ownerId, created.thread.id, created.branch.id);
+    expect(approval.patch).toMatchObject({ citations: [{ id: "standard-reading" }], authoringBasis: { alignments: [{ standard: { sourceId: "standard-reading" } }] } });
+    await coordinator.resumeApproval({ userId: ownerId, runId: approval.runId, approvalId: approval.id, approved: true, idempotencyKey: "adopt-grounded-lesson", emit: () => undefined });
+    const file = await repository.getLessonFile(ownerId, lessonFileId);
+    expect(file?.documentVersion).toBe(1);
+    for (const field of ["objectives", "process", "assessment"] as const) expect(getLessonHighlightSpans(file!.document[field]).length).toBeGreaterThan(0);
+    expect(file?.document.homework).toBe(lesson.homework);
   });
 
   it("binds a delegated theme durably and resumes the original presentation after both real follow-up phrases", async () => {
@@ -565,7 +614,9 @@ describe("Pi production coordinator", () => {
     await coordinator.start({ ...input, message: "由你选择合适的主题" }, event => { events.push(event); });
     expect(requests).toBe(2);
     expect(calls).toEqual([]);
-    expect(await repository.getLatestRun(ownerId, input.threadId, input.branchId))
+    const failedRunId = events.find(event => event.type === "run.failed")?.runId;
+    expect(failedRunId).toBeTruthy();
+    expect(await repository.getRun(ownerId, failedRunId))
       .toMatchObject({ status: "failed", error: "presentation_planning_blocked" });
     expect((await repository.getBranch(ownerId, input.threadId, input.branchId))?.pendingInteraction)
       .toMatchObject({ kind: "presentation_generation", resourceId: lessonFileId });
@@ -603,7 +654,7 @@ describe("Pi production coordinator", () => {
   it("derives reading emphasis from the actual proposal without a redundant model repair round", async () => {
     const { repository, created, faux, coordinator } = await fixture();
     const input = { userId: ownerId, threadId: created.thread.id, branchId: created.branch.id,
-      activeSectionId: "process", documentVersion: 0, attachmentIds: [], message: "重新生成当前教案，精简一些" };
+      activeSectionId: "process", documentVersion: 0, attachmentIds: [], message: "精简教学过程" };
     faux.setResponses([
       fauxAssistantMessage(fauxToolCall("read_document", {}), { stopReason: "toolUse" }),
       fauxAssistantMessage(fauxToolCall("propose_document_patch", {
@@ -2389,6 +2440,7 @@ describe("Pi coordinator lesson questions, retrieval and diagnostics", () => {
       fauxAssistantMessage(fauxToolCall("search_curriculum_standards", { query: "等式基本性质" }), { stopReason: "toolUse" }),
       fauxAssistantMessage(fauxToolCall("propose_document_patch", { readingEmphasis: { kind: "not_needed", reason: "本次测试的局部教学调整无需新增笔迹。" },
         summary: "按教师给定目标、40分钟任务和独立评价要求起草，待教师核对；未声称课标已核实。",
+        alignments: [{ objective: "独立判断等式两边同加、同减", process: "独立操作并说明两边变化", assessment: "只答结论不计为解释达标" }],
         operations: Object.entries(draft).map(([field, replacement]) => ({ field, replacement })),
       }), { stopReason: "toolUse" }),
     ]);

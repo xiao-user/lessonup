@@ -9,6 +9,7 @@ describe("selection text agrees with the actual editable document", () => {
     "1. 能借助注释疏通《咏雪》文意，用\"谁+做了什么+结果\"格式复述故事。\n2. 把\"读—查—接—说\"接回句子。",
     "1. =={pink}目标一==\n2. =={blue}目标二==",
     "=={green}一 **二** 三==与=={red}四==",
+    "正确变形：=={blue}(3+2)+1=5+1==；==两边同加==。",
     "讨论 &amp;lt;原句&amp;gt; 的作用",
     "`&amp;lt;代码原文&amp;gt;`",
     "文字 &copy; &amp; &quot; &#39; &#x4e2d;",
@@ -28,6 +29,10 @@ describe("selection text agrees with the actual editable document", () => {
   it("extracts only actual rendered highlights across lists and tables", () => {
     expect(getLessonHighlightSpans("- =={pink}一 **二** 三==\n\n|甲|乙|\n|-|-|\n|=={blue}四==|五|\n\n`==代码示例==`\n\n\\==转义示例==\n\n```md\n==代码块==\n```"))
       .toEqual([{ text: "一 二 三", tone: "pink" }, { text: "四", tone: "blue" }]);
+  });
+  it("supports equations without consuming adjacent highlights or crossing lines", () => {
+    expect(getLessonHighlightSpans("=={pink}3+2=5==，==两边同加==；==不能跨\n行=="))
+      .toEqual([{ text: "3+2=5", tone: "pink" }, { text: "两边同加", tone: "yellow" }]);
   });
   it("does not treat hidden link destinations, markers or blank placeholders as visible quotes", () => {
     expect(lessonSelectionMatches("[原句](https://example.test)", "https://example.test")).toBe(false);

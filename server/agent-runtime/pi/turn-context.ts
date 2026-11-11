@@ -11,6 +11,7 @@ import {
 import { dashiThemeCatalogForPrompt } from "../../presentations/dashi-theme-catalog.js";
 import type { ToolSurface } from "../../conversation/turn-resolver.js";
 import type { PiCapturedProposal } from "./proposal-tools.js";
+import { authoringBasisForPrompt, lessonAuthoringInstruction, type LessonAuthoringBasis } from "./authoring-basis.js";
 
 const MAX_PRELOADED_SELECTION_CHARS = 2_400;
 
@@ -36,6 +37,7 @@ export function lessonTurnContext(
   presentationRequest?: string,
   recentPresentationDesigns: Array<{ theme: string; layouts: string[] }> = [],
   preloadedDocument?: LessonPlan,
+  authoringBasis?: LessonAuthoringBasis,
 ) {
   const fast = plan.executionLane === "fast";
   const readOnly = toolSurface === "read";
@@ -47,6 +49,7 @@ export function lessonTurnContext(
     ? preloadedDocument : undefined;
   return {
     resource: { type: "lesson_file", version: context.documentVersion },
+    ...(authoringBasis ? { authoringBasis: authoringBasisForPrompt(authoringBasis), authoringInstruction: lessonAuthoringInstruction } : {}),
     ...(boundDocument ? {
       canonicalDocument: {
         source: "server_bound_current_version",
